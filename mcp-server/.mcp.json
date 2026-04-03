@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "patient-companion": {
+      "command": "python",
+      "args": ["server.py"],
+      "env": {
+        "DATABASE_URL": "${DATABASE_URL}",
+        "DATA_TRACK": "synthea",
+        "SYNTHEA_OUTPUT_DIR": "${SYNTHEA_OUTPUT_DIR}"
+      }
+    }
+  }
+}

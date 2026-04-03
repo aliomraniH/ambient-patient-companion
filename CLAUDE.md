@@ -783,26 +783,26 @@ Update these as you build. They persist across sessions via CLAUDE.md.
 
 ### Session 1 — MCP Server
 ```
-- [ ] db/connection.py
-- [ ] adapters/base.py
-- [ ] generators/vitals_timeseries.py (4 generator functions)
-- [ ] generators/behavioral_model.py
-- [ ] generators/sdoh_profile.py
-- [ ] adapters/synthea.py
-- [ ] skills/__init__.py (auto-discovery loader)
-- [ ] skills/base.py (BaseSkill ABC)
-- [ ] skills/generate_patient.py
-- [ ] skills/generate_vitals.py
-- [ ] skills/generate_checkins.py
-- [ ] skills/compute_obt_score.py
-- [ ] skills/sdoh_assessment.py
-- [ ] skills/crisis_escalation.py
-- [ ] server.py
-- [ ] .mcp.json
-- [ ] Verified: python server.py shows 6+ skills loaded, no errors
-- [ ] Verified: grep -r "print(" skills/ → EMPTY
-- [ ] Verified: grep -rn "f\".*SELECT" . → EMPTY
-- [ ] Committed: "Session 1: FastMCP server + 6 skills + Synthea adapter"
+- [x] db/connection.py
+- [x] adapters/base.py
+- [x] generators/vitals_timeseries.py (4 generator functions)
+- [x] generators/behavioral_model.py
+- [x] generators/sdoh_profile.py
+- [x] adapters/synthea.py
+- [x] skills/__init__.py (auto-discovery loader)
+- [x] skills/base.py (BaseSkill ABC)
+- [x] skills/generate_patient.py
+- [x] skills/generate_vitals.py
+- [x] skills/generate_checkins.py
+- [x] skills/compute_obt_score.py
+- [x] skills/sdoh_assessment.py
+- [x] skills/crisis_escalation.py
+- [x] server.py
+- [x] .mcp.json
+- [x] Verified: python server.py shows 6+ skills loaded, no errors
+- [x] Verified: grep -r "print(" skills/ → EMPTY
+- [x] Verified: grep -rn "f\".*SELECT" . → EMPTY
+- [x] Committed: "Session 1: FastMCP server + 6 skills + Synthea adapter"
 ```
 
 ### Session 2 — Data + Pipeline
