@@ -347,3 +347,16 @@ CREATE TABLE IF NOT EXISTS raw_fhir_cache (
     data_source     VARCHAR(50) NOT NULL DEFAULT 'synthea',
     UNIQUE(patient_id, source_name, fhir_resource_id)
 );
+
+-- ============================================================
+-- 22. system_config (runtime key-value store)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS system_config (
+    key         VARCHAR(100) PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO system_config (key, value)
+VALUES ('DATA_TRACK', 'synthea')
+ON CONFLICT (key) DO NOTHING;

@@ -187,6 +187,38 @@ def transform_clinical_observations(
     return records
 
 
+def transform_encounters(
+    encounter_resources: list[dict[str, Any]],
+    patient_id: str,
+    data_source: str = "synthea",
+) -> list[dict[str, Any]]:
+    """Transform FHIR Encounter resources into clinical_events records."""
+    records = []
+    for r in encounter_resources:
+        type_coding = {}
+        if r.get("type"):
+            type_list = r["type"][0] if r["type"] else {}
+            type_coding = (
+                type_list.get("coding", [{}])[0]
+                if type_list.get("coding")
+                else {}
+            )
+
+        period = r.get("period", {})
+        event_date = _parse_date(period.get("start"))
+
+        records.append({
+            "id": str(uuid.uuid4()),
+            "patient_id": patient_id,
+            "event_type": type_coding.get("display", _safe_str(r.get("class", {}).get("code"))),
+            "event_date": event_date,
+            "description": type_coding.get("display", ""),
+            "source_system": "FHIR Encounter",
+            "data_source": data_source,
+        })
+    return records
+
+
 def transform_wearable_data(
     wearable_data: list[dict[str, Any]],
     patient_id: str,
@@ -208,3 +240,43 @@ def transform_wearable_data(
             "data_source": data_source,
         })
     return records
+
+
+def transform_by_type(
+    resource_type: str,
+    resources: list,
+    patient_id: str,
+    source: str,
+) -> list:
+    """Route HealthEx resource lists to the correct transform function.
+
+    Args:
+        resource_type: "labs" | "medications" | "conditions" |
+                       "encounters" | "summary"
+        resources: list of FHIR resource dicts from HealthEx response
+        patient_id: UUID of the patient in the database
+        source: data_source tag to apply to all output rows
+    """
+    mapping = {
+        "labs":        transform_clinical_observations,
+        "medications": transform_medications,
+        "conditions":  transform_conditions,
+        "encounters":  transform_encounters,
+        "summary":     transform_patient,
+    }
+    fn = mapping.get(resource_type)
+    if not fn:
+        raise ValueError(
+            f"Unknown resource_type: '{resource_type}'. "
+            f"Must be one of: {list(mapping.keys())}"
+        )
+    results = []
+    for resource in resources:
+        transformed = fn(resource, patient_id)
+        if isinstance(transformed, list):
+            results.extend(transformed)
+        elif transformed:
+            results.append(transformed)
+    for rec in results:
+        rec["data_source"] = source
+    return results

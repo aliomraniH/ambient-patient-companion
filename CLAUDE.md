@@ -317,7 +317,28 @@ raw_fhir_cache
   retrieved_at TIMESTAMPTZ DEFAULT NOW()
   processed BOOL DEFAULT false
   UNIQUE(patient_id, source_name, fhir_resource_id)
+
+system_config
+  key VARCHAR(100) PK
+  value TEXT NOT NULL
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+  Seed: DATA_TRACK=synthea
 ```
+
+### HealthEx Session-Bridge Tools
+
+Three tools in `skills/ingestion_tools.py` enable HealthEx data flow:
+
+```
+get_data_source_status    → session startup · active track + freshness
+ingest_from_healthex      → accepts HealthEx FHIR JSON → runs stages 4-8
+switch_data_track         → persists DATA_TRACK to system_config
+```
+
+Claude acts as the HealthEx client (holds OAuth token from connected session)
+and passes FHIR responses into the MCP for warehouse writing. The MCP server
+never calls HealthEx directly. `transform_by_type()` in `fhir_to_schema.py`
+routes resource types to the correct transformer.
 
 ---
 
@@ -880,7 +901,7 @@ MCP server:
 - [x] mcp-server/skills/compute_obt_score.py (data_source)
 - [x] mcp-server/skills/sdoh_assessment.py (data_source)
 - [x] mcp-server/skills/crisis_escalation.py (data_source + channel)
-- [x] mcp-server/skills/ingestion_tools.py (3 tools)
+- [x] mcp-server/skills/ingestion_tools.py (6 tools: check_data_freshness, run_ingestion, get_source_conflicts, get_data_source_status, ingest_from_healthex, switch_data_track)
 - [x] mcp-server/server.py (transport="stdio")
 - [x] mcp-server/.mcp.json (ANTHROPIC_API_KEY added)
 
