@@ -1,4 +1,5 @@
 import pytest
+import pytest_asyncio
 import asyncio
 import asyncpg
 import os
@@ -7,18 +8,17 @@ from datetime import date, timedelta
 
 pytest_plugins = ["pytest_asyncio"]
 
-# Skip all DB-dependent tests when DATABASE_URL is not set
 _has_db = "DATABASE_URL" in os.environ
 
 
 @pytest.fixture(scope="session")
 def event_loop():
-    loop = asyncio.get_event_loop_policy().new_event_loop()
+    loop = asyncio.new_event_loop()
     yield loop
     loop.close()
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session")
 async def db_pool():
     if not _has_db:
         pytest.skip("DATABASE_URL not set — skipping DB tests")
@@ -27,7 +27,7 @@ async def db_pool():
     await pool.close()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_patient(db_pool):
     pid = str(uuid.uuid4())
     async with db_pool.acquire() as conn:
@@ -47,7 +47,7 @@ async def test_patient(db_pool):
         await conn.execute("DELETE FROM patients WHERE id=$1", pid)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def caregiver_stress_patient(db_pool):
     """Patient with 7 days of deteriorating signals for crisis tests (S13)."""
     pid = str(uuid.uuid4())
