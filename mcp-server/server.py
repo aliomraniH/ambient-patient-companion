@@ -9,10 +9,10 @@ logger = logging.getLogger(__name__)
 from fastmcp import FastMCP
 from skills import load_skills
 
-mcp = FastMCP("patient-companion")
+mcp = FastMCP("PatientCompanion")
 
 # Auto-discover and register all skill tools
 load_skills(mcp)
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="stdio")

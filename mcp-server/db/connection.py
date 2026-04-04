@@ -17,7 +17,9 @@ async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
         logger.info("Creating asyncpg connection pool")
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+        _pool = await asyncpg.create_pool(
+            DATABASE_URL, min_size=2, max_size=10, command_timeout=30
+        )
     return _pool
 
 

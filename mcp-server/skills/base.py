@@ -18,13 +18,15 @@ async def log_skill_execution(
     status: str,
     output_data: dict | None = None,
     error_message: str | None = None,
+    data_source: str = "synthea",
 ) -> None:
     """Insert a row into skill_executions for audit trail."""
     await conn.execute(
         """
         INSERT INTO skill_executions
-            (skill_name, patient_id, status, output_data, error_message, execution_date)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (skill_name, patient_id, status, output_data, error_message,
+             execution_date, data_source)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         """,
         skill_name,
         patient_id,
@@ -32,4 +34,5 @@ async def log_skill_execution(
         json.dumps(output_data) if output_data else None,
         error_message,
         datetime.utcnow(),
+        data_source,
     )

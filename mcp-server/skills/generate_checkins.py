@@ -21,12 +21,14 @@ def register(mcp: FastMCP):
     async def generate_daily_checkins(
         patient_id: str,
         target_date: str = "",
+        scenario: str = "normal",
     ) -> str:
         """Generate a daily check-in and medication adherence records.
 
         Args:
             patient_id: UUID of the patient
             target_date: Date in YYYY-MM-DD format (defaults to today)
+            scenario: Behavior scenario (normal | caregiver_stress)
         """
         pool = await get_pool()
         try:
@@ -36,7 +38,13 @@ def register(mcp: FastMCP):
                 day = date.today()
 
             seed = int(day.toordinal())
-            checkins = generate_checkins(patient_id, day, day, seed)
+            crisis_months = set()
+            if scenario == "caregiver_stress":
+                crisis_months = {(day.year, day.month)}
+
+            checkins = generate_checkins(
+                patient_id, day, day, seed, crisis_months=crisis_months
+            )
 
             checkin_inserted = 0
             adherence_inserted = 0
@@ -48,13 +56,13 @@ def register(mcp: FastMCP):
                         """
                         INSERT INTO daily_checkins
                             (id, patient_id, checkin_date, mood, mood_numeric,
-                             energy, stress_level, sleep_hours, notes)
-                        VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8)
+                             energy, stress_level, sleep_hours, notes, data_source)
+                        VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9)
                         ON CONFLICT (patient_id, checkin_date) DO NOTHING
                         """,
                         ci["patient_id"], ci["checkin_date"], ci["mood"],
                         ci["mood_numeric"], ci["energy"], ci["stress_level"],
-                        ci["sleep_hours"], ci["notes"],
+                        ci["sleep_hours"], ci["notes"], "manual",
                     )
                     if "INSERT" in result:
                         checkin_inserted += 1
@@ -69,19 +77,21 @@ def register(mcp: FastMCP):
                 if med_ids:
                     adherence_recs = generate_adherence_records(
                         patient_id, med_ids, day, day, seed,
+                        crisis_months=crisis_months,
                     )
                     for ar in adherence_recs:
                         result = await conn.execute(
                             """
                             INSERT INTO medication_adherence
                                 (id, patient_id, medication_id, adherence_date,
-                                 taken, notes)
-                            VALUES (gen_random_uuid(), $1,$2,$3,$4,$5)
+                                 taken, notes, data_source)
+                            VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6)
                             ON CONFLICT (patient_id, medication_id, adherence_date)
                                 DO NOTHING
                             """,
                             ar["patient_id"], ar["medication_id"],
                             ar["adherence_date"], ar["taken"], ar["notes"],
+                            "synthea",
                         )
                         if "INSERT" in result:
                             adherence_inserted += 1
@@ -96,7 +106,7 @@ def register(mcp: FastMCP):
                 )
 
             return (
-                f"✓ Generated {checkin_inserted} check-in(s) and "
+                f"OK Generated {checkin_inserted} check-in(s) and "
                 f"{adherence_inserted} adherence records "
                 f"for patient {patient_id} on {day}"
             )

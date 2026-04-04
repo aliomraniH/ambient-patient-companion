@@ -55,15 +55,23 @@ def register(mcp: FastMCP):
             inserted = 0
             async with pool.acquire() as conn:
                 for r in all_readings:
+                    is_abnormal = False
+                    if r["metric_type"] == "bp_systolic" and r["value"] > 160:
+                        is_abnormal = True
+                    elif r["metric_type"] == "glucose_fasting" and r["value"] > 250:
+                        is_abnormal = True
+
                     result = await conn.execute(
                         """
                         INSERT INTO biometric_readings
-                            (id, patient_id, metric_type, value, unit, measured_at)
-                        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+                            (id, patient_id, metric_type, value, unit,
+                             measured_at, is_abnormal, day_of_month, data_source)
+                        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8)
                         ON CONFLICT DO NOTHING
                         """,
                         r["patient_id"], r["metric_type"],
                         r["value"], r["unit"], r["measured_at"],
+                        is_abnormal, day.day, "synthea",
                     )
                     if "INSERT" in result:
                         inserted += 1
@@ -74,7 +82,7 @@ def register(mcp: FastMCP):
                 )
 
             return (
-                f"✓ Generated {inserted} vital readings "
+                f"OK Generated {inserted} vital readings "
                 f"for patient {patient_id} on {day}"
             )
 

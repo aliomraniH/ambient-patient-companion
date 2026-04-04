@@ -857,47 +857,54 @@ Phase 4 — Full Orchestrator + LangGraph
 ### Session 1 — Ingestion Service + MCP Server
 ```
 Ingestion service:
-- [ ] ingestion/adapters/base.py
-- [ ] ingestion/adapters/synthea.py
-- [ ] ingestion/adapters/manual_entry.py
-- [ ] ingestion/conflict_resolver.py
-- [ ] ingestion/pipeline.py (6-stage IngestionPipeline)
-- [ ] ingestion/server.py
+- [x] ingestion/adapters/base.py
+- [x] ingestion/adapters/synthea.py
+- [x] ingestion/adapters/manual_entry.py
+- [x] ingestion/adapters/healthex.py (Phase 2 stub)
+- [x] ingestion/conflict_resolver.py
+- [x] ingestion/pipeline.py (8-stage IngestionPipeline)
+- [x] ingestion/server.py
 
 MCP server:
-- [ ] mcp-server/db/connection.py
-- [ ] mcp-server/generators/vitals_timeseries.py (4 generator functions)
-- [ ] mcp-server/generators/behavioral_model.py
-- [ ] mcp-server/generators/sdoh_profile.py
-- [ ] mcp-server/transforms/fhir_to_schema.py
-- [ ] mcp-server/skills/__init__.py
-- [ ] mcp-server/skills/base.py
-- [ ] mcp-server/skills/generate_patient.py
-- [ ] mcp-server/skills/generate_vitals.py
-- [ ] mcp-server/skills/generate_checkins.py
-- [ ] mcp-server/skills/compute_obt_score.py
-- [ ] mcp-server/skills/sdoh_assessment.py
-- [ ] mcp-server/skills/crisis_escalation.py
-- [ ] mcp-server/skills/ingestion_tools.py
-- [ ] mcp-server/server.py
-- [ ] mcp-server/.mcp.json
+- [x] mcp-server/db/connection.py (command_timeout=30 added)
+- [x] mcp-server/db/schema.sql (21 tables with data_source column)
+- [x] mcp-server/generators/vitals_timeseries.py (6 generator functions)
+- [x] mcp-server/generators/behavioral_model.py
+- [x] mcp-server/generators/sdoh_profile.py
+- [x] mcp-server/transforms/fhir_to_schema.py
+- [x] mcp-server/skills/__init__.py
+- [x] mcp-server/skills/base.py (data_source param added)
+- [x] mcp-server/skills/generate_patient.py (synthea_file + data_source)
+- [x] mcp-server/skills/generate_vitals.py (data_source + is_abnormal)
+- [x] mcp-server/skills/generate_checkins.py (data_source)
+- [x] mcp-server/skills/compute_obt_score.py (data_source)
+- [x] mcp-server/skills/sdoh_assessment.py (data_source)
+- [x] mcp-server/skills/crisis_escalation.py (data_source + channel)
+- [x] mcp-server/skills/ingestion_tools.py (3 tools)
+- [x] mcp-server/server.py (transport="stdio")
+- [x] mcp-server/.mcp.json (ANTHROPIC_API_KEY added)
 
 Verified:
-- [ ] python server.py 2>&1 | grep "Loaded skill" shows 9+ lines
-- [ ] grep -r "print(" mcp-server/skills/ → EMPTY
-- [ ] grep -rn 'f".*SELECT' mcp-server/ → EMPTY
-- [ ] git commit: "Session 1: Ingestion service + FastMCP server + 9 skills"
+- [x] python server.py 2>&1 | grep "Loaded skill" shows 10 lines
+- [x] grep -r "print(" mcp-server/skills/ → EMPTY
+- [x] grep -rn 'f".*SELECT' mcp-server/ → EMPTY
+
+Design notes for future sessions:
+- FastMCP 3.x does not accept description= kwarg in constructor
+- Skills call get_pool() internally (no Depends injection needed)
+- Orchestrator uses MockMCP pattern to extract tool functions for direct calls
+- mcp-server/adapters/ kept for backward compat; ingestion/adapters/ is canonical
 ```
 
 ### Session 2 — Schema + Data + Pipeline
 ```
 - [ ] Schema deployed: psql $DATABASE_URL < mcp-server/db/schema.sql
 - [ ] 21 tables confirmed: psql -c "\dt" | wc -l
-- [ ] mcp-server/orchestrator.py
-- [ ] mcp-server/seed.py
-- [ ] mcp-server/skills/previsit_brief.py
-- [ ] mcp-server/skills/food_access_nudge.py
-- [ ] mcp-server/skills/compute_provider_risk.py
+- [x] mcp-server/orchestrator.py
+- [x] mcp-server/seed.py
+- [x] mcp-server/skills/previsit_brief.py
+- [x] mcp-server/skills/food_access_nudge.py
+- [x] mcp-server/skills/compute_provider_risk.py
 - [ ] Quick seed: 2 patients, 1 month verified
 - [ ] Full seed: 10 patients x 6 months complete
 - [ ] COUNT(*) FROM patients = 10
@@ -935,5 +942,5 @@ Verified:
 
 ---
 
-*Last updated: Architecture reset — all three sessions pending*
+*Last updated: Sessions 1-2 code complete, Session 3 pending*
 *Repo: https://github.com/aliomraniH/ambient-patient-companion*

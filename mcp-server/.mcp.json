@@ -6,7 +6,8 @@
       "env": {
         "DATABASE_URL": "${DATABASE_URL}",
         "DATA_TRACK": "synthea",
-        "SYNTHEA_OUTPUT_DIR": "${SYNTHEA_OUTPUT_DIR}"
+        "SYNTHEA_OUTPUT_DIR": "${SYNTHEA_OUTPUT_DIR}",
+        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"
       }
     }
   }

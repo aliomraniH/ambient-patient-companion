@@ -131,21 +131,22 @@ def register(mcp: FastMCP):
                     await conn.execute(
                         """
                         INSERT INTO agent_interventions
-                            (id, patient_id, intervention_type, summary,
-                             delivered_at, source_skill)
-                        VALUES (gen_random_uuid(), $1, 'crisis_escalation', $2,
-                                $3, 'crisis_escalation')
+                            (id, patient_id, intervention_type, channel, summary,
+                             delivered_at, source_skill, data_source)
+                        VALUES (gen_random_uuid(), $1, 'escalation', 'provider_alert',
+                                $2, $3, 'crisis_escalation', $4)
                         """,
-                        patient_id, summary, datetime.utcnow(),
+                        patient_id, summary, datetime.utcnow(), "synthea",
                     )
 
                     await conn.execute(
                         """
                         INSERT INTO agent_memory_episodes
-                            (id, patient_id, episode_type, summary, occurred_at)
-                        VALUES (gen_random_uuid(), $1, 'crisis_detected', $2, $3)
+                            (id, patient_id, episode_type, summary, occurred_at,
+                             data_source)
+                        VALUES (gen_random_uuid(), $1, 'crisis_detected', $2, $3, $4)
                         """,
-                        patient_id, summary, datetime.utcnow(),
+                        patient_id, summary, datetime.utcnow(), "synthea",
                     )
 
                 await log_skill_execution(
