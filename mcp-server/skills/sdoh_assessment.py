@@ -47,8 +47,9 @@ def register(mcp: FastMCP):
                     result = await conn.execute(
                         """
                         INSERT INTO patient_sdoh_flags
-                            (id, patient_id, domain, severity, screening_date, notes)
-                        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+                            (id, patient_id, domain, severity, screening_date,
+                             notes, data_source)
+                        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6)
                         ON CONFLICT (patient_id, domain) DO UPDATE SET
                             severity = EXCLUDED.severity,
                             screening_date = EXCLUDED.screening_date,
@@ -56,7 +57,7 @@ def register(mcp: FastMCP):
                         """,
                         flag["patient_id"], flag["domain"],
                         flag["severity"], flag["screening_date"],
-                        flag["notes"],
+                        flag["notes"], "synthea",
                     )
                     flags_inserted += 1
 
@@ -66,13 +67,13 @@ def register(mcp: FastMCP):
                             """
                             INSERT INTO agent_interventions
                                 (id, patient_id, intervention_type, summary,
-                                 delivered_at, source_skill)
-                            VALUES (gen_random_uuid(), $1, 'sdoh_alert', $2, $3,
-                                    'sdoh_assessment')
+                                 delivered_at, source_skill, data_source)
+                            VALUES (gen_random_uuid(), $1, 'alert', $2, $3,
+                                    'sdoh_assessment', $4)
                             """,
                             patient_id,
                             f"SDoH flag: {flag['domain']} severity={flag['severity']}",
-                            datetime.utcnow(),
+                            datetime.utcnow(), "synthea",
                         )
                         interventions_inserted += 1
 

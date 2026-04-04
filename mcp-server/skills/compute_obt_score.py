@@ -234,8 +234,8 @@ def register(mcp: FastMCP):
                     """
                     INSERT INTO obt_scores
                         (id, patient_id, score_date, score, primary_driver,
-                         trend_direction, confidence, domain_scores)
-                    VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
+                         trend_direction, confidence, domain_scores, data_source)
+                    VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (patient_id, score_date) DO UPDATE SET
                         score = EXCLUDED.score,
                         primary_driver = EXCLUDED.primary_driver,
@@ -245,7 +245,7 @@ def register(mcp: FastMCP):
                     """,
                     patient_id, target, score, primary_driver,
                     trend_direction, confidence,
-                    json.dumps(domain_scores),
+                    json.dumps(domain_scores), "synthea",
                 )
 
                 # --- Write clinical fact ---
@@ -259,12 +259,13 @@ def register(mcp: FastMCP):
                     """
                     INSERT INTO clinical_facts
                         (id, patient_id, fact_type, category, summary,
-                         ttl_expires_at, source_skill)
+                         ttl_expires_at, source_skill, data_source)
                     VALUES (gen_random_uuid(), $1, 'obt_score', 'wellness',
-                            $2, NOW() + INTERVAL '30 days', 'compute_obt_score')
+                            $2, NOW() + INTERVAL '30 days', 'compute_obt_score',
+                            $3)
                     ON CONFLICT DO NOTHING
                     """,
-                    patient_id, summary,
+                    patient_id, summary, "synthea",
                 )
 
                 await log_skill_execution(
