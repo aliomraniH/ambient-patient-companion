@@ -16,7 +16,7 @@ They contain build specs, file orders, physiological ranges, schema, and accepta
 ```
 cc_01_architecture.png  — Five-layer system + dual-track data + 3-session map
 cc_02_session1_mcp.png  — Session 1: files in dependency order + OBT algorithm
-cc_03_session2_data.png — Session 2: 21-table schema + ingestion pipeline + seed targets
+cc_03_session2_data.png — Session 2: 22-table schema + ingestion pipeline + seed targets
 cc_04_session3_ui.png   — Session 3: component specs + data-testid requirements
 cc_05_acceptance.png    — 15-item acceptance criteria + daily pipeline + /compact strategy
 ```
@@ -76,7 +76,7 @@ ambient-patient-companion/
 │   ├── seed.py                      ← argparse: --patients 10 --months 6
 │   ├── db/
 │   │   ├── connection.py            ← asyncpg pool + get_pool()
-│   │   └── schema.sql               ← 21-table DDL (source of truth)
+│   │   └── schema.sql               ← 22-table DDL (source of truth)
 │   ├── generators/
 │   │   ├── vitals_timeseries.py     ← BP, glucose, HRV, steps generators
 │   │   ├── behavioral_model.py      ← mood, energy, adherence patterns
@@ -200,7 +200,7 @@ Jest 29         + React Testing Library 14 + MSW
 PostgreSQL 16   Replit Postgres (Neon-backed)
                 Connect: DATABASE_URL env var (Replit Secret)
                 Schema:  psql $DATABASE_URL < mcp-server/db/schema.sql
-                Tables:  21 total
+                Tables:  22 total
 ```
 
 ---
@@ -245,7 +245,7 @@ Phase 1: DATA_TRACK=synthea only. Do not activate healthex adapter.
 
 ---
 
-## 21-Table PostgreSQL Schema
+## 22-Table PostgreSQL Schema
 
 Full DDL in mcp-server/db/schema.sql.
 All tables have: data_source VARCHAR(50) NOT NULL DEFAULT 'synthea'
@@ -740,9 +740,9 @@ python mcp-server/orchestrator.py --daily  # run twice, same counts
 
 Commit message:
 ```
-Session 2: 21-table schema deployed, 10 patients seeded, orchestrator complete
+Session 2: 22-table schema deployed, 10 patients seeded, orchestrator complete
 
-- 21-table schema deployed to Replit Postgres
+- 22-table schema deployed to Replit Postgres
 - seed.py: 10 patients x 6 months (~18K biometric readings)
 - orchestrator.py: freshness-first daily pipeline
 - 3 new skills: previsit_brief, food_access_nudge, compute_provider_risk
@@ -888,7 +888,7 @@ Ingestion service:
 
 MCP server:
 - [x] mcp-server/db/connection.py (command_timeout=30 added)
-- [x] mcp-server/db/schema.sql (21 tables with data_source column)
+- [x] mcp-server/db/schema.sql (22 tables with data_source column)
 - [x] mcp-server/generators/vitals_timeseries.py (6 generator functions)
 - [x] mcp-server/generators/behavioral_model.py
 - [x] mcp-server/generators/sdoh_profile.py
@@ -920,7 +920,7 @@ Design notes for future sessions:
 ### Session 2 — Schema + Data + Pipeline
 ```
 - [ ] Schema deployed: psql $DATABASE_URL < mcp-server/db/schema.sql
-- [ ] 21 tables confirmed: psql -c "\dt" | wc -l
+- [ ] 22 tables confirmed: psql -c "\dt" | wc -l
 - [x] mcp-server/orchestrator.py
 - [x] mcp-server/seed.py
 - [x] mcp-server/skills/previsit_brief.py
@@ -932,7 +932,7 @@ Design notes for future sessions:
 - [ ] COUNT(*) FROM biometric_readings > 10000
 - [ ] COUNT(*) FROM source_freshness = 10
 - [ ] Pipeline idempotent (run twice, same counts)
-- [ ] git commit: "Session 2: 21-table schema deployed, 10 patients seeded"
+- [ ] git commit: "Session 2: 22-table schema deployed, 10 patients seeded"
 ```
 
 ### Session 3 — Replit App UI
