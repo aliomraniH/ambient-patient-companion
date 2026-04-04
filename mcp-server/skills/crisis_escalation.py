@@ -43,6 +43,7 @@ def register(mcp: FastMCP):
                 target = date.today()
 
             lookback = target - timedelta(days=7)
+            lookback_plus_one = target + timedelta(days=1)
             triggers: list[str] = []
 
             async with pool.acquire() as conn:
@@ -53,10 +54,10 @@ def register(mcp: FastMCP):
                     WHERE patient_id = $1
                       AND metric_type = 'bp_systolic'
                       AND measured_at >= $2
-                      AND measured_at < $3 + INTERVAL '1 day'
+                      AND measured_at < $3
                     ORDER BY measured_at DESC LIMIT 5
                     """,
-                    patient_id, lookback, target,
+                    patient_id, lookback, lookback_plus_one,
                 )
                 for row in bp_rows:
                     v = float(row["value"])
@@ -74,10 +75,10 @@ def register(mcp: FastMCP):
                     WHERE patient_id = $1
                       AND metric_type = 'glucose_fasting'
                       AND measured_at >= $2
-                      AND measured_at < $3 + INTERVAL '1 day'
+                      AND measured_at < $3
                     ORDER BY measured_at DESC LIMIT 5
                     """,
-                    patient_id, lookback, target,
+                    patient_id, lookback, lookback_plus_one,
                 )
                 for row in glc_rows:
                     if float(row["value"]) > 250:
@@ -158,12 +159,12 @@ def register(mcp: FastMCP):
                     },
                 )
 
-            if triggers:
-                return (
-                    f"⚠ CRISIS ESCALATION for patient {patient_id}: "
-                    f"{len(triggers)} trigger(s) — {'; '.join(triggers)}"
-                )
-            return f"✓ No crisis indicators for patient {patient_id} on {target}"
+            return json.dumps({
+                "escalation_triggered": bool(triggers),
+                "triggers": triggers,
+                "patient_id": patient_id,
+                "date": str(target),
+            })
 
         except Exception as e:
             logger.error("run_crisis_escalation failed: %s", e)
