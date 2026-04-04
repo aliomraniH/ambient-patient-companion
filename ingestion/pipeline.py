@@ -23,6 +23,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+# Allow importing transforms from mcp-server/
+_mcp_server_dir = os.path.join(os.path.dirname(__file__), "..", "mcp-server")
+if _mcp_server_dir not in sys.path:
+    sys.path.insert(0, _mcp_server_dir)
+
 from ingestion.adapters.synthea import SyntheaAdapter
 from ingestion.conflict_resolver import ConflictResolver
 
@@ -107,6 +112,136 @@ class IngestionPipeline:
                 False,
                 self.adapter_name,
             )
+
+    async def _write_to_warehouse(self, records: list[dict], conn) -> int:
+        """Stage 7: Write resolved records to warehouse tables.
+
+        Determines the target table from the record fields and uses
+        parameterized INSERT ... ON CONFLICT for idempotent writes.
+        """
+        written = 0
+        for rec in records:
+            # Remove metadata keys before writing
+            table = rec.pop("_table", None)
+            rec.pop("_conflict_key", None)
+
+            try:
+                if "metric_type" in rec:
+                    # biometric_readings
+                    await conn.execute(
+                        """
+                        INSERT INTO biometric_readings
+                            (id, patient_id, metric_type, value, unit,
+                             measured_at, data_source)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        rec.get("id", str(uuid.uuid4())),
+                        rec.get("patient_id", ""),
+                        rec.get("metric_type", ""),
+                        rec.get("value", 0),
+                        rec.get("unit", ""),
+                        rec.get("measured_at"),
+                        rec.get("data_source", self.adapter_name),
+                    )
+                elif "clinical_status" in rec and "onset_date" in rec:
+                    # patient_conditions
+                    await conn.execute(
+                        """
+                        INSERT INTO patient_conditions
+                            (id, patient_id, code, display, system,
+                             onset_date, clinical_status, data_source)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        rec.get("id", str(uuid.uuid4())),
+                        rec.get("patient_id", ""),
+                        rec.get("code", ""),
+                        rec.get("display", ""),
+                        rec.get("system", ""),
+                        rec.get("onset_date"),
+                        rec.get("clinical_status", "active"),
+                        rec.get("data_source", self.adapter_name),
+                    )
+                elif "authored_on" in rec and "status" in rec:
+                    # patient_medications
+                    await conn.execute(
+                        """
+                        INSERT INTO patient_medications
+                            (id, patient_id, code, display, system,
+                             status, authored_on, data_source)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        rec.get("id", str(uuid.uuid4())),
+                        rec.get("patient_id", ""),
+                        rec.get("code", ""),
+                        rec.get("display", ""),
+                        rec.get("system", ""),
+                        rec.get("status", "active"),
+                        rec.get("authored_on"),
+                        rec.get("data_source", self.adapter_name),
+                    )
+                elif "event_type" in rec:
+                    # clinical_events
+                    await conn.execute(
+                        """
+                        INSERT INTO clinical_events
+                            (id, patient_id, event_type, event_date,
+                             description, source_system, data_source)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        rec.get("id", str(uuid.uuid4())),
+                        rec.get("patient_id", ""),
+                        rec.get("event_type", ""),
+                        rec.get("event_date"),
+                        rec.get("description", ""),
+                        rec.get("source_system", ""),
+                        rec.get("data_source", self.adapter_name),
+                    )
+                elif "mrn" in rec:
+                    # patients
+                    await conn.execute(
+                        """
+                        INSERT INTO patients
+                            (id, mrn, first_name, last_name, birth_date,
+                             gender, race, ethnicity, address_line, city,
+                             state, zip_code, is_synthetic, data_source)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                                $11, $12, $13, $14)
+                        ON CONFLICT (mrn) DO UPDATE SET
+                            first_name = EXCLUDED.first_name,
+                            last_name = EXCLUDED.last_name,
+                            birth_date = EXCLUDED.birth_date,
+                            gender = EXCLUDED.gender,
+                            race = EXCLUDED.race,
+                            ethnicity = EXCLUDED.ethnicity,
+                            data_source = EXCLUDED.data_source
+                        """,
+                        rec.get("id", str(uuid.uuid4())),
+                        rec.get("mrn", ""),
+                        rec.get("first_name", ""),
+                        rec.get("last_name", ""),
+                        rec.get("birth_date"),
+                        rec.get("gender", ""),
+                        rec.get("race", ""),
+                        rec.get("ethnicity", ""),
+                        rec.get("address_line", ""),
+                        rec.get("city", ""),
+                        rec.get("state", ""),
+                        rec.get("zip_code", ""),
+                        rec.get("is_synthetic", True),
+                        rec.get("data_source", self.adapter_name),
+                    )
+                else:
+                    logger.warning("Unrecognized record shape, skipping: %s", list(rec.keys()))
+                    continue
+                written += 1
+            except Exception as e:
+                logger.error("Failed to write record: %s", e)
+
+        return written
 
     async def _update_freshness(self, patient_id: str, records_count: int, conn) -> None:
         """Stage 8: Update source_freshness after successful ingestion."""
@@ -210,11 +345,45 @@ class IngestionPipeline:
                 # Stage 4: Cache raw bundle
                 await self._cache_raw_bundle(patient_id, target_bundle, conn)
 
-                # Stages 5-7 are handled by the MCP skill pipeline
-                # (transforms + conflict resolution + warehouse write)
-                # The pipeline caches the raw data; skills do the transform+write.
+                # Stage 5: Normalization — transform FHIR to DB records
+                from transforms.fhir_to_schema import transform_by_type
 
-                records_upserted = len(target_bundle.get("entry", []))
+                # Map standard FHIR resourceTypes to transform_by_type keys
+                fhir_type_map = {
+                    "Patient": "summary",
+                    "Condition": "conditions",
+                    "MedicationRequest": "medications",
+                    "Observation": "labs",
+                    "Encounter": "encounters",
+                }
+
+                # Group resources by type
+                resources_by_type: dict[str, list] = {}
+                for entry in target_bundle.get("entry", []):
+                    resource = entry.get("resource", {})
+                    rt = resource.get("resourceType", "")
+                    resources_by_type.setdefault(rt, []).append(resource)
+
+                records: list[dict] = []
+                for fhir_rt, resources in resources_by_type.items():
+                    mapped_type = fhir_type_map.get(fhir_rt)
+                    if not mapped_type:
+                        continue
+                    try:
+                        records.extend(
+                            transform_by_type(
+                                mapped_type, resources, patient_id,
+                                source=self.adapter_name,
+                            )
+                        )
+                    except ValueError:
+                        pass  # unknown resource type — skip
+
+                # Stage 6: Conflict resolution
+                resolved = ConflictResolver.apply(records, policy="patient_first")
+
+                # Stage 7: Warehouse write
+                records_upserted = await self._write_to_warehouse(resolved, conn)
 
                 # Stage 8: Update freshness
                 await self._update_freshness(patient_id, records_upserted, conn)

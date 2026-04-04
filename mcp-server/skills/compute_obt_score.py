@@ -63,6 +63,7 @@ def register(mcp: FastMCP):
             window_start = target - timedelta(days=30)
             week_start = target - timedelta(days=7)
             prev_week_start = target - timedelta(days=14)
+            target_plus_one = target + timedelta(days=1)
 
             async with pool.acquire() as conn:
                 # --- BP data ---
@@ -72,10 +73,10 @@ def register(mcp: FastMCP):
                     WHERE patient_id = $1
                       AND metric_type = 'bp_systolic'
                       AND measured_at >= $2
-                      AND measured_at < $3 + INTERVAL '1 day'
+                      AND measured_at < $3
                     ORDER BY measured_at
                     """,
-                    patient_id, window_start, target,
+                    patient_id, window_start, target_plus_one,
                 )
                 bp_values = [float(r["value"]) for r in bp_rows]
 
@@ -86,10 +87,10 @@ def register(mcp: FastMCP):
                     WHERE patient_id = $1
                       AND metric_type = 'glucose_fasting'
                       AND measured_at >= $2
-                      AND measured_at < $3 + INTERVAL '1 day'
+                      AND measured_at < $3
                     ORDER BY measured_at
                     """,
-                    patient_id, window_start, target,
+                    patient_id, window_start, target_plus_one,
                 )
                 glc_values = [float(r["value"]) for r in glc_rows]
 
@@ -279,11 +280,15 @@ def register(mcp: FastMCP):
                     },
                 )
 
-            return (
-                f"✓ OBT score for patient {patient_id} on {target}: "
-                f"{score}/100 (driver={primary_driver}, "
-                f"trend={trend_direction}, confidence={confidence})"
-            )
+            return json.dumps({
+                "score": score,
+                "primary_driver": primary_driver,
+                "trend_direction": trend_direction,
+                "confidence": confidence,
+                "domain_scores": domain_scores,
+                "patient_id": patient_id,
+                "date": str(target),
+            })
 
         except Exception as e:
             logger.error("compute_obt_score failed: %s", e)

@@ -32,3 +32,9 @@ outputType = "webview"
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+SYNTHEA_OUTPUT_DIR = "/home/runner/synthea-output"
+DATA_TRACK = "synthea"

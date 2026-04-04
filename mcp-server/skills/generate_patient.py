@@ -6,7 +6,7 @@ import json
 import logging
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 
 from fastmcp import FastMCP
 
@@ -125,6 +125,16 @@ def register(mcp: FastMCP):
             if not mrn:
                 mrn = f"SYN-{uuid.uuid4().hex[:8].upper()}"
 
+            # Parse birth_date to date object (asyncpg requires date, not str)
+            birth_date_obj: date | None = None
+            if isinstance(birth_date, date):
+                birth_date_obj = birth_date
+            elif isinstance(birth_date, str) and birth_date:
+                try:
+                    birth_date_obj = date.fromisoformat(birth_date[:10])
+                except ValueError:
+                    birth_date_obj = None
+
             async with pool.acquire() as conn:
                 # Insert patient
                 await conn.execute(
@@ -147,7 +157,7 @@ def register(mcp: FastMCP):
                         zip_code = EXCLUDED.zip_code,
                         insurance_type = EXCLUDED.insurance_type
                     """,
-                    patient_id, mrn, first_name, last_name, birth_date or None,
+                    patient_id, mrn, first_name, last_name, birth_date_obj,
                     gender, race, ethnicity, address_line, city, state, zip_code,
                     insurance_type, is_synthetic, datetime.utcnow(), "synthea",
                 )

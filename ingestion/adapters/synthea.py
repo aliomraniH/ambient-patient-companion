@@ -9,9 +9,16 @@ from __future__ import annotations
 import glob
 import json
 import logging
+import os
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
+
+# Allow importing generators from mcp-server/
+_mcp_server_dir = os.path.join(os.path.dirname(__file__), "..", "..", "mcp-server")
+if _mcp_server_dir not in sys.path:
+    sys.path.insert(0, _mcp_server_dir)
 
 from ingestion.adapters.base import BaseAdapter, PatientRecord
 
@@ -68,19 +75,33 @@ class SyntheaAdapter(BaseAdapter):
         observations = _extract_resources(fhir_bundle, "Observation")
         encounters = _extract_resources(fhir_bundle, "Encounter")
 
-        # Build wearable data stubs if augmenting
+        # Generate realistic wearable data from vitals generators
         wearable_data: list[dict[str, Any]] = []
         if augment_wearables:
-            wearable_data = [
-                {"type": "vitals_placeholder", "patient_id": patient_ref_id}
-            ]
+            from generators.vitals_timeseries import (
+                generate_bp_readings,
+                generate_glucose_readings,
+                generate_hrv_readings,
+                generate_steps_readings,
+            )
 
-        # Build behavioral signal stubs if augmenting
+            end_date = date.today()
+            start_date = end_date - timedelta(days=180)
+            wearable_data = (
+                generate_bp_readings(patient_ref_id, start_date, end_date)
+                + generate_glucose_readings(patient_ref_id, start_date, end_date)
+                + generate_hrv_readings(patient_ref_id, start_date, end_date)
+                + generate_steps_readings(patient_ref_id, start_date, end_date)
+            )
+
+        # Generate realistic behavioral signals from behavioral model
         behavioral_signals: list[dict[str, Any]] = []
         if augment_behavioral:
-            behavioral_signals = [
-                {"type": "checkin_placeholder", "patient_id": patient_ref_id}
-            ]
+            from generators.behavioral_model import generate_checkins
+
+            end_date = date.today()
+            start_date = end_date - timedelta(days=180)
+            behavioral_signals = generate_checkins(patient_ref_id, start_date, end_date)
 
         record = PatientRecord(
             patient_ref_id=patient_ref_id,

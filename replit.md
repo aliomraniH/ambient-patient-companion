@@ -20,8 +20,10 @@ ambient-patient-companion/
 │   └── lib/db.ts        ← PostgreSQL pool (pg)
 ├── mcp-server/          ← FastMCP Python agent server
 │   ├── db/schema.sql    ← 22-table PostgreSQL schema (source of truth)
-│   ├── skills/          ← Agent skill implementations
-│   └── seed.py          ← Data seeding: python mcp-server/seed.py --patients 10 --months 6
+│   ├── skills/          ← 10 MCP agent skill implementations
+│   ├── seed.py          ← Data seeding: python mcp-server/seed.py --patients 10 --months 6
+│   ├── orchestrator.py  ← Daily pipeline sequencer
+│   └── tests/           ← pytest test suite (44 backend tests)
 └── ingestion/           ← Data ingestion service (Synthea FHIR)
 ```
 
@@ -33,14 +35,18 @@ ambient-patient-companion/
 ## Database
 
 - **Provider**: Replit built-in PostgreSQL
-- **Schema**: `mcp-server/db/schema.sql` (22 tables)
+- **Schema**: `mcp-server/db/schema.sql` (22 tables, fully FK-constrained)
 - **Connection**: `DATABASE_URL` environment variable (auto-set by Replit)
-- **Note**: `is_stale` column in `source_freshness` table is a regular boolean (not a generated column — PostgreSQL requires immutable expressions for generated columns and `NOW()` is not immutable)
+- **Key constraints**:
+  - `is_stale` in `source_freshness` is a regular boolean (not generated — PostgreSQL requires immutable expressions for generated columns)
+  - `biometric_readings` has a UNIQUE index on `(patient_id, metric_type, measured_at)` for idempotent inserts
 
 ## Environment Variables
 
 - `DATABASE_URL` — PostgreSQL connection string (set automatically by Replit database)
 - `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` — also set automatically
+- `SYNTHEA_OUTPUT_DIR=/home/runner/synthea-output` — FHIR fixture directory
+- `DATA_TRACK=synthea` — data track selector
 
 ## Seeding Data
 
@@ -48,13 +54,55 @@ ambient-patient-companion/
 python mcp-server/seed.py --patients 10 --months 6
 ```
 
+Generates synthetic FHIR fixtures first:
+```bash
+python mcp-server/scripts/create_minimal_fixtures.py
+```
+
+## Testing
+
+### Backend (Python/pytest) — 44 tests
+```bash
+cd mcp-server && pytest tests/ -v
+```
+
+### Frontend (Next.js/Jest) — 37 tests
+```bash
+cd replit-app && npm test
+```
+
 ## Package Manager
 
 - Frontend: `npm` (package-lock.json in replit-app/)
-- Backend: Python 3.12 (pip / requirements)
+- Backend: Python 3.12 (pip / requirements); pytest-asyncio==0.21.2 required
+
+## MCP Skills (10 implemented)
+
+| Skill | Function |
+|-------|----------|
+| `generate_patient.py` | Imports FHIR patient bundles into PostgreSQL |
+| `generate_vitals.py` | Generates daily biometric readings (idempotent) |
+| `generate_checkins.py` | Creates daily check-in records |
+| `compute_obt_score.py` | Computes Optimal Being Trajectory scores (returns JSON) |
+| `crisis_escalation.py` | Detects crisis indicators (returns JSON with escalation_triggered) |
+| `sdoh_assessment.py` | Social Determinants of Health assessment |
+| `ingestion_tools.py` | Data freshness checks and source status |
+| `previsit_brief.py` | Pre-visit clinical brief generation |
+| `food_access_nudge.py` | Food access intervention nudges |
+| `compute_provider_risk.py` | Provider-level risk score computation |
+
+## Key Bug Fixes Applied
+
+1. **generate_patient.py**: `birth_date` string→`date` object conversion for asyncpg
+2. **compute_obt_score.py**: Pre-computed `target_plus_one` to avoid asyncpg type error with `$N + INTERVAL '1 day'`; returns JSON
+3. **crisis_escalation.py**: Same INTERVAL fix; returns JSON with `escalation_triggered` field
+4. **pytest-asyncio**: Pinned to 0.21.2 (1.x broke session-scoped event_loop pattern)
+5. **schema.sql**: Added FK constraints to 10 previously unlinked tables; added UNIQUE index on biometric_readings
 
 ## Key Notes
 
 - Next.js configured with `-p 5000 -H 0.0.0.0` for Replit compatibility
 - All DB queries are server-side only (API routes + server components)
 - Phase 1: Synthea synthetic data only; Phase 2+ adds HealthEx, device APIs, multi-user auth
+- asyncpg rule: never pass Python `date` objects in `$N + INTERVAL` expressions — pre-compute bounds in Python
+- MCP rule: never use `print()` in skills — all logging goes to `sys.stderr`
