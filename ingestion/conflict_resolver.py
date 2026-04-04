@@ -82,6 +82,61 @@ class ConflictResolver:
 
         return resolved
 
+    @staticmethod
+    def apply(records: list[dict[str, Any]], policy: str = "patient_first") -> list[dict[str, Any]]:
+        """Canonical conflict resolution interface.
+
+        Groups records by (_table, _conflict_key fields) and keeps the
+        highest-priority source per group.  Called by pipeline.run() and
+        ingest_from_healthex().
+
+        Args:
+            records: List of record dicts (may contain _table and _conflict_key metadata).
+            policy: Resolution policy (currently only "patient_first").
+
+        Returns:
+            De-duplicated list with conflicts resolved by source priority.
+        """
+        if not records:
+            return []
+
+        grouped: dict[tuple, list[dict[str, Any]]] = {}
+        for rec in records:
+            conflict_keys = rec.get("_conflict_key", [])
+            if conflict_keys:
+                key = tuple(str(rec.get(k, "")) for k in conflict_keys)
+            else:
+                # No conflict key — treat as unique (no dedup)
+                key = (str(id(rec)),)
+            table = rec.get("_table", "unknown")
+            group_key = (table,) + key
+            grouped.setdefault(group_key, []).append(rec)
+
+        resolved: list[dict[str, Any]] = []
+        conflicts_detected = 0
+
+        for group_key, group in grouped.items():
+            if len(group) == 1:
+                resolved.append(group[0])
+                continue
+            conflicts_detected += 1
+            best = max(
+                group,
+                key=lambda r: SOURCE_PRIORITY.get(
+                    r.get("data_source", "synthea"), 0
+                ),
+            )
+            resolved.append(best)
+
+        if conflicts_detected > 0:
+            logger.info(
+                "apply(): resolved %d conflicts using policy=%s",
+                conflicts_detected,
+                policy,
+            )
+
+        return resolved
+
     def get_priority(self, source_name: str) -> int:
         """Return the priority rank of a data source."""
         return SOURCE_PRIORITY.get(source_name, 0)
