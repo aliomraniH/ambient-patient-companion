@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS patient_sdoh_flags (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS biometric_readings (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patient_id      UUID NOT NULL,
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     metric_type     VARCHAR(50) NOT NULL,
     value           DOUBLE PRECISION NOT NULL,
     unit            VARCHAR(20),
@@ -93,13 +93,15 @@ CREATE TABLE IF NOT EXISTS biometric_readings (
 );
 CREATE INDEX IF NOT EXISTS idx_biometric_patient_metric_time
     ON biometric_readings(patient_id, metric_type, measured_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_biometric_readings_unique
+    ON biometric_readings(patient_id, metric_type, measured_at);
 
 -- ============================================================
 -- 6. daily_checkins
 -- ============================================================
 CREATE TABLE IF NOT EXISTS daily_checkins (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patient_id      UUID NOT NULL,
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     checkin_date    DATE NOT NULL,
     mood            VARCHAR(20),
     mood_numeric    INT,
@@ -118,7 +120,7 @@ CREATE TABLE IF NOT EXISTS daily_checkins (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS medication_adherence (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patient_id      UUID NOT NULL,
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     medication_id   UUID NOT NULL,
     adherence_date  DATE NOT NULL,
     taken           BOOLEAN DEFAULT false,
@@ -133,7 +135,7 @@ CREATE TABLE IF NOT EXISTS medication_adherence (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS clinical_events (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patient_id      UUID NOT NULL,
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     event_type      VARCHAR(100),
     event_date      TIMESTAMPTZ,
     description     TEXT,
@@ -148,7 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_clinical_events_patient_date
 -- ============================================================
 CREATE TABLE IF NOT EXISTS care_gaps (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patient_id      UUID NOT NULL,
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     gap_type        VARCHAR(100),
     description     TEXT,
     status          VARCHAR(20) DEFAULT 'open',
@@ -164,7 +166,7 @@ CREATE INDEX IF NOT EXISTS idx_care_gaps_patient_status
 -- ============================================================
 CREATE TABLE IF NOT EXISTS obt_scores (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patient_id      UUID NOT NULL,
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     score_date      DATE NOT NULL,
     score           DOUBLE PRECISION NOT NULL,
     primary_driver  VARCHAR(50),
@@ -180,7 +182,7 @@ CREATE TABLE IF NOT EXISTS obt_scores (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS clinical_facts (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patient_id      UUID NOT NULL,
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     fact_type       VARCHAR(100),
     category        VARCHAR(100),
     summary         TEXT,
@@ -212,7 +214,7 @@ CREATE TABLE IF NOT EXISTS behavioral_correlations (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS agent_interventions (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patient_id      UUID NOT NULL,
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     intervention_type VARCHAR(100),
     channel         VARCHAR(50),
     summary         TEXT,
@@ -301,15 +303,12 @@ CREATE TABLE IF NOT EXISTS data_sources (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS source_freshness (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patient_id      UUID NOT NULL,
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     source_name     VARCHAR(50) NOT NULL,
     last_ingested_at TIMESTAMPTZ,
     records_count   INT DEFAULT 0,
     ttl_hours       INT DEFAULT 24,
-    is_stale        BOOLEAN GENERATED ALWAYS AS (
-        last_ingested_at IS NULL OR
-        last_ingested_at + (ttl_hours * INTERVAL '1 hour') < NOW()
-    ) STORED,
+    is_stale        BOOLEAN DEFAULT true,
     data_source     VARCHAR(50) NOT NULL DEFAULT 'synthea',
     UNIQUE(patient_id, source_name)
 );
@@ -319,7 +318,7 @@ CREATE TABLE IF NOT EXISTS source_freshness (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS ingestion_log (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patient_id      UUID NOT NULL,
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     source_name     VARCHAR(50),
     status          VARCHAR(20),
     records_upserted INT DEFAULT 0,
