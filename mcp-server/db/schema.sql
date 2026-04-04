@@ -306,10 +306,7 @@ CREATE TABLE IF NOT EXISTS source_freshness (
     last_ingested_at TIMESTAMPTZ,
     records_count   INT DEFAULT 0,
     ttl_hours       INT DEFAULT 24,
-    is_stale        BOOLEAN GENERATED ALWAYS AS (
-        last_ingested_at IS NULL OR
-        last_ingested_at + (ttl_hours * INTERVAL '1 hour') < NOW()
-    ) STORED,
+    is_stale        BOOLEAN DEFAULT true,
     data_source     VARCHAR(50) NOT NULL DEFAULT 'synthea',
     UNIQUE(patient_id, source_name)
 );
