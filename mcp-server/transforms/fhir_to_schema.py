@@ -272,7 +272,12 @@ def transform_by_type(
         )
     results = []
     for resource in resources:
-        transformed = fn(resource, patient_id)
+        if fn is transform_patient:
+            # transform_patient takes (resource, data_source) — no patient_id
+            transformed = fn(resource)
+        else:
+            # All other transforms take (resource_list, patient_id, data_source)
+            transformed = fn([resource], patient_id)
         if isinstance(transformed, list):
             results.extend(transformed)
         elif transformed:
