@@ -1,0 +1,399 @@
+Read CLAUDE.md first. Then read all five reference card images in order:
+cc_01_architecture.png through cc_05_acceptance.png.
+
+Do not write any code yet. This is an audit and alignment pass.
+
+─────────────────────────────────────────────────────────────────
+⚠  GOLDEN RULE — READ BEFORE ANYTHING ELSE
+─────────────────────────────────────────────────────────────────
+
+Synthetic data must work end-to-end before HealthEx is ever touched.
+
+This is not optional and cannot be skipped or reordered. The entire
+point of Track A (Synthea) is to validate every layer of the system
+under controlled conditions — known data, no auth, no latency, no
+external dependency — so that when HealthEx connects in Phase 2,
+any problem is guaranteed to be in the HealthEx adapter, not buried
+somewhere in the pipeline, schema, agents, or UX.
+
+The test order is fixed:
+
+  STEP 0  Synthea seed populates warehouse (10 patients, 6 months)
+  STEP 1  Daily pipeline runs clean on synthetic data (idempotent)
+  STEP 2  All 52 backend tests pass on synthetic data
+  STEP 3  All 38 frontend tests pass on synthetic data
+  STEP 4  OBT scores compute correctly for all 10 patients
+  STEP 5  Replit app renders correctly from synthetic warehouse data
+  STEP 6  get_data_source_status() confirms active_track='synthea'
+  ──────  only after all 6 steps pass ──────────────────────────
+  STEP 7  HealthEx session-bridge tested (ingest_from_healthex)
+  STEP 8  switch_data_track('healthex') and re-run pipeline
+
+Do not attempt STEP 7 or STEP 8 if any of STEPS 0-6 have failures.
+A broken synthetic pipeline will produce misleading HealthEx errors.
+
+─────────────────────────────────────────────────────────────────
+PART A — IMAGE AUDIT (read and report before touching anything)
+─────────────────────────────────────────────────────────────────
+
+For each file below, check whether it exists and whether its content
+matches what the reference cards describe. Report findings as a table:
+FILE | STATUS | GAP
+
+STATUS values:
+  MATCH    — file exists and content matches the cards exactly
+  PARTIAL  — file exists but is missing something shown on the cards
+  MISSING  — file does not exist yet
+  EXTRA    — file exists with content not reflected in any card
+
+mcp-server/db/schema.sql
+  → cc_03 shows 22 tables. Count the CREATE TABLE statements.
+  → Confirm system_config present with correct columns:
+    key VARCHAR(100) PK · value TEXT · updated_at TIMESTAMPTZ
+  → Confirm seed INSERT for DATA_TRACK=synthea exists.
+  → Confirm 4 ingestion management tables:
+    data_sources · source_freshness · ingestion_log · raw_fhir_cache
+  → Confirm data_source VARCHAR(50) NOT NULL DEFAULT 'synthea' exists on:
+    patients · biometric_readings · daily_checkins · medication_adherence
+    clinical_events · care_gaps · obt_scores · clinical_facts
+    agent_interventions · agent_memory_episodes · skill_executions
+    provider_risk_scores
+
+mcp-server/skills/ingestion_tools.py
+  → cc_02 lists 5 tools. Confirm all 5 exist inside register(mcp):
+    check_data_freshness · run_ingestion · get_source_conflicts
+    get_data_source_status · ingest_from_healthex · switch_data_track
+  → For ingest_from_healthex: confirm stages 4-8 are implemented
+    (raw_fhir_cache INSERT · transform_by_type · ConflictResolver.apply
+     · warehouse write loop · source_freshness upsert · ingestion_log INSERT)
+  → For switch_data_track: confirm it writes to system_config, not os.environ
+  → For get_data_source_status: confirm it reads system_config for active track
+
+mcp-server/transforms/fhir_to_schema.py
+  → Confirm transform_by_type() exists at bottom of file with mapping:
+    'labs'→transform_clinical_observations · 'medications'→transform_medications
+    'conditions'→transform_conditions · 'encounters'→transform_encounters
+    'summary'→transform_patient
+  → Confirm data_source tag applied to all output rows
+
+ingestion/adapters/base.py
+  → Confirm PatientRecord dataclass has:
+    fhir_bundle · wearable_data · behavioral_signals · source_track · patient_ref_id
+  → Confirm BaseAdapter ABC with async parse_bundle() + load_all_patients()
+
+ingestion/adapters/synthea.py
+  → Confirm SyntheaAdapter with source_track='synthea'
+  → Confirm parse_bundle() calls custom generators for augmentation
+
+ingestion/pipeline.py
+  → Confirm IngestionPipeline class with run(patient_id, force_refresh)
+  → Confirm 6 stages implemented
+
+ingestion/conflict_resolver.py
+  → Confirm ConflictResolver.apply(records, policy) exists with
+    patient-reported > device > healthex > synthea precedence
+
+mcp-server/orchestrator.py
+  → Confirm daily pipeline calls check_data_freshness (or get_data_source_status)
+    BEFORE running any skill tools (step 0 on cc_05)
+  → Confirm run_seed_pipeline() exists with per-patient skill execution
+
+mcp-server/seed.py
+  → Confirm argparse with --patients and --months flags
+
+mcp-server/.mcp.json
+  → Confirm DATABASE_URL · DATA_TRACK · SYNTHEA_OUTPUT_DIR · ANTHROPIC_API_KEY
+
+─────────────────────────────────────────────────────────────────
+PART B — SYNTHETIC DATA READINESS CHECK
+─────────────────────────────────────────────────────────────────
+
+Before reporting any gaps or writing any fixes, run these synthetic
+data checks in order. Stop at the first failure and report it.
+Do not proceed to Part C until all pass.
+
+CHECK B1 — Synthea output exists
+  ls $SYNTHEA_OUTPUT_DIR/fhir/ | wc -l
+  # must be ≥ 10
+  # if 0: run Synthea CLI before anything else (see CLAUDE.md pre-setup)
+
+CHECK B2 — Schema is deployed
+  psql $DATABASE_URL -c "\dt" | grep -c "public"
+  # must be 22
+  # if less: psql $DATABASE_URL < mcp-server/db/schema.sql
+
+CHECK B3 — system_config has correct seed row
+  psql $DATABASE_URL -c "SELECT key, value FROM system_config;"
+  # must show: DATA_TRACK | synthea
+  # if missing: INSERT INTO system_config (key,value) VALUES ('DATA_TRACK','synthea')
+
+CHECK B4 — MCP server loads all skills without errors
+  python mcp-server/server.py 2>&1 | head -30
+  # must show 9+ "Loaded skill:" lines, zero AttributeError or ImportError
+
+CHECK B5 — Generate patient data from Synthea
+  # Get one patient UUID from the first Synthea file for testing
+  python -c "
+  import json, glob, os
+  files = glob.glob(os.path.join(os.environ['SYNTHEA_OUTPUT_DIR'], 'fhir', '*.json'))
+  print('Found', len(files), 'Synthea files')
+  with open(files[0]) as f:
+      bundle = json.load(f)
+  patients = [r for r in bundle.get('entry',[]) if r.get('resource',{}).get('resourceType')=='Patient']
+  print('Patient resources found:', len(patients))
+  "
+
+CHECK B6 — Run seed pipeline (2 patients, 1 month for speed)
+  python mcp-server/seed.py --patients 2 --months 1 2>&1
+  # if seed.py does not exist yet: STOP — flag as MISSING in Part A report
+
+CHECK B7 — Verify synthetic data counts after seed
+  psql $DATABASE_URL -c "SELECT COUNT(*) FROM patients;"
+  # must be ≥ 2
+
+  psql $DATABASE_URL -c "SELECT COUNT(*) FROM biometric_readings;"
+  # must be > 300 (2 patients × ~5 readings/day × 30 days)
+
+  psql $DATABASE_URL -c "SELECT COUNT(*) FROM daily_checkins;"
+  # must be > 40 (2 patients × ~70% completion × 30 days)
+
+  psql $DATABASE_URL -c "
+  SELECT source_name, COUNT(*) as patients, MAX(last_ingested_at) as last_pull
+  FROM source_freshness GROUP BY source_name;
+  "
+  # must show source_name='synthea' with 2 patients
+
+CHECK B8 — OBT score computation on synthetic data
+  # Get a patient UUID
+  PATIENT_ID=$(psql $DATABASE_URL -t -c "SELECT id FROM patients LIMIT 1;" | xargs)
+  echo "Testing with patient: $PATIENT_ID"
+
+  # Compute OBT score via MCP tool (run directly for testing)
+  python -c "
+  import asyncio, asyncpg, os, json
+  sys_path_insert = __import__('sys').path.insert(0,'mcp-server')
+  from skills.compute_obt_score import register
+  print('compute_obt_score importable: OK')
+  "
+  # if ImportError: flag the specific missing dependency
+
+CHECK B9 — Run backend test suite against synthetic data
+  cd mcp-server && pytest tests/ -v --tb=short 2>&1 | tail -20
+  # must show: X passed, 0 failed
+  # if failures exist: stop here, fix tests before touching HealthEx
+
+CHECK B10 — Run frontend test suite
+  cd replit-app && npm test -- --coverage 2>&1 | tail -20
+  # must show: 38 passing, 0 failing
+  # if failures exist: stop here, fix frontend before any HealthEx work
+
+CHECK B11 — get_data_source_status confirms synthetic track
+  # Call the tool directly to confirm it reads system_config correctly
+  python -c "
+  import asyncio, asyncpg, os, json
+  async def test():
+      pool = await asyncpg.create_pool(os.environ['DATABASE_URL'])
+      row = await pool.fetchrow(
+          \"SELECT value FROM system_config WHERE key='DATA_TRACK'\"
+      )
+      print('Active track:', row['value'])
+      assert row['value'] == 'synthea', 'FAIL: track is not synthea'
+      print('CHECK B11: PASS')
+      await pool.close()
+  asyncio.run(test())
+  "
+
+CHECK B12 — Idempotency on synthetic pipeline
+  python mcp-server/orchestrator.py --daily 2>&1 | tail -5
+  # capture row counts
+  psql $DATABASE_URL -c "SELECT COUNT(*) FROM biometric_readings;" > /tmp/count1.txt
+
+  python mcp-server/orchestrator.py --daily 2>&1 | tail -5
+  # run again
+  psql $DATABASE_URL -c "SELECT COUNT(*) FROM biometric_readings;" > /tmp/count2.txt
+
+  diff /tmp/count1.txt /tmp/count2.txt
+  # must produce no output — counts must be identical
+
+─────────────────────────────────────────────────────────────────
+PART C — PRESENT FINDINGS BEFORE FIXING ANYTHING
+─────────────────────────────────────────────────────────────────
+
+After Parts A and B, output this summary:
+
+  AUDIT SUMMARY
+  ─────────────
+  Tables in schema.sql:         N  (cards show 22)
+  Tools in ingestion_tools.py:  N  (cards show 5)
+  transform_by_type exists:     YES/NO
+  system_config table:          YES/NO
+  Active track confirmed:       synthea/healthex/UNKNOWN
+  Synthea files found:          N
+  Synthetic seed passed:        YES/NO
+  Backend tests (52):           N passed / N failed
+  Frontend tests (38):          N passed / N failed
+  Idempotency check:            PASS/FAIL
+
+  CHECKS THAT FAILED (fix these before HealthEx):
+  B1. ...
+  B7. ...
+
+  GAPS BETWEEN CODE AND CARDS:
+  1. [file] — [specific thing missing or wrong]
+  2. ...
+
+  PROPOSED FIXES (in this exact priority order):
+  1. Synthetic data blockers — anything preventing B1-B12 from passing
+  2. Schema gaps (missing tables or columns)
+  3. Missing tools in ingestion_tools.py
+  4. transform_by_type in fhir_to_schema.py
+  5. Any other PARTIAL or MISSING files
+
+Wait for approval of the proposed fix list before writing any code.
+
+─────────────────────────────────────────────────────────────────
+PART D — FIXES (only after approval)
+─────────────────────────────────────────────────────────────────
+
+Apply fixes in the approved priority order.
+
+After each fix, re-run the specific check it addresses from Part B
+before moving to the next fix. Never batch fixes and verify at the
+end — verify incrementally.
+
+  Fix order within each priority:
+
+  Synthetic data blockers first:
+    If Synthea output missing → run Synthea CLI (see CLAUDE.md)
+    If schema not deployed → psql $DATABASE_URL < schema.sql
+    If system_config missing → INSERT seed row directly
+    If seed.py missing → build it before any other Session 2 files
+    If any backend test fails → fix the specific skill or schema gap
+    If any frontend test fails → fix the specific component or API route
+
+  Schema gaps second:
+    Missing tables → append CREATE TABLE IF NOT EXISTS blocks to schema.sql
+    Missing columns → append ALTER TABLE ... ADD COLUMN IF NOT EXISTS
+    Deploy: psql $DATABASE_URL -f mcp-server/db/schema.sql
+    Verify: psql $DATABASE_URL -c "\dt" | grep -c "public"  # must be 22
+
+  ingestion_tools.py gaps third:
+    Add missing tools inside existing register(mcp) function only
+    Never remove or modify existing tools
+    Verify server still loads: python server.py 2>&1 | grep "Loaded skill"
+
+  transform_by_type fourth:
+    Append at bottom of fhir_to_schema.py — do not modify existing functions
+    Verify: python -c "from transforms.fhir_to_schema import transform_by_type; print('OK')"
+
+  Other MISSING files last:
+    Build in the dependency order shown on cc_02
+    After each file: quick import check
+
+─────────────────────────────────────────────────────────────────
+PART E — FULL VERIFICATION PASS (must all pass before committing)
+─────────────────────────────────────────────────────────────────
+
+Run every check in this order. Do not skip any. Do not commit until
+all return the expected result.
+
+  1. Table count
+     psql $DATABASE_URL -c "\dt" | grep -c "public"
+     # expected: 22
+
+  2. system_config seed row
+     psql $DATABASE_URL -c "SELECT key, value FROM system_config;"
+     # expected: DATA_TRACK | synthea
+
+  3. data_source column present on all required tables
+     psql $DATABASE_URL -c "
+     SELECT table_name FROM information_schema.columns
+     WHERE column_name='data_source' ORDER BY table_name;"
+     # must include: patients, biometric_readings, daily_checkins,
+     # medication_adherence, clinical_events, care_gaps, obt_scores,
+     # clinical_facts, agent_interventions, agent_memory_episodes,
+     # skill_executions, provider_risk_scores
+
+  4. MCP server skills load cleanly
+     python mcp-server/server.py 2>&1 | grep -E "Loaded skill|ERROR"
+     # expected: 9+ Loaded skill lines, zero ERROR lines
+
+  5. No print() in skills, generators, or ingestion
+     grep -r "print(" mcp-server/skills/ mcp-server/generators/ ingestion/
+     # expected: no output
+
+  6. No f-string SQL anywhere
+     grep -rn 'f".*SELECT\|f".*INSERT\|f".*UPDATE\|f".*DELETE' \
+       mcp-server/ ingestion/
+     # expected: no output
+
+  7. Key imports resolve
+     python -c "
+     import sys; sys.path.insert(0,'mcp-server')
+     from transforms.fhir_to_schema import transform_by_type; print('transform_by_type OK')
+     from skills.ingestion_tools import register; print('ingestion_tools OK')
+     from ingestion.pipeline import IngestionPipeline; print('IngestionPipeline OK')
+     from ingestion.conflict_resolver import ConflictResolver; print('ConflictResolver OK')
+     "
+
+  8. Synthetic backend tests
+     cd mcp-server && pytest tests/ -v --tb=short 2>&1 | tail -5
+     # expected: 52 passed, 0 failed
+
+  9. Synthetic frontend tests
+     cd replit-app && npm test -- --coverage 2>&1 | tail -5
+     # expected: 38 passing, 0 failing
+
+  10. Full seed verified (run only if counts are below target)
+      python mcp-server/seed.py --patients 10 --months 6 2>&1
+      psql $DATABASE_URL -c "SELECT COUNT(*) FROM patients;"           # 10
+      psql $DATABASE_URL -c "SELECT COUNT(*) FROM biometric_readings;" # >10000
+      psql $DATABASE_URL -c "SELECT COUNT(*) FROM obt_scores;"         # >1000
+      psql $DATABASE_URL -c "SELECT COUNT(*) FROM source_freshness;"   # 10
+
+  11. Idempotency (run pipeline twice, counts must not change)
+      python mcp-server/orchestrator.py --daily 2>&1 | tail -3
+      python mcp-server/orchestrator.py --daily 2>&1 | tail -3
+      # counts identical both runs
+
+─────────────────────────────────────────────────────────────────
+PART F — UPDATE CLAUDE.md AND COMMIT
+─────────────────────────────────────────────────────────────────
+
+After all Part E checks pass, update CLAUDE.md session checklists:
+
+  Under Session 1:
+  - [x] ingestion_tools.py — all 5 tools incl. 3 HealthEx bridge tools
+  - [x] transforms/fhir_to_schema.py — transform_by_type() added
+
+  Under Session 2:
+  - [x] system_config table deployed (table #22)
+  - [x] data_source column confirmed on all 12 required tables
+  - [x] Synthea seed verified: 10 patients, >10K readings, >1K OBT scores
+  - [x] Backend tests: 52/52 passing on synthetic data
+  - [x] Frontend tests: 38/38 passing on synthetic data
+  - [x] Pipeline idempotency confirmed
+
+Then commit:
+
+  git add -A
+  git commit -m "Audit pass: align codebase with v2 reference cards
+
+  Schema:
+  - 22 tables confirmed (system_config added as table #22)
+  - data_source column verified on all 12 required tables
+
+  Synthetic data verified first (golden rule enforced):
+  - Synthea seed: 10 patients, 6 months
+  - 52 backend tests passing on synthetic data
+  - 38 frontend tests passing on synthetic data
+  - Pipeline idempotency confirmed
+
+  Code gaps fixed:
+  [list each specific gap fixed from Part C report]
+
+  HealthEx bridge tools ready (not yet tested — synthetic must pass first):
+  - get_data_source_status / ingest_from_healthex / switch_data_track
+  - transform_by_type router in fhir_to_schema.py"
+
+  git push origin main
