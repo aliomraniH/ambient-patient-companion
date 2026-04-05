@@ -515,6 +515,180 @@ section.active { display: block; }
 
     <!-- ===== SECTION: API KEYS ===== -->
     <section id="section-keys" class="active">
+      <div class="section-header">
+        <div class="section-title">API Keys</div>
+        <div class="section-desc">Configure API keys and credentials for all external services.</div>
+      </div>
+
+      <div class="warn-box">
+        &#9888; <strong>HealthEx MCP</strong> cannot generate synthetic data and is incompatible with Claude Code. Use the FastMCP <code>synthetic_patient</code> server instead.
+      </div>
+
+      <!-- Stat strip -->
+      <div class="stat-strip" id="keys-stat-strip">
+        <div class="stat-card">
+          <div class="stat-label">Keys Configured</div>
+          <div class="stat-value" id="stat-keys-count">0/17</div>
+          <div class="stat-sub" id="stat-keys-sub">0% complete</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">MCP Servers</div>
+          <div class="stat-value" id="stat-mcp-count">0/5</div>
+          <div class="stat-sub" id="stat-mcp-sub">0 pending URL</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Claude Model</div>
+          <div class="stat-value" id="stat-model" style="font-size:16px;">not set</div>
+          <div class="stat-sub" id="stat-model-sub">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Tracing</div>
+          <div class="stat-value" id="stat-tracing">OFF</div>
+          <div class="stat-sub" id="stat-tracing-sub">LangSmith</div>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <!-- Left column: API key cards -->
+        <div>
+          <!-- Card: Anthropic -->
+          <div class="card">
+            <div class="card-title">&#9881; Anthropic</div>
+            <div class="key-row">
+              <span class="key-label">ANTHROPIC_API_KEY</span>
+              <input class="key-input" type="password" data-key="ANTHROPIC_API_KEY" placeholder="sk-ant-..." oninput="markDirty('ANTHROPIC_API_KEY',this)" onblur="saveKey('ANTHROPIC_API_KEY',this.value)">
+              <span class="status-dot empty" id="dot-ANTHROPIC_API_KEY"></span>
+              <button class="btn-sm" onclick="revealKey('ANTHROPIC_API_KEY',this)">Show</button>
+              <button class="btn-sm" onclick="testAnthropic(this)">Test</button>
+            </div>
+            <div class="key-row">
+              <span class="key-label">CLAUDE_MODEL</span>
+              <input class="key-input" type="text" data-key="CLAUDE_MODEL" placeholder="claude-sonnet-4-6" oninput="markDirty('CLAUDE_MODEL',this)" onblur="saveKey('CLAUDE_MODEL',this.value)">
+              <span class="status-dot empty" id="dot-CLAUDE_MODEL"></span>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+            </div>
+            <div class="key-row">
+              <span class="key-label">CLAUDE_THINKING_MODE</span>
+              <select class="key-select" data-key="CLAUDE_THINKING_MODE" onchange="markDirty('CLAUDE_THINKING_MODE',this); saveKey('CLAUDE_THINKING_MODE',this.value)">
+                <option value="">— select —</option>
+                <option value="adaptive">adaptive</option>
+                <option value="enabled">enabled</option>
+              </select>
+              <span class="status-dot empty" id="dot-CLAUDE_THINKING_MODE"></span>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+            </div>
+          </div>
+
+          <!-- Card: LangSmith -->
+          <div class="card">
+            <div class="card-title">&#128270; LangSmith</div>
+            <div class="key-row">
+              <span class="key-label">LANGSMITH_API_KEY</span>
+              <input class="key-input" type="password" data-key="LANGSMITH_API_KEY" placeholder="ls__..." oninput="markDirty('LANGSMITH_API_KEY',this)" onblur="saveKey('LANGSMITH_API_KEY',this.value)">
+              <span class="status-dot empty" id="dot-LANGSMITH_API_KEY"></span>
+              <button class="btn-sm" onclick="revealKey('LANGSMITH_API_KEY',this)">Show</button>
+              <button class="btn-sm" onclick="testLangSmith(this)">Test</button>
+            </div>
+            <div class="key-row">
+              <span class="key-label">LANGSMITH_PROJECT</span>
+              <input class="key-input" type="text" data-key="LANGSMITH_PROJECT" placeholder="ambient-patient-companion" oninput="markDirty('LANGSMITH_PROJECT',this)" onblur="saveKey('LANGSMITH_PROJECT',this.value)">
+              <span class="status-dot empty" id="dot-LANGSMITH_PROJECT"></span>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+            </div>
+          </div>
+
+          <!-- Card: Vector Store -->
+          <div class="card">
+            <div class="card-title">&#128451; Vector Store (MemPrompt)</div>
+            <div class="key-row">
+              <span class="key-label">VECTOR_STORE_URL</span>
+              <input class="key-input" type="text" data-key="VECTOR_STORE_URL" placeholder="https://..." oninput="markDirty('VECTOR_STORE_URL',this)" onblur="saveKey('VECTOR_STORE_URL',this.value)">
+              <span class="status-dot empty" id="dot-VECTOR_STORE_URL"></span>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+            </div>
+            <div class="key-row">
+              <span class="key-label">VECTOR_STORE_API_KEY</span>
+              <input class="key-input" type="password" data-key="VECTOR_STORE_API_KEY" placeholder="key..." oninput="markDirty('VECTOR_STORE_API_KEY',this)" onblur="saveKey('VECTOR_STORE_API_KEY',this.value)">
+              <span class="status-dot empty" id="dot-VECTOR_STORE_API_KEY"></span>
+              <button class="btn-sm" onclick="revealKey('VECTOR_STORE_API_KEY',this)">Show</button>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+            </div>
+            <div class="key-row">
+              <span class="key-label">VECTOR_STORE_INDEX</span>
+              <input class="key-input" type="text" data-key="VECTOR_STORE_INDEX" placeholder="clinical-corrections" oninput="markDirty('VECTOR_STORE_INDEX',this)" onblur="saveKey('VECTOR_STORE_INDEX',this.value)">
+              <span class="status-dot empty" id="dot-VECTOR_STORE_INDEX"></span>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+            </div>
+          </div>
+
+          <!-- Card: FHIR / EHR -->
+          <div class="card">
+            <div class="card-title">&#127973; FHIR / EHR</div>
+            <div class="key-row">
+              <span class="key-label">FHIR_BASE_URL</span>
+              <input class="key-input" type="text" data-key="FHIR_BASE_URL" placeholder="https://your-fhir-server/R4" oninput="markDirty('FHIR_BASE_URL',this)" onblur="saveKey('FHIR_BASE_URL',this.value)">
+              <span class="status-dot empty" id="dot-FHIR_BASE_URL"></span>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+            </div>
+            <div class="key-row">
+              <span class="key-label">FHIR_CLIENT_ID</span>
+              <input class="key-input" type="text" data-key="FHIR_CLIENT_ID" placeholder="client-id" oninput="markDirty('FHIR_CLIENT_ID',this)" onblur="saveKey('FHIR_CLIENT_ID',this.value)">
+              <span class="status-dot empty" id="dot-FHIR_CLIENT_ID"></span>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+            </div>
+            <div class="key-row">
+              <span class="key-label">FHIR_CLIENT_SECRET</span>
+              <input class="key-input" type="password" data-key="FHIR_CLIENT_SECRET" placeholder="secret" oninput="markDirty('FHIR_CLIENT_SECRET',this)" onblur="saveKey('FHIR_CLIENT_SECRET',this.value)">
+              <span class="status-dot empty" id="dot-FHIR_CLIENT_SECRET"></span>
+              <button class="btn-sm" onclick="revealKey('FHIR_CLIENT_SECRET',this)">Show</button>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+            </div>
+          </div>
+
+          <!-- Card: Database -->
+          <div class="card">
+            <div class="card-title">&#128450; Database</div>
+            <div class="key-row">
+              <span class="key-label">DATABASE_URL</span>
+              <input class="key-input" type="password" data-key="DATABASE_URL" placeholder="postgresql://..." oninput="markDirty('DATABASE_URL',this)" onblur="saveKey('DATABASE_URL',this.value)">
+              <span class="status-dot empty" id="dot-DATABASE_URL"></span>
+              <button class="btn-sm" onclick="revealKey('DATABASE_URL',this)">Show</button>
+              <button class="btn-sm" style="visibility:hidden">—</button>
+            </div>
+          </div>
+
+          <!-- Completeness progress bar -->
+          <div class="progress-wrap">
+            <div class="progress-label">
+              <span>Configuration progress</span>
+              <span><span id="progress-label">0 / 17</span> &mdash; <span id="progress-pct" style="color:var(--accent);font-weight:600;">0%</span></span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right column: placeholder for MCP summary (populated in Part 3) -->
+        <div id="keys-right-col">
+          <div class="card">
+            <div class="card-title">&#9881; MCP Tools</div>
+            <div style="font-size:12px;color:var(--muted);">Configure MCP server URLs in the <a href="#" onclick="showSection('mcp');return false" style="color:var(--accent);">MCP Tools</a> section.</div>
+            <div id="keys-mcp-summary" style="margin-top:12px;"></div>
+          </div>
+          <div class="card">
+            <div class="card-title">Claude Desktop Config</div>
+            <div style="font-size:12px;color:var(--muted);">Generate your config in the <a href="#" onclick="showSection('config');return false" style="color:var(--accent);">Claude Config</a> section.</div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- ===== SECTION: MCP TOOLS ===== -->
@@ -698,8 +872,93 @@ function updateProgressBar() {
   if (label) label.textContent = c.set + ' / ' + c.total;
 }
 
-/* ── PLACEHOLDER: Section populators (Parts 2-6) ──────── */
-function populateKeys() { /* Part 2 */ }
+/* ── Populate: API Keys ────────────────────────────────── */
+function populateKeys() {
+  if (!configData.keys) return;
+  const k = configData.keys;
+  // Fill input values
+  for (const key of Object.keys(k)) {
+    const el = document.querySelector(`[data-key="${key}"]`);
+    if (!el) continue;
+    if (el.tagName === 'SELECT') {
+      el.value = k[key].set ? k[key].value : '';
+    } else if (el.type === 'password') {
+      el.value = k[key].set ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : '';
+    } else {
+      el.value = k[key].value || '';
+    }
+    // Status dot
+    const dot = document.getElementById('dot-' + key);
+    if (dot) dot.className = 'status-dot ' + (k[key].set ? 'set' : 'empty');
+  }
+  // Stat strip
+  const c = configData.completeness || { set:0, total:17, pct:0 };
+  document.getElementById('stat-keys-count').textContent = c.set + '/' + c.total;
+  document.getElementById('stat-keys-sub').textContent = c.pct + '% complete';
+  // MCP stat
+  const mcpKeys = MCP_SERVERS.map(s => s.key);
+  const mcpSet = mcpKeys.filter(x => k[x]?.set).length;
+  const mcpPending = mcpKeys.length - mcpSet;
+  document.getElementById('stat-mcp-count').textContent = mcpSet + '/' + mcpKeys.length;
+  document.getElementById('stat-mcp-sub').textContent = mcpPending + ' pending URL';
+  // Model stat
+  const model = k.CLAUDE_MODEL?.set ? k.CLAUDE_MODEL.value : 'not set';
+  document.getElementById('stat-model').textContent = model;
+  const thinking = k.CLAUDE_THINKING_MODE?.set ? k.CLAUDE_THINKING_MODE.value : '—';
+  document.getElementById('stat-model-sub').textContent = thinking === '—' ? '—' : thinking.charAt(0).toUpperCase() + thinking.slice(1) + ' thinking';
+  // Tracing stat
+  const hasLs = k.LANGSMITH_API_KEY?.set;
+  document.getElementById('stat-tracing').textContent = hasLs ? 'ON' : 'OFF';
+  document.getElementById('stat-tracing').style.color = hasLs ? 'var(--ok)' : 'var(--muted)';
+  document.getElementById('stat-tracing-sub').textContent = hasLs ? 'LangSmith active' : 'LangSmith';
+  // MCP summary in right col
+  const summaryEl = document.getElementById('keys-mcp-summary');
+  if (summaryEl) {
+    summaryEl.innerHTML = MCP_SERVERS.map(s => {
+      const isSet = k[s.key]?.set;
+      const badge = isSet ? '<span class="badge badge-ok">Online</span>' : '<span class="badge badge-gray">No URL</span>';
+      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--bg);font-size:12px;"><span>${s.name}</span>${badge}</div>`;
+    }).join('');
+  }
+}
+
+/* ── Test: Anthropic ───────────────────────────────────── */
+async function testAnthropic(btn) {
+  const orig = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>';
+  btn.disabled = true;
+  const r = await api('/api/test/anthropic', { method: 'POST' });
+  btn.disabled = false;
+  btn.textContent = orig;
+  if (!r) return;
+  const dot = document.getElementById('dot-ANTHROPIC_API_KEY');
+  if (r.ok) {
+    if (dot) dot.className = 'status-dot set';
+    toast('\u2713 Anthropic connected \u2014 ' + r.model + ' (' + r.latency_ms + 'ms)');
+  } else {
+    if (dot) dot.className = 'status-dot error';
+    toast('\u2717 Anthropic: ' + r.error, 'err');
+  }
+}
+
+/* ── Test: LangSmith ───────────────────────────────────── */
+async function testLangSmith(btn) {
+  const orig = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>';
+  btn.disabled = true;
+  const r = await api('/api/test/langsmith', { method: 'POST' });
+  btn.disabled = false;
+  btn.textContent = orig;
+  if (!r) return;
+  const dot = document.getElementById('dot-LANGSMITH_API_KEY');
+  if (r.ok) {
+    if (dot) dot.className = 'status-dot set';
+    toast('\u2713 LangSmith connected (' + r.latency_ms + 'ms)');
+  } else {
+    if (dot) dot.className = 'status-dot error';
+    toast('\u2717 LangSmith: ' + r.error, 'err');
+  }
+}
 function populateMcp() { /* Part 3 */ }
 function populateStatus() { /* Part 4 */ }
 
