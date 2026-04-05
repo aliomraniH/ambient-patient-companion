@@ -83,7 +83,7 @@
 ### PHASE 1 — LLM Guardrails + Hardcoded Guidelines
 **Goal:** Working Claude API integration with safety rails and 20-30 structured guidelines embedded in system prompts. No vector DB yet.
 **Duration target:** ~4 weeks
-**Status:** 🔴 Not started
+**Status:** 🟢 Complete
 
 #### 4.1 Directory scaffold (create these first)
 ```
@@ -376,3 +376,41 @@ Key additions:
 - Anthropic API reference: https://docs.anthropic.com/en/api/getting-started
 - pgvector: https://github.com/pgvector/pgvector
 - Ambient Action Model paper (Google Drive): see project shared drive
+
+---
+
+## 9. Phase 1 Completion Notes
+
+**Date completed:** 2026-04-05
+
+**Files created (28 total):**
+- `server/__init__.py`, `server/mcp_server.py` — FastMCP clinical intelligence server with 5 tools
+- `server/guardrails/__init__.py`, `input_validator.py`, `output_validator.py`, `clinical_rules.py` — Three-layer guardrail pipeline
+- `server/guidelines/ada_standards.json` (26 ADA recs), `uspstf_recs.json` (7 USPSTF recs)
+- `server/guidelines/ingestion/__init__.py`, `chunk_guidelines.py` — Phase 2 placeholder
+- `config/system_prompts/pcp_encounter.xml`, `patient_facing.xml`, `care_manager.xml`
+- `shared/claude-client.js` — Browser-side client for all prototype-to-server communication
+- `prototypes/pcp-home.html`, `pcp-encounter.html`, `population-health.html`, `inbox.html`
+- `tests/phase1/` — 7 test files, 100 tests total (all passing)
+
+**Deviations from plan:**
+- Prototypes were listed as "Complete" in Section 2 but did not exist. Created them as functional static HTML with representative clinical content matching Maria Chen's profile.
+- Added `pytest.ini` at repo root with `asyncio_mode = auto` for cleaner async test support.
+- `anthropic` package added to `requirements.txt`.
+
+**Technical findings for Phase 2:**
+- FastMCP 3.x decorates tools as plain async functions (no `.fn` accessor needed for testing).
+- Keyword-based guideline selection (`_select_relevant_guidelines`) works for Phase 1 but is brittle — Phase 2 vector search will significantly improve relevance.
+- The `_KNOWN_DRUG_NAMES` set in `output_validator.py` should be generated from guideline JSON rather than hardcoded once Phase 2 adds more guidelines.
+- System prompt XML files use `{{GUIDELINES_PLACEHOLDER}}` for injection — Phase 2 should consider token budget management when injecting larger retrieved sets.
+
+**Exit gate status:**
+| Test | Status |
+|---|---|
+| Tool availability (5 FastMCP tools functional) | ✅ Pass |
+| Guideline citation enforcement | ✅ Pass |
+| Adversarial blocking (jailbreaks, PHI) | ✅ Pass |
+| Escalation triggers (5 scenarios) | ✅ Pass |
+| Prototype wiring (4 HTML → claude-client.js) | ✅ Pass |
+| No direct API calls from prototypes | ✅ Pass |
+| Integration tests (100/100 passing) | ✅ Pass |
