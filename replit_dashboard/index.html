@@ -3,1283 +3,900 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ambient Companion — Config Dashboard</title>
+<title>APC · Dev Setup</title>
 <style>
-/* ── Reset & Design System ─────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:       #f5f7fa;
-  --surface:  #ffffff;
-  --card:     #ffffff;
-  --border:   #e2e8f0;
-  --border-hi:#cbd5e1;
-  --text:     #1a202c;
-  --muted:    #718096;
-  --accent:   #00d4aa;
-  --accent2:  #0099cc;
-  --ok:       #22c55e;
-  --warn:     #f59e0b;
-  --danger:   #ef4444;
-  --radius:   8px;
-  --shadow:   0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  --bg:         #f0f2f5;
+  --surface:    #ffffff;
+  --border:     #e2e8f0;
+  --text:       #1a202c;
+  --muted:      #718096;
+  --radius:     10px;
+
+  --auto-bg:    #f0fdf4;
+  --auto-border:#86efac;
+  --auto-text:  #166534;
+  --auto-badge: #22c55e;
+
+  --self-bg:    #eff6ff;
+  --self-border:#93c5fd;
+  --self-text:  #1e40af;
+  --self-badge: #3b82f6;
+
+  --need-bg:    #fff7ed;
+  --need-border:#fdba74;
+  --need-text:  #9a3412;
+  --need-badge: #f97316;
+
+  --ok:         #22c55e;
+  --warn:       #f59e0b;
+  --danger:     #ef4444;
+  --accent:     #6366f1;
 }
 
 html { font-size: 13px; }
-body {
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-  background: var(--bg);
-  color: var(--text);
-  line-height: 1.5;
-  min-height: 100vh;
-}
+body { font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+code { font-family: 'SF Mono','Fira Code','Consolas', monospace; font-size: 11.5px; }
 
-code, .mono { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 12px; }
-
-/* ── Layout Grid ───────────────────────────────────────── */
-.layout {
-  display: grid;
-  grid-template-columns: 200px 1fr;
-  grid-template-rows: 50px 1fr;
-  grid-template-areas:
-    "header header"
-    "nav    main";
-  min-height: 100vh;
-}
-
-/* ── Top Bar ───────────────────────────────────────────── */
-header {
-  grid-area: header;
+/* ── Header ─────────────────────────────────── */
+.topbar {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  padding: 0 28px;
+  height: 52px;
   display: flex;
   align-items: center;
-  padding: 0 20px;
-  gap: 12px;
-  z-index: 10;
+  gap: 14px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
 }
-
 .logo {
-  width: 28px; height: 28px;
-  background: linear-gradient(135deg, #00d4aa, #0099cc);
-  border-radius: 6px;
+  width: 30px; height: 30px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  border-radius: 7px;
   display: flex; align-items: center; justify-content: center;
-  color: white; font-size: 16px; font-weight: bold;
+  color: #fff; font-weight: 700; font-size: 15px;
   flex-shrink: 0;
 }
+.topbar-title { font-size: 14px; font-weight: 700; }
+.topbar-sub   { font-size: 11px; color: var(--muted); }
+.topbar-spacer { flex: 1; }
 
-.header-title { font-size: 14px; font-weight: 600; }
-.header-subtitle { font-size: 12px; color: var(--muted); margin-left: -4px; }
-.header-spacer { flex: 1; }
-
-.env-badge {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 11px; color: var(--muted);
-}
-.env-badge::before {
-  content: ''; width: 7px; height: 7px;
-  background: var(--ok); border-radius: 50%;
-}
+.progress-wrap { display: flex; align-items: center; gap: 10px; }
+.progress-bar { width: 120px; height: 6px; background: #e2e8f0; border-radius: 99px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--accent); border-radius: 99px; transition: width .4s; }
+.progress-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
 
 .btn {
-  padding: 6px 14px;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: 7px; border: none;
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: opacity .15s, transform .1s;
+}
+.btn:hover { opacity: .88; }
+.btn:active { transform: scale(.97); }
+.btn-primary  { background: var(--accent); color: #fff; }
+.btn-ghost    { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+.btn-sm       { padding: 4px 10px; font-size: 11px; }
+
+/* ── Main layout ─────────────────────────────── */
+.main {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 32px 20px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+/* ── Section ─────────────────────────────────── */
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.section-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+.badge-auto { background: #dcfce7; color: var(--auto-text); }
+.badge-self { background: #dbeafe; color: var(--self-text); }
+.badge-need { background: #ffedd5; color: var(--need-text); }
+
+.section-title { font-size: 16px; font-weight: 700; }
+.section-desc  { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+/* ── Cards ───────────────────────────────────── */
+.card {
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.15s;
-  font-family: inherit;
-  display: inline-flex; align-items: center; gap: 6px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
-.btn:hover { border-color: var(--border-hi); background: var(--bg); }
+.card + .card { margin-top: 10px; }
 
-.btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-  font-weight: 500;
+.card-auto { border-left: 3px solid var(--auto-badge); }
+.card-self { border-left: 3px solid var(--self-badge); }
+.card-need { border-left: 3px solid var(--need-badge); }
+
+.card-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
 }
-.btn-primary:hover { opacity: 0.9; background: var(--accent); border-color: var(--accent); }
-
-/* ── Sidebar ───────────────────────────────────────────── */
-nav {
-  grid-area: nav;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
-  padding: 16px 0;
-  overflow-y: auto;
+.card-icon {
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+  margin-top: 2px;
 }
+.icon-auto { background: #dcfce7; }
+.icon-self { background: #dbeafe; }
+.icon-need { background: #ffedd5; }
 
-.nav-group { margin-bottom: 20px; }
-.nav-group-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-  padding: 0 16px;
-  margin-bottom: 6px;
+.card-body { flex: 1; min-width: 0; }
+.card-label { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+.card-desc  { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+
+.card-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* ── Source badge ────────────────────────────── */
+.source-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10.5px;
   font-weight: 600;
 }
+.src-replit  { background: #ede9fe; color: #5b21b6; }
+.src-local   { background: #fef9c3; color: #854d0e; }
+.src-default { background: #e0f2fe; color: #075985; }
+.src-unset   { background: #fee2e2; color: #991b1b; }
 
-.nav-item {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 16px;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--muted);
-  border-left: 2.5px solid transparent;
-  transition: all 0.15s;
-  user-select: none;
+/* ── Input rows ──────────────────────────────── */
+.input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
-.nav-item:hover { color: var(--text); background: var(--bg); }
-.nav-item.active {
+.input-row input {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 11px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: #fafbfc;
+  transition: border-color .15s;
+}
+.input-row input:focus { outline: none; border-color: var(--accent); background: #fff; }
+.input-row input[readonly] { background: #f8f9fb; color: var(--muted); cursor: default; }
+
+/* ── Suggestion box ──────────────────────────── */
+.suggestion {
+  background: #f8faff;
+  border: 1px solid #c7d7f5;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.suggestion-label { font-weight: 700; color: var(--self-text); }
+.cmd-block {
+  background: #1e293b;
+  color: #94d2f5;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: 'SF Mono','Fira Code', monospace;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.cmd-copy {
+  background: transparent;
+  border: 1px solid #475569;
+  color: #94a3b8;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.cmd-copy:hover { background: #334155; color: #e2e8f0; }
+
+/* ── Provider box ────────────────────────────── */
+.provider-box {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.provider-name { font-weight: 700; color: var(--need-text); }
+.provider-steps { color: #7c3d12; line-height: 1.6; }
+.provider-link {
+  display: inline-flex; align-items: center; gap: 4px;
   color: var(--accent);
-  border-left-color: var(--accent);
-  background: rgba(0,212,170,0.04);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 12px;
+}
+.provider-link:hover { text-decoration: underline; }
+.free-badge {
+  background: #dcfce7;
+  color: #166534;
+  border-radius: 99px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 6px;
+}
+.optional-badge {
+  background: #e0f2fe;
+  color: #0369a1;
+  border-radius: 99px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 6px;
+}
+
+/* ── Toast ───────────────────────────────────── */
+#toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: #1e293b;
+  color: #fff;
+  padding: 10px 18px;
+  border-radius: 9px;
+  font-size: 12px;
   font-weight: 500;
+  box-shadow: 0 4px 20px rgba(0,0,0,.25);
+  transform: translateY(16px);
+  opacity: 0;
+  transition: all .2s;
+  z-index: 9999;
+  max-width: 340px;
 }
+#toast.show { transform: translateY(0); opacity: 1; }
+#toast.ok   { background: #166534; }
+#toast.err  { background: #991b1b; }
 
-.nav-dot {
-  width: 7px; height: 7px;
-  border-radius: 50%;
-  background: #cbd5e1;
-  flex-shrink: 0;
-}
-.nav-dot.ok { background: var(--ok); }
-.nav-dot.warn { background: var(--warn); }
-.nav-dot.empty { background: #cbd5e1; }
-
-/* ── Main Area ─────────────────────────────────────────── */
-main {
-  grid-area: main;
-  padding: 24px;
-  overflow-y: auto;
-}
-
-section { display: none; }
-section.active { display: block; }
-
-.section-header { margin-bottom: 20px; }
-.section-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
-.section-desc { font-size: 12px; color: var(--muted); }
-
-/* ── Cards ─────────────────────────────────────────────── */
-.card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px;
-  margin-bottom: 16px;
-  box-shadow: var(--shadow);
-}
-.card-title {
-  font-size: 14px; font-weight: 600;
-  margin-bottom: 16px;
-  display: flex; align-items: center; gap: 8px;
-}
-
-/* ── Stat Strip ────────────────────────────────────────── */
-.stat-strip {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 24px;
-}
-.stat-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px;
-  box-shadow: var(--shadow);
-}
-.stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
-.stat-value { font-size: 22px; font-weight: 700; color: var(--accent); }
-.stat-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
-
-/* ── Two-column layout ─────────────────────────────────── */
-.two-col {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  align-items: start;
-}
-@media (max-width: 1100px) { .two-col { grid-template-columns: 1fr; } }
-
-/* ── Key Row ───────────────────────────────────────────── */
-.key-row {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--bg);
-}
-.key-row:last-child { border-bottom: none; }
-.key-label {
-  width: 160px; flex-shrink: 0;
-  font-size: 12px; font-weight: 500;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-}
-.key-input {
-  flex: 1;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  font-size: 12px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  background: var(--bg);
-  color: var(--text);
-  outline: none;
-  transition: border-color 0.15s;
-}
-.key-input:focus { border-color: var(--accent); }
-.key-input.dirty { border-color: var(--warn); }
-
-.key-select {
-  flex: 1;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  font-size: 12px;
-  background: var(--bg);
-  color: var(--text);
-  outline: none;
-  cursor: pointer;
-}
-
+/* ── Status dot ──────────────────────────────── */
 .status-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
-}
-.status-dot.set { background: var(--ok); }
-.status-dot.empty { background: #cbd5e1; }
-.status-dot.error { background: var(--danger); }
-
-.btn-sm {
-  padding: 4px 10px;
-  font-size: 11px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--surface);
-  color: var(--muted);
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-}
-.btn-sm:hover { border-color: var(--border-hi); color: var(--text); }
-
-/* ── Progress Bar ──────────────────────────────────────── */
-.progress-wrap { margin-top: 16px; }
-.progress-label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px; }
-.progress-bar {
-  height: 8px;
-  background: var(--bg);
-  border-radius: 4px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-}
-.progress-fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 4px;
-  transition: width 0.4s ease;
-}
-
-/* ── Warning Box ───────────────────────────────────────── */
-.warn-box {
-  border: 1px solid var(--warn);
-  border-left: 3px solid var(--warn);
-  border-radius: var(--radius);
-  padding: 12px 16px;
-  margin-bottom: 16px;
-  font-size: 12px;
-  background: rgba(245,158,11,0.04);
-  color: var(--text);
-}
-
-/* ── MCP Server Row ────────────────────────────────────── */
-.mcp-row {
-  display: flex; align-items: center; gap: 12px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--bg);
-  border-left: 2.5px solid var(--border);
-  padding-left: 12px;
-  margin-left: -20px;
-  padding-right: 0;
-  margin-right: -20px;
-  padding-left: 32px;
-}
-.mcp-row:last-child { border-bottom: none; }
-.mcp-row.online { border-left-color: var(--ok); }
-.mcp-row.configured { border-left-color: var(--accent); }
-.mcp-row.pending { border-left-color: var(--warn); }
-
-.mcp-name { width: 150px; flex-shrink: 0; font-weight: 500; font-size: 13px; }
-.mcp-url-input {
-  flex: 1; padding: 6px 10px;
-  border: 1px solid var(--border); border-radius: 5px;
-  font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace;
-  background: var(--bg); color: var(--text); outline: none;
-}
-.mcp-url-input:focus { border-color: var(--accent); }
-.mcp-url-input::placeholder { color: #a0aec0; font-style: italic; }
-
-.badge {
-  font-size: 10px; padding: 2px 8px;
-  border-radius: 10px; font-weight: 600;
-  white-space: nowrap;
-}
-.badge-ok { background: rgba(34,197,94,0.1); color: var(--ok); }
-.badge-teal { background: rgba(0,212,170,0.1); color: var(--accent); }
-.badge-warn { background: rgba(245,158,11,0.1); color: var(--warn); }
-.badge-gray { background: rgba(113,128,150,0.1); color: var(--muted); }
-.badge-err { background: rgba(239,68,68,0.1); color: var(--danger); }
-
-.tools-count {
-  font-size: 11px; color: var(--accent2); cursor: pointer;
-  position: relative; white-space: nowrap;
-}
-.tools-count:hover .tools-tip { display: block; }
-.tools-tip {
-  display: none; position: absolute;
-  bottom: 100%; left: 50%; transform: translateX(-50%);
-  background: var(--text); color: #fff; padding: 8px 12px;
-  border-radius: 6px; font-size: 11px; white-space: pre-line;
-  z-index: 20; min-width: 180px; margin-bottom: 6px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-}
-
-/* ── Code Block ────────────────────────────────────────── */
-.code-block {
-  background: #f8fafc;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 16px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  overflow-x: auto;
-  white-space: pre;
-  color: var(--text);
-  max-height: 400px;
-  overflow-y: auto;
-}
-
-.code-actions {
-  display: flex; gap: 8px; margin-top: 12px;
-}
-
-/* ── Info Box ──────────────────────────────────────────── */
-.info-box {
-  background: rgba(0,153,204,0.04);
-  border: 1px solid rgba(0,153,204,0.15);
-  border-radius: var(--radius);
-  padding: 10px 14px;
-  font-size: 12px;
-  color: var(--muted);
-  margin-bottom: 14px;
-}
-
-/* ── Service Grid ──────────────────────────────────────── */
-.service-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 12px;
-}
-.svc-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px;
-  box-shadow: var(--shadow);
-}
-.svc-name { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
-.svc-status { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
-
-/* ── Setup Guide ───────────────────────────────────────── */
-.step-list { list-style: none; counter-reset: step; }
-.step-item {
-  counter-increment: step;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--bg);
-  font-size: 13px;
-}
-.step-item::before {
-  content: counter(step);
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 22px; height: 22px;
-  background: var(--accent);
-  color: #fff; border-radius: 50%;
-  font-size: 11px; font-weight: 600;
-  margin-right: 10px;
-}
-.step-item:last-child { border-bottom: none; }
-
-.card.amber-left { border-left: 3px solid var(--warn); }
-
-/* ── Env Preview ───────────────────────────────────────── */
-.env-preview {
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  font-size: 12px; line-height: 1.7;
-  background: #f8fafc;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 16px;
-  max-height: 400px;
-  overflow-y: auto;
-}
-.env-comment { color: var(--muted); }
-.env-key { color: var(--accent2); }
-.env-val { color: var(--accent); }
-.env-unset { color: var(--danger); }
-
-/* ── Toast ─────────────────────────────────────────────── */
-#toast {
-  position: fixed; bottom: 24px; right: 24px;
-  z-index: 100;
-  display: flex; flex-direction: column; gap: 8px;
-}
-.toast-item {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px 16px;
-  font-size: 12px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-  animation: slideIn 0.25s ease;
-  max-width: 380px;
-}
-.toast-item.ok { border-left: 3px solid var(--ok); }
-.toast-item.err { border-left: 3px solid var(--danger); }
-
-@keyframes slideIn {
-  from { opacity: 0; transform: translateX(30px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-/* ── Spinner ───────────────────────────────────────────── */
-.spinner {
   display: inline-block;
-  width: 14px; height: 14px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.6s linear infinite;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
+.dot-ok      { background: var(--ok); }
+.dot-warn    { background: var(--warn); }
+.dot-danger  { background: var(--danger); }
+.dot-neutral { background: #cbd5e1; }
+
+/* ── Test result ─────────────────────────────── */
+.test-result {
+  font-size: 11px;
+  padding: 4px 0;
+  color: var(--muted);
+  min-height: 18px;
+}
+.test-result.ok  { color: var(--ok); }
+.test-result.err { color: var(--danger); }
+
+/* ── Divider ─────────────────────────────────── */
+.divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 6px 0;
+}
+
+/* ── Replit secret instructions ──────────────── */
+.replit-hint {
+  background: #faf5ff;
+  border: 1px dashed #c4b5fd;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 11.5px;
+  color: #4c1d95;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.replit-hint .icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+.replit-hint strong { display: block; margin-bottom: 2px; }
+
+/* ── Tabs at top ─────────────────────────────── */
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 28px;
+}
+.tab {
+  padding: 10px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: color .15s;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-count {
+  background: #e0e7ff;
+  color: var(--accent);
+  border-radius: 99px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* ── Checklist bar ───────────────────────────── */
+.checklist-bar {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.check-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+}
+
+/* ── Footer action bar ───────────────────────── */
+.action-bar {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 12px 28px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  z-index: 90;
+}
+.action-bar-spacer { flex: 1; }
+
+/* ── Utility ─────────────────────────────────── */
+.hidden { display: none !important; }
+.mt4 { margin-top: 4px; }
+.mt8 { margin-top: 8px; }
+.flex { display: flex; }
+.gap8 { gap: 8px; }
+.items-center { align-items: center; }
+.text-muted { color: var(--muted); }
+.text-xs { font-size: 11px; }
 </style>
 </head>
 <body>
 
-<div class="layout">
-  <!-- ── Top Bar ─────────────────────────────────────── -->
-  <header>
-    <div class="logo">&#9877;</div>
-    <span class="header-title">Ambient Companion</span>
-    <span class="header-subtitle">config dashboard</span>
-    <div class="header-spacer"></div>
-    <span class="env-badge">replit</span>
-    <button class="btn btn-primary" onclick="saveAll()">Save All</button>
-  </header>
-
-  <!-- ── Sidebar ─────────────────────────────────────── -->
-  <nav>
-    <div class="nav-group">
-      <div class="nav-group-label">Configuration</div>
-      <div class="nav-item active" data-section="keys" onclick="showSection('keys')">
-        <span class="nav-dot empty" id="dot-keys"></span> API Keys
-      </div>
-      <div class="nav-item" data-section="mcp" onclick="showSection('mcp')">
-        <span class="nav-dot empty" id="dot-mcp"></span> MCP Tools
-      </div>
-      <div class="nav-item" data-section="config" onclick="showSection('config')">
-        <span class="nav-dot empty" id="dot-config"></span> Claude Config
-      </div>
-    </div>
-    <div class="nav-group">
-      <div class="nav-group-label">System</div>
-      <div class="nav-item" data-section="status" onclick="showSection('status')">
-        <span class="nav-dot ok" id="dot-status"></span> Status
-      </div>
-      <div class="nav-item" data-section="env" onclick="showSection('env')">
-        <span class="nav-dot empty" id="dot-env"></span> .env Export
-      </div>
-      <div class="nav-item" data-section="setup" onclick="showSection('setup')">
-        <span class="nav-dot ok" id="dot-setup"></span> Setup Guide
-      </div>
-    </div>
-  </nav>
-
-  <!-- ── Main Content ────────────────────────────────── -->
-  <main>
-
-    <!-- ===== SECTION: API KEYS ===== -->
-    <section id="section-keys" class="active">
-      <div class="section-header">
-        <div class="section-title">API Keys</div>
-        <div class="section-desc">Configure API keys and credentials for all external services.</div>
-      </div>
-
-      <div class="warn-box">
-        &#9888; <strong>HealthEx MCP</strong> cannot generate synthetic data and is incompatible with Claude Code. Use the FastMCP <code>synthetic_patient</code> server instead.
-      </div>
-
-      <!-- Stat strip -->
-      <div class="stat-strip" id="keys-stat-strip">
-        <div class="stat-card">
-          <div class="stat-label">Keys Configured</div>
-          <div class="stat-value" id="stat-keys-count">0/17</div>
-          <div class="stat-sub" id="stat-keys-sub">0% complete</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">MCP Servers</div>
-          <div class="stat-value" id="stat-mcp-count">0/5</div>
-          <div class="stat-sub" id="stat-mcp-sub">0 pending URL</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Claude Model</div>
-          <div class="stat-value" id="stat-model" style="font-size:16px;">not set</div>
-          <div class="stat-sub" id="stat-model-sub">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Tracing</div>
-          <div class="stat-value" id="stat-tracing">OFF</div>
-          <div class="stat-sub" id="stat-tracing-sub">LangSmith</div>
-        </div>
-      </div>
-
-      <div class="two-col">
-        <!-- Left column: API key cards -->
-        <div>
-          <!-- Card: Anthropic -->
-          <div class="card">
-            <div class="card-title">&#9881; Anthropic</div>
-            <div class="key-row">
-              <span class="key-label">ANTHROPIC_API_KEY</span>
-              <input class="key-input" type="password" data-key="ANTHROPIC_API_KEY" placeholder="sk-ant-..." oninput="markDirty('ANTHROPIC_API_KEY',this)" onblur="saveKey('ANTHROPIC_API_KEY',this.value)">
-              <span class="status-dot empty" id="dot-ANTHROPIC_API_KEY"></span>
-              <button class="btn-sm" onclick="revealKey('ANTHROPIC_API_KEY',this)">Show</button>
-              <button class="btn-sm" onclick="testAnthropic(this)">Test</button>
-            </div>
-            <div class="key-row">
-              <span class="key-label">CLAUDE_MODEL</span>
-              <input class="key-input" type="text" data-key="CLAUDE_MODEL" placeholder="claude-sonnet-4-6" oninput="markDirty('CLAUDE_MODEL',this)" onblur="saveKey('CLAUDE_MODEL',this.value)">
-              <span class="status-dot empty" id="dot-CLAUDE_MODEL"></span>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-            </div>
-            <div class="key-row">
-              <span class="key-label">CLAUDE_THINKING_MODE</span>
-              <select class="key-select" data-key="CLAUDE_THINKING_MODE" onchange="markDirty('CLAUDE_THINKING_MODE',this); saveKey('CLAUDE_THINKING_MODE',this.value)">
-                <option value="">— select —</option>
-                <option value="adaptive">adaptive</option>
-                <option value="enabled">enabled</option>
-              </select>
-              <span class="status-dot empty" id="dot-CLAUDE_THINKING_MODE"></span>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-            </div>
-          </div>
-
-          <!-- Card: LangSmith -->
-          <div class="card">
-            <div class="card-title">&#128270; LangSmith</div>
-            <div class="key-row">
-              <span class="key-label">LANGSMITH_API_KEY</span>
-              <input class="key-input" type="password" data-key="LANGSMITH_API_KEY" placeholder="ls__..." oninput="markDirty('LANGSMITH_API_KEY',this)" onblur="saveKey('LANGSMITH_API_KEY',this.value)">
-              <span class="status-dot empty" id="dot-LANGSMITH_API_KEY"></span>
-              <button class="btn-sm" onclick="revealKey('LANGSMITH_API_KEY',this)">Show</button>
-              <button class="btn-sm" onclick="testLangSmith(this)">Test</button>
-            </div>
-            <div class="key-row">
-              <span class="key-label">LANGSMITH_PROJECT</span>
-              <input class="key-input" type="text" data-key="LANGSMITH_PROJECT" placeholder="ambient-patient-companion" oninput="markDirty('LANGSMITH_PROJECT',this)" onblur="saveKey('LANGSMITH_PROJECT',this.value)">
-              <span class="status-dot empty" id="dot-LANGSMITH_PROJECT"></span>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-            </div>
-          </div>
-
-          <!-- Card: Vector Store -->
-          <div class="card">
-            <div class="card-title">&#128451; Vector Store (MemPrompt)</div>
-            <div class="key-row">
-              <span class="key-label">VECTOR_STORE_URL</span>
-              <input class="key-input" type="text" data-key="VECTOR_STORE_URL" placeholder="https://..." oninput="markDirty('VECTOR_STORE_URL',this)" onblur="saveKey('VECTOR_STORE_URL',this.value)">
-              <span class="status-dot empty" id="dot-VECTOR_STORE_URL"></span>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-            </div>
-            <div class="key-row">
-              <span class="key-label">VECTOR_STORE_API_KEY</span>
-              <input class="key-input" type="password" data-key="VECTOR_STORE_API_KEY" placeholder="key..." oninput="markDirty('VECTOR_STORE_API_KEY',this)" onblur="saveKey('VECTOR_STORE_API_KEY',this.value)">
-              <span class="status-dot empty" id="dot-VECTOR_STORE_API_KEY"></span>
-              <button class="btn-sm" onclick="revealKey('VECTOR_STORE_API_KEY',this)">Show</button>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-            </div>
-            <div class="key-row">
-              <span class="key-label">VECTOR_STORE_INDEX</span>
-              <input class="key-input" type="text" data-key="VECTOR_STORE_INDEX" placeholder="clinical-corrections" oninput="markDirty('VECTOR_STORE_INDEX',this)" onblur="saveKey('VECTOR_STORE_INDEX',this.value)">
-              <span class="status-dot empty" id="dot-VECTOR_STORE_INDEX"></span>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-            </div>
-          </div>
-
-          <!-- Card: FHIR / EHR -->
-          <div class="card">
-            <div class="card-title">&#127973; FHIR / EHR</div>
-            <div class="key-row">
-              <span class="key-label">FHIR_BASE_URL</span>
-              <input class="key-input" type="text" data-key="FHIR_BASE_URL" placeholder="https://your-fhir-server/R4" oninput="markDirty('FHIR_BASE_URL',this)" onblur="saveKey('FHIR_BASE_URL',this.value)">
-              <span class="status-dot empty" id="dot-FHIR_BASE_URL"></span>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-            </div>
-            <div class="key-row">
-              <span class="key-label">FHIR_CLIENT_ID</span>
-              <input class="key-input" type="text" data-key="FHIR_CLIENT_ID" placeholder="client-id" oninput="markDirty('FHIR_CLIENT_ID',this)" onblur="saveKey('FHIR_CLIENT_ID',this.value)">
-              <span class="status-dot empty" id="dot-FHIR_CLIENT_ID"></span>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-            </div>
-            <div class="key-row">
-              <span class="key-label">FHIR_CLIENT_SECRET</span>
-              <input class="key-input" type="password" data-key="FHIR_CLIENT_SECRET" placeholder="secret" oninput="markDirty('FHIR_CLIENT_SECRET',this)" onblur="saveKey('FHIR_CLIENT_SECRET',this.value)">
-              <span class="status-dot empty" id="dot-FHIR_CLIENT_SECRET"></span>
-              <button class="btn-sm" onclick="revealKey('FHIR_CLIENT_SECRET',this)">Show</button>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-            </div>
-          </div>
-
-          <!-- Card: Database -->
-          <div class="card">
-            <div class="card-title">&#128450; Database</div>
-            <div class="key-row">
-              <span class="key-label">DATABASE_URL</span>
-              <input class="key-input" type="password" data-key="DATABASE_URL" placeholder="postgresql://..." oninput="markDirty('DATABASE_URL',this)" onblur="saveKey('DATABASE_URL',this.value)">
-              <span class="status-dot empty" id="dot-DATABASE_URL"></span>
-              <button class="btn-sm" onclick="revealKey('DATABASE_URL',this)">Show</button>
-              <button class="btn-sm" style="visibility:hidden">—</button>
-            </div>
-          </div>
-
-          <!-- Completeness progress bar -->
-          <div class="progress-wrap">
-            <div class="progress-label">
-              <span>Configuration progress</span>
-              <span><span id="progress-label">0 / 17</span> &mdash; <span id="progress-pct" style="color:var(--accent);font-weight:600;">0%</span></span>
-            </div>
-            <div class="progress-bar">
-              <div class="progress-fill" id="progress-fill" style="width:0%"></div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Right column: placeholder for MCP summary (populated in Part 3) -->
-        <div id="keys-right-col">
-          <div class="card">
-            <div class="card-title">&#9881; MCP Tools</div>
-            <div style="font-size:12px;color:var(--muted);">Configure MCP server URLs in the <a href="#" onclick="showSection('mcp');return false" style="color:var(--accent);">MCP Tools</a> section.</div>
-            <div id="keys-mcp-summary" style="margin-top:12px;"></div>
-          </div>
-          <div class="card">
-            <div class="card-title">Claude Desktop Config</div>
-            <div style="font-size:12px;color:var(--muted);">Generate your config in the <a href="#" onclick="showSection('config');return false" style="color:var(--accent);">Claude Config</a> section.</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ===== SECTION: MCP TOOLS ===== -->
-    <section id="section-mcp">
-      <div class="section-header" style="display:flex;align-items:flex-start;justify-content:space-between;">
-        <div>
-          <div class="section-title">MCP Tools</div>
-          <div class="section-desc">Register FastMCP server URLs deployed as separate Replit apps.</div>
-        </div>
-        <button class="btn" onclick="showSection('config')">&#8594; Generate Config</button>
-      </div>
-
-      <div class="card">
-        <div class="card-title">&#9881; FastMCP Servers</div>
-        <div id="mcp-rows"></div>
-      </div>
-
-      <div class="info-box">
-        Each MCP server exposes tools via the FastMCP framework. Enter the full Replit URL (e.g. <code>https://synthetic-patient.replit.app/mcp</code>), then click <strong>Test</strong> to verify connectivity.
-      </div>
-    </section>
-
-    <!-- ===== SECTION: CLAUDE CONFIG ===== -->
-    <section id="section-config">
-      <div class="section-header">
-        <div class="section-title">Claude Config</div>
-        <div class="section-desc">Generate configuration files for Claude Desktop and Claude Code CLI.</div>
-      </div>
-
-      <!-- Card: Claude Desktop Config -->
-      <div class="card">
-        <div class="card-title">Claude Desktop Config</div>
-        <div class="info-box">
-          Paste this JSON into your Claude Desktop settings file:<br>
-          <strong>macOS:</strong> <code>~/Library/Application Support/Claude/claude_desktop_config.json</code><br>
-          <strong>Windows:</strong> <code>%APPDATA%\Claude\claude_desktop_config.json</code>
-        </div>
-        <div class="code-block" id="claude-desktop-json">Click "Regenerate" to generate config...</div>
-        <div class="code-actions">
-          <button class="btn btn-primary" onclick="regenerateConfig()" id="btn-regen">&#8635; Regenerate</button>
-          <button class="btn" onclick="copyText('claude-desktop-json')">&#9112; Copy</button>
-          <button class="btn" onclick="downloadJson()">&#8595; Download</button>
-        </div>
-      </div>
-
-      <!-- Card: Claude Code Commands -->
-      <div class="card">
-        <div class="card-title">Claude Code CLI Commands</div>
-        <div class="info-box">
-          Run these commands in your terminal to register MCP servers with Claude Code using <code>claude mcp add</code>.
-        </div>
-        <div class="code-block" id="claude-code-cmds" style="white-space:pre-wrap;">Click "Regenerate" above to generate commands...</div>
-        <div class="code-actions">
-          <button class="btn" onclick="copyText('claude-code-cmds')">&#9112; Copy</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- ===== SECTION: STATUS ===== -->
-    <section id="section-status">
-      <div class="section-header" style="display:flex;align-items:flex-start;justify-content:space-between;">
-        <div>
-          <div class="section-title">Status</div>
-          <div class="section-desc">System-wide configuration and connectivity overview.</div>
-        </div>
-        <button class="btn" onclick="loadConfig()">&#8634; Refresh</button>
-      </div>
-
-      <!-- Stat strip -->
-      <div class="stat-strip" id="status-stat-strip">
-        <div class="stat-card">
-          <div class="stat-label">Keys Configured</div>
-          <div class="stat-value" id="status-keys-val">0 / 17</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">MCP Servers</div>
-          <div class="stat-value" id="status-mcp-val">0 / 5</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Claude Model</div>
-          <div class="stat-value" id="status-model-val" style="font-size:16px;">not set</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Tracing</div>
-          <div class="stat-value" id="status-tracing-val">OFF</div>
-        </div>
-      </div>
-
-      <!-- Service grid -->
-      <div class="card">
-        <div class="card-title">Service Grid</div>
-        <div class="service-grid" id="service-grid"></div>
-      </div>
-    </section>
-
-    <!-- ===== SECTION: .ENV EXPORT ===== -->
-    <section id="section-env">
-      <div class="section-header">
-        <div class="section-title">.env Export</div>
-        <div class="section-desc">Preview and download your environment configuration file.</div>
-      </div>
-
-      <!-- Preview card -->
-      <div class="card">
-        <div class="card-title">Preview</div>
-        <div class="env-preview" id="env-preview">Loading...</div>
-        <div class="code-actions">
-          <button class="btn" onclick="refreshEnvPreview()">&#8634; Refresh</button>
-          <button class="btn" onclick="copyText('env-preview')">&#9112; Copy</button>
-        </div>
-      </div>
-
-      <!-- Download card -->
-      <div class="card">
-        <div class="card-title">Download</div>
-        <div class="info-box" style="border-color:var(--warn);background:rgba(245,158,11,0.04);">
-          &#9888; <strong>Never commit .env to GitHub.</strong> This file contains secrets. Ensure <code>.env</code> is in your <code>.gitignore</code>.
-        </div>
-        <div style="display:flex;gap:8px;">
-          <button class="btn btn-primary" onclick="downloadEnv()">&#8595; Download .env</button>
-          <button class="btn" onclick="copyEnvRaw()">&#9112; Copy raw</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- ===== SECTION: SETUP GUIDE ===== -->
-    <section id="section-setup">
-      <div class="section-header">
-        <div class="section-title">Setup Guide</div>
-        <div class="section-desc">Implementation priority sequence for the Ambient Patient Companion.</div>
-      </div>
-
-      <!-- Week 1 -->
-      <div class="card">
-        <div class="card-title">Week 1 &#8212; Foundation</div>
-        <ol class="step-list">
-          <li class="step-item">Configure <strong>Anthropic API key</strong> and set Claude model to <code>claude-sonnet-4-6</code> with adaptive thinking.</li>
-          <li class="step-item">Deploy the <strong>FastMCP synthetic patient server</strong> on Replit with Maria Chen canonical data (MRN 4829341).</li>
-          <li class="step-item">Set up <strong>LangSmith tracing</strong> — add API key and project name, verify traces appear in dashboard.</li>
-          <li class="step-item">Wire the <strong>clinical priority queue</strong> (<code>core/priority_queue.py</code>) with 6-tier event classification.</li>
-          <li class="step-item">Build the <strong>constitutional system prompt</strong> (<code>core/constitutional.py</code>) with healthcare guardrails.</li>
-        </ol>
-      </div>
-
-      <!-- Week 2 -->
-      <div class="card">
-        <div class="card-title">Week 2 &#8212; Feedback Loop</div>
-        <ol class="step-list">
-          <li class="step-item">Deploy <strong>Vector Store</strong> (Pinecone/Qdrant) for MemPrompt correction storage and retrieval.</li>
-          <li class="step-item">Wire <strong>LangSmith feedback capture</strong> to provider UI — thumbs up/down on every AI suggestion.</li>
-          <li class="step-item">Inject <strong>few-shot corrections</strong> into system prompt on every API call (3-5 examples via XML tags).</li>
-        </ol>
-      </div>
-
-      <!-- Critical Reminders -->
-      <div class="card amber-left">
-        <div class="card-title">&#9888; Critical Reminders</div>
-        <ol class="step-list">
-          <li class="step-item"><strong>HealthEx MCP</strong> cannot generate synthetic data and is incompatible with Claude Code. Always use the FastMCP <code>synthetic_patient</code> server instead.</li>
-          <li class="step-item"><strong>Never use LangGraph SummarizationMiddleware</strong> — it strips thinking blocks from Claude responses. Use direct <code>ChatAnthropic</code> for thinking-block tracing.</li>
-          <li class="step-item"><strong>California AB 3030</strong>: All patient-facing AI communications must include the disclosure: <em>"This message was generated with AI assistance. Please contact your healthcare provider for medical decisions."</em></li>
-        </ol>
-      </div>
-    </section>
-
-  </main>
+<!-- ── Top Bar ──────────────────────────────────────────────────── -->
+<div class="topbar">
+  <div class="logo">A</div>
+  <div>
+    <div class="topbar-title">Ambient Patient Companion · Dev Setup</div>
+    <div class="topbar-sub">Config dashboard — dev environment</div>
+  </div>
+  <div class="topbar-spacer"></div>
+  <div class="progress-wrap">
+    <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+    <span class="progress-label" id="progressLabel">Loading…</span>
+  </div>
+  <button class="btn btn-ghost btn-sm" onclick="loadConfig()">↺ Refresh</button>
 </div>
 
+<div class="main">
+
+  <!-- ── Quick status bar ─────────────────────────────────────── -->
+  <div class="checklist-bar" id="checklistBar">
+    <div class="check-item"><span class="status-dot dot-neutral" id="dotDB"></span> Database</div>
+    <div class="check-item"><span class="status-dot dot-neutral" id="dotAnthropic"></span> Anthropic</div>
+    <div class="check-item"><span class="status-dot dot-neutral" id="dotLangSmith"></span> LangSmith</div>
+    <div class="check-item"><span class="status-dot dot-neutral" id="dotMCP"></span> MCP servers</div>
+    <div style="flex:1"></div>
+    <button class="btn btn-ghost btn-sm" onclick="runAllTests()">▶ Test all connections</button>
+  </div>
+
+  <!-- ── Tabs ─────────────────────────────────────────────────── -->
+  <div>
+    <div class="tabs">
+      <button class="tab active" onclick="showTab('auto')" id="tabAuto">
+        ✅ Auto-configured <span class="tab-count" id="countAuto">–</span>
+      </button>
+      <button class="tab" onclick="showTab('self')" id="tabSelf">
+        🔧 Self-hosted <span class="tab-count" id="countSelf">–</span>
+      </button>
+      <button class="tab" onclick="showTab('need')" id="tabNeed">
+        🔑 Need API Keys <span class="tab-count" id="countNeed">–</span>
+      </button>
+    </div>
+
+    <!-- AUTO TAB ──────────────────────────────────────────────── -->
+    <div class="tab-panel active" id="panelAuto">
+      <div class="section-header">
+        <div>
+          <div class="section-title">Auto-configured</div>
+          <div class="section-desc">These values are pre-set or detected automatically. No action needed — just verify and apply defaults.</div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="applyDefaults()" style="margin-left:auto">⚡ Apply all defaults</button>
+      </div>
+      <div id="cardsAuto"></div>
+    </div>
+
+    <!-- SELF-HOSTED TAB ──────────────────────────────────────── -->
+    <div class="tab-panel" id="panelSelf">
+      <div class="section-header">
+        <div>
+          <div class="section-title">Self-hosted services</div>
+          <div class="section-desc">These can run on your own machine or in this Repl — no third-party accounts required. Commands you can run yourself are shown.</div>
+        </div>
+      </div>
+      <div id="cardsSelf"></div>
+    </div>
+
+    <!-- NEED KEYS TAB ─────────────────────────────────────────── -->
+    <div class="tab-panel" id="panelNeed">
+      <div class="section-header">
+        <div>
+          <div class="section-title">Third-party API keys</div>
+          <div class="section-desc">These require signing up with an external provider. Step-by-step instructions are shown below. Add keys to Replit Secrets so they persist.</div>
+        </div>
+      </div>
+
+      <div class="replit-hint" style="margin-bottom:16px">
+        <div class="icon">🔐</div>
+        <div>
+          <strong>Use Replit Secrets to store these permanently</strong>
+          After you paste a key into the field and click Save, also add it to <b>Settings → Secrets</b> in the left sidebar. Replit Secrets survive restarts and are never committed to git.
+        </div>
+      </div>
+
+      <div id="cardsNeed"></div>
+    </div>
+  </div>
+
+  <!-- ── Claude Desktop config ───────────────────────────────── -->
+  <div>
+    <div class="section-header">
+      <div>
+        <div class="section-title">Claude Desktop / Claude Code config</div>
+        <div class="section-desc">Auto-generated from your MCP URLs above.</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="generateClaudeConfig()" style="margin-left:auto">Generate</button>
+    </div>
+    <div class="card" id="claudeConfigCard" style="display:none">
+      <pre id="claudeConfigJSON" style="font-size:11px;overflow:auto;max-height:200px;background:#f8fafc;padding:12px;border-radius:6px;border:1px solid var(--border)"></pre>
+      <div style="display:flex;gap:8px;flex-wrap:wrap" id="claudeCodeCmds"></div>
+    </div>
+  </div>
+
+</div><!-- end .main -->
+
+<!-- ── Action bar ─────────────────────────────────────────────── -->
+<div class="action-bar">
+  <span class="text-xs text-muted">Values saved to local <code>.env</code> — also add secrets to Replit Secrets panel.</span>
+  <div class="action-bar-spacer"></div>
+  <a href="/api/export/env?download=true" class="btn btn-ghost btn-sm">⬇ Download .env</a>
+  <button class="btn btn-primary" onclick="saveAll()">💾 Save all changes</button>
+</div>
+
+<!-- ── Toast ──────────────────────────────────────────────────── -->
 <div id="toast"></div>
 
 <script>
-/* ── Global State ──────────────────────────────────────── */
+// ── State ──────────────────────────────────────────────────────
 let configData = {};
-let dirtyFields = new Set();
 
-/* ── MCP Server Definitions ────────────────────────────── */
-const MCP_SERVERS = [
-  { id:"synthetic_patient", name:"Synthetic Patient", desc:"Generate synthetic patient data. Replaces HealthEx MCP.", key:"MCP_SYNTHETIC_PATIENT_URL", tools:["get_patient_record","get_lab_results","get_care_gaps","get_schedule"] },
-  { id:"ehr_integration", name:"EHR Integration", desc:"FHIR R5 read/write, SMART-on-FHIR auth.", key:"MCP_EHR_INTEGRATION_URL", tools:["read_patient","search_observations","create_task","subscribe_topic"] },
-  { id:"care_gap_analyzer", name:"Care Gap Analyzer", desc:"USPSTF/ADA/ACC guideline gap detection.", key:"MCP_CARE_GAP_ANALYZER_URL", tools:["analyze_care_gaps","get_chase_list","score_priority"] },
-  { id:"lab_processor", name:"Lab Processor", desc:"Lab result interpretation, trend analysis.", key:"MCP_LAB_PROCESSOR_URL", tools:["interpret_lab","get_trend","check_critical_values"] },
-  { id:"langsmith_feedback", name:"LangSmith Feedback", desc:"Clinician correction capture, MemPrompt retrieval.", key:"MCP_LANGSMITH_FEEDBACK_URL", tools:["capture_feedback","retrieve_corrections","store_correction"] },
-];
-
-/* ── Navigation ────────────────────────────────────────── */
-function showSection(id) {
-  document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.getElementById('section-' + id).classList.add('active');
-  document.querySelector(`.nav-item[data-section="${id}"]`).classList.add('active');
+// ── Tab switching ──────────────────────────────────────────────
+function showTab(name) {
+  ['auto','self','need'].forEach(t => {
+    document.getElementById('panel'+cap(t)).classList.toggle('active', t===name);
+    document.getElementById('tab'+cap(t)).classList.toggle('active', t===name);
+  });
 }
+function cap(s) { return s.charAt(0).toUpperCase()+s.slice(1); }
 
-/* ── Toast ─────────────────────────────────────────────── */
-function toast(msg, type = 'ok') {
-  const el = document.createElement('div');
-  el.className = 'toast-item ' + type;
+// ── Toast ──────────────────────────────────────────────────────
+function toast(msg, type='ok', ms=2600) {
+  const el = document.getElementById('toast');
   el.textContent = msg;
-  document.getElementById('toast').appendChild(el);
-  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 2800);
+  el.className = 'show ' + type;
+  clearTimeout(el._t);
+  el._t = setTimeout(()=>{ el.className=''; },ms);
 }
 
-/* ── API Helpers ───────────────────────────────────────── */
-async function api(path, opts = {}) {
-  try {
-    const r = await fetch(path, opts);
-    if (opts.raw) return r;
-    return await r.json();
-  } catch (e) {
-    toast('Network error: ' + e.message, 'err');
-    return null;
-  }
+// ── Source tag ─────────────────────────────────────────────────
+function sourceTag(src) {
+  const map = {
+    replit_secret: ['src-replit','🔒 Replit Secret'],
+    local_env:     ['src-local','📄 Local .env'],
+    default:       ['src-default','⚙ Default'],
+    unset:         ['src-unset','✗ Not set'],
+  };
+  const [cls,label] = map[src] || ['src-unset','✗ Not set'];
+  return `<span class="source-tag ${cls}">${label}</span>`;
 }
 
-/* ── Load Config ───────────────────────────────────────── */
+// ── Load config ─────────────────────────────────────────────────
 async function loadConfig() {
-  const data = await api('/api/config');
-  if (!data) return;
-  configData = data;
-  populateAllSections();
+  try {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    configData = data.keys;
+
+    // Progress
+    const pct = data.completeness.pct;
+    document.getElementById('progressFill').style.width = pct+'%';
+    document.getElementById('progressLabel').textContent =
+      `${data.completeness.set}/${data.completeness.total} required set (${pct}%)`;
+
+    renderCards();
+    updateCounts();
+  } catch(e) {
+    toast('Failed to load config: '+e.message, 'err');
+  }
 }
 
-/* ── Populate All Sections (called after loadConfig) ──── */
-function populateAllSections() {
-  populateKeys();
-  populateMcp();
-  populateStatus();
-  updateNavDots();
-  updateProgressBar();
-  refreshEnvPreview();
+// ── Render cards ────────────────────────────────────────────────
+function renderCards() {
+  const cats = { AUTO:[], SELF_HOSTED:[], THIRD_PARTY:[] };
+  for (const [k,v] of Object.entries(configData)) {
+    cats[v.category]?.push([k,v]);
+  }
+  document.getElementById('cardsAuto').innerHTML = cats.AUTO.map(([k,v])=>autoCard(k,v)).join('');
+  document.getElementById('cardsSelf').innerHTML = cats.SELF_HOSTED.map(([k,v])=>selfCard(k,v)).join('');
+  document.getElementById('cardsNeed').innerHTML = cats.THIRD_PARTY.map(([k,v])=>needCard(k,v)).join('');
 }
 
-/* ── Save All ──────────────────────────────────────────── */
+function statusIcon(key, v) {
+  if (v.source==='replit_secret') return '🔒';
+  if (v.source==='local_env')     return '📄';
+  if (v.source==='default')       return '⚙';
+  return '○';
+}
+
+function autoCard(key, v) {
+  const display = v.raw_value || v.value || v.default || '';
+  const isDB = key === 'DATABASE_URL';
+  return `<div class="card card-auto">
+    <div class="card-row">
+      <div class="card-icon icon-auto">${isDB ? '🗄' : '⚙'}</div>
+      <div class="card-body">
+        <div class="flex items-center gap8">
+          <span class="card-label">${v.label}</span>
+          ${sourceTag(v.source)}
+        </div>
+        <div class="card-desc mt4">${v.description}</div>
+        <div class="input-row mt8">
+          <input type="text" id="input_${key}" value="${esc(display)}"
+            ${isDB ? 'readonly' : ''}
+            placeholder="${esc(v.default || 'auto-detected')}"
+            onchange="markDirty('${key}')">
+          ${isDB ? `<button class="btn btn-ghost btn-sm" onclick="testDB()">Test</button>` : ''}
+          ${key.startsWith('CLAUDE_') ? `<button class="btn btn-ghost btn-sm" onclick="saveOne('${key}')">Save</button>` : ''}
+        </div>
+        <div class="test-result" id="test_${key}"></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function selfCard(key, v) {
+  const display = v.raw_value || v.value || '';
+  const hasSuggestion = v.suggestion || v.setup_cmd;
+  return `<div class="card card-self">
+    <div class="card-row">
+      <div class="card-icon icon-self">🔧</div>
+      <div class="card-body">
+        <div class="flex items-center gap8">
+          <span class="card-label">${v.label}</span>
+          ${v.optional ? '<span class="optional-badge">optional</span>' : ''}
+          ${sourceTag(v.source)}
+        </div>
+        <div class="card-desc mt4">${v.description}</div>
+        ${hasSuggestion ? `
+        <div class="suggestion mt8">
+          <div class="suggestion-label">💡 Suggestion</div>
+          <div>${v.suggestion}</div>
+          ${v.setup_cmd ? `
+          <div class="cmd-block">
+            <code>${esc(v.setup_cmd)}</code>
+            <button class="cmd-copy" onclick="copyCmd('${esc(v.setup_cmd)}',this)">Copy</button>
+          </div>` : ''}
+          ${v.alt ? `<div class="text-muted text-xs">${v.alt}</div>` : ''}
+        </div>` : ''}
+        <div class="input-row mt8">
+          <input type="${v.secret?'password':'text'}" id="input_${key}"
+            value="${esc(display)}"
+            placeholder="${esc(v.default || v.suggestion?.split(' ')[0] || '')}"
+            onchange="markDirty('${key}')">
+          <button class="btn btn-ghost btn-sm" onclick="saveOne('${key}')">Save</button>
+          ${v.help_url ? `<a href="${v.help_url}" target="_blank" class="btn btn-ghost btn-sm">Docs ↗</a>` : ''}
+        </div>
+        <div class="test-result" id="test_${key}"></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function needCard(key, v) {
+  const display = v.value || '';
+  const isAnthropicKey = key === 'ANTHROPIC_API_KEY';
+  return `<div class="card card-need">
+    <div class="card-row">
+      <div class="card-icon icon-need">🔑</div>
+      <div class="card-body">
+        <div class="flex items-center gap8">
+          <span class="card-label">${v.label}</span>
+          ${v.optional ? '<span class="optional-badge">optional</span>' : ''}
+          ${v.free_tier ? '<span class="free-badge">Free tier</span>' : ''}
+          ${sourceTag(v.source)}
+        </div>
+        <div class="card-desc mt4">${v.description}</div>
+
+        ${v.provider ? `
+        <div class="provider-box mt8">
+          <div class="provider-name">📦 ${v.provider}</div>
+          <div class="provider-steps">${v.get_steps}</div>
+          <a href="${v.get_url}" target="_blank" class="provider-link">Get your key ↗</a>
+        </div>` : ''}
+
+        <div class="input-row mt8">
+          <input type="password" id="input_${key}"
+            value="${esc(display)}"
+            placeholder="Paste your key here…"
+            onchange="markDirty('${key}')">
+          <button class="btn btn-ghost btn-sm" onclick="toggleReveal('${key}')">👁</button>
+          <button class="btn btn-primary btn-sm" onclick="saveAndGuide('${key}')">Save</button>
+          ${isAnthropicKey ? `<button class="btn btn-ghost btn-sm" onclick="testAnthropic()">Test</button>` : ''}
+          ${key==='LANGSMITH_API_KEY' ? `<button class="btn btn-ghost btn-sm" onclick="testLangSmith()">Test</button>` : ''}
+        </div>
+        <div class="test-result" id="test_${key}"></div>
+
+        <div class="replit-hint mt8">
+          <div class="icon">🔐</div>
+          <div>After saving, open <b>Settings → Secrets</b> in the left sidebar and add: <code>${key}</code></div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── Counts ──────────────────────────────────────────────────────
+function updateCounts() {
+  const cats = {AUTO:0,SELF_HOSTED:0,THIRD_PARTY:0};
+  for (const v of Object.values(configData)) cats[v.category]++;
+  document.getElementById('countAuto').textContent = cats.AUTO;
+  document.getElementById('countSelf').textContent = cats.SELF_HOSTED;
+  document.getElementById('countNeed').textContent = cats.THIRD_PARTY;
+}
+
+// ── Dirty tracking ──────────────────────────────────────────────
+const dirty = new Set();
+function markDirty(key) { dirty.add(key); }
+
+// ── Save helpers ────────────────────────────────────────────────
+async function saveOne(key) {
+  const el = document.getElementById('input_'+key);
+  if (!el) return;
+  const val = el.value.trim();
+  await postSave({[key]: val});
+}
+
 async function saveAll() {
-  const body = {};
-  dirtyFields.forEach(key => {
-    const el = document.querySelector(`[data-key="${key}"]`);
-    if (el) body[key] = el.value;
-  });
-  if (Object.keys(body).length === 0) { toast('No changes to save'); return; }
-  const r = await api('/api/config', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (r && r.saved) {
-    dirtyFields.clear();
-    document.querySelectorAll('.key-input.dirty, .mcp-url-input.dirty').forEach(el => el.classList.remove('dirty'));
-    toast('Saved ' + r.saved.length + ' key(s)');
+  const payload = {};
+  for (const key of Object.keys(configData)) {
+    const el = document.getElementById('input_'+key);
+    if (el && !el.readOnly) payload[key] = el.value.trim();
+  }
+  await postSave(payload);
+}
+
+async function postSave(payload) {
+  try {
+    const res = await fetch('/api/config', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    const pct = data.completeness.pct;
+    document.getElementById('progressFill').style.width = pct+'%';
+    document.getElementById('progressLabel').textContent =
+      `${data.completeness.set}/${data.completeness.total} required set (${pct}%)`;
+    toast(`Saved ${data.saved.length} key(s) to local .env`, 'ok');
+    dirty.clear();
     await loadConfig();
+  } catch(e) {
+    toast('Save failed: '+e.message, 'err');
   }
 }
 
-/* ── Save Single Key ───────────────────────────────────── */
-async function saveKey(key, value) {
-  const r = await api('/api/config', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ [key]: value }),
-  });
-  if (r && r.saved) {
-    dirtyFields.delete(key);
-    const el = document.querySelector(`[data-key="${key}"]`);
-    if (el) el.classList.remove('dirty');
-    toast('Saved');
-    await loadConfig();
+// Save + show Replit Secrets reminder
+async function saveAndGuide(key) {
+  await saveOne(key);
+  const el = document.getElementById('input_'+key);
+  const val = el?.value.trim();
+  if (val) {
+    toast(`Saved! Remember to also add ${key} to Replit Secrets (Settings → Secrets).`, 'ok', 5000);
   }
 }
 
-/* ── Reveal Key ────────────────────────────────────────── */
-async function revealKey(key, btn) {
-  const r = await api('/api/reveal/' + key);
-  if (!r) return;
-  const input = document.querySelector(`[data-key="${key}"]`);
-  if (!input) return;
-  input.type = 'text';
-  input.value = r.value;
-  btn.textContent = 'Hide';
-  setTimeout(() => {
-    input.type = 'password';
-    input.value = configData.keys[key]?.set ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : '';
-    btn.textContent = 'Show';
-  }, 10000);
+// ── Apply AUTO defaults ─────────────────────────────────────────
+async function applyDefaults() {
+  const res = await fetch('/api/apply-defaults',{method:'POST'});
+  const data = await res.json();
+  if (data.applied.length === 0) {
+    toast('All defaults already applied.', 'ok');
+  } else {
+    toast(`Applied ${data.applied.length} default(s): ${data.applied.join(', ')}`, 'ok', 4000);
+  }
+  await loadConfig();
 }
 
-/* ── Mark Dirty ────────────────────────────────────────── */
-function markDirty(key, el) {
-  dirtyFields.add(key);
-  el.classList.add('dirty');
+// ── Reveal toggle ───────────────────────────────────────────────
+async function toggleReveal(key) {
+  const el = document.getElementById('input_'+key);
+  if (!el) return;
+  if (el.type === 'password') {
+    try {
+      const res = await fetch('/api/reveal/'+key);
+      const data = await res.json();
+      el.value = data.value;
+      el.type = 'text';
+    } catch(e) { toast('Reveal failed','err'); }
+  } else {
+    el.type = 'password';
+  }
 }
 
-/* ── Update Nav Dots ───────────────────────────────────── */
-function updateNavDots() {
-  if (!configData.keys) return;
-  const k = configData.keys;
-  // Keys section
-  const keyKeys = ['ANTHROPIC_API_KEY','CLAUDE_MODEL','CLAUDE_THINKING_MODE','LANGSMITH_API_KEY','LANGSMITH_PROJECT','VECTOR_STORE_URL','VECTOR_STORE_API_KEY','VECTOR_STORE_INDEX','FHIR_BASE_URL','FHIR_CLIENT_ID','FHIR_CLIENT_SECRET','DATABASE_URL'];
-  const keySet = keyKeys.filter(x => k[x]?.set).length;
-  setDot('dot-keys', keySet === 0 ? 'empty' : keySet === keyKeys.length ? 'ok' : 'warn');
-  // MCP section
-  const mcpKeys = MCP_SERVERS.map(s => s.key);
-  const mcpSet = mcpKeys.filter(x => k[x]?.set).length;
-  setDot('dot-mcp', mcpSet === 0 ? 'empty' : mcpSet === mcpKeys.length ? 'ok' : 'warn');
-  // Config
-  setDot('dot-config', mcpSet > 0 ? 'ok' : 'empty');
-  // Status
-  setDot('dot-status', 'ok');
-  // Env
-  setDot('dot-env', configData.completeness?.pct > 0 ? 'ok' : 'empty');
+// ── Connection tests ────────────────────────────────────────────
+function setTestResult(id, ok, msg) {
+  const el = document.getElementById('test_'+id);
+  if (!el) return;
+  el.className = 'test-result ' + (ok ? 'ok' : 'err');
+  el.textContent = ok ? ('✓ '+msg) : ('✗ '+msg);
 }
 
-function setDot(id, state) {
+async function testDB() {
+  setTestResult('DATABASE_URL', true, 'Testing…');
+  const res = await fetch('/api/test/database',{method:'POST'});
+  const data = await res.json();
+  if (data.ok) {
+    setTestResult('DATABASE_URL', true, `Connected — ${data.patients} patients in DB`);
+    dot('dotDB','ok');
+  } else {
+    setTestResult('DATABASE_URL', false, data.error);
+    dot('dotDB','danger');
+  }
+}
+
+async function testAnthropic() {
+  setTestResult('ANTHROPIC_API_KEY', true, 'Testing…');
+  const res = await fetch('/api/test/anthropic',{method:'POST'});
+  const data = await res.json();
+  if (data.ok) {
+    setTestResult('ANTHROPIC_API_KEY', true, `${data.model} reachable — ${data.latency_ms}ms`);
+    dot('dotAnthropic','ok');
+  } else {
+    setTestResult('ANTHROPIC_API_KEY', false, data.error);
+    dot('dotAnthropic','danger');
+  }
+}
+
+async function testLangSmith() {
+  setTestResult('LANGSMITH_API_KEY', true, 'Testing…');
+  const res = await fetch('/api/test/langsmith',{method:'POST'});
+  const data = await res.json();
+  if (data.ok) {
+    setTestResult('LANGSMITH_API_KEY', true, `Reachable — ${data.latency_ms}ms`);
+    dot('dotLangSmith','ok');
+  } else {
+    setTestResult('LANGSMITH_API_KEY', false, data.error);
+    dot('dotLangSmith','warn');
+  }
+}
+
+async function runAllTests() {
+  await Promise.all([testDB(), testAnthropic(), testLangSmith(), testAllMCP()]);
+}
+
+async function testAllMCP() {
+  const servers = ['synthetic_patient','ehr_integration','care_gap_analyzer','lab_processor','langsmith_feedback'];
+  let ok = 0;
+  await Promise.all(servers.map(async sid => {
+    const res = await fetch('/api/test/mcp/'+sid,{method:'POST'});
+    const data = await res.json();
+    if (data.ok) ok++;
+  }));
+  dot('dotMCP', ok===servers.length ? 'ok' : ok>0 ? 'warn' : 'danger');
+}
+
+function dot(id, state) {
   const el = document.getElementById(id);
   if (!el) return;
-  el.className = 'nav-dot ' + state;
+  el.className = 'status-dot dot-'+state;
 }
 
-/* ── Update Progress Bar ───────────────────────────────── */
-function updateProgressBar() {
-  const c = configData.completeness || { set: 0, total: 17, pct: 0 };
-  const pct = document.getElementById('progress-pct');
-  const fill = document.getElementById('progress-fill');
-  const label = document.getElementById('progress-label');
-  if (pct) pct.textContent = c.pct + '%';
-  if (fill) fill.style.width = c.pct + '%';
-  if (label) label.textContent = c.set + ' / ' + c.total;
+// ── Claude config ───────────────────────────────────────────────
+async function generateClaudeConfig() {
+  const res = await fetch('/api/generate/claude-config');
+  const data = await res.json();
+  const card = document.getElementById('claudeConfigCard');
+  card.style.display = 'flex';
+  document.getElementById('claudeConfigJSON').textContent =
+    JSON.stringify(data.config, null, 2);
+  const cmdsEl = document.getElementById('claudeCodeCmds');
+  cmdsEl.innerHTML = data.claude_code_commands.map(cmd =>
+    `<div class="cmd-block" style="flex:1;min-width:0">
+      <code style="overflow:auto;white-space:nowrap">${esc(cmd)}</code>
+      <button class="cmd-copy" onclick="copyCmd('${esc(cmd)}',this)">Copy</button>
+    </div>`
+  ).join('');
+  toast(`Generated config for ${data.servers_configured}/${data.servers_total} MCP servers`, 'ok');
 }
 
-/* ── Populate: API Keys ────────────────────────────────── */
-function populateKeys() {
-  if (!configData.keys) return;
-  const k = configData.keys;
-  // Fill input values
-  for (const key of Object.keys(k)) {
-    const el = document.querySelector(`[data-key="${key}"]`);
-    if (!el) continue;
-    if (el.tagName === 'SELECT') {
-      el.value = k[key].set ? k[key].value : '';
-    } else if (el.type === 'password') {
-      el.value = k[key].set ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : '';
-    } else {
-      el.value = k[key].value || '';
-    }
-    // Status dot
-    const dot = document.getElementById('dot-' + key);
-    if (dot) dot.className = 'status-dot ' + (k[key].set ? 'set' : 'empty');
-  }
-  // Stat strip
-  const c = configData.completeness || { set:0, total:17, pct:0 };
-  document.getElementById('stat-keys-count').textContent = c.set + '/' + c.total;
-  document.getElementById('stat-keys-sub').textContent = c.pct + '% complete';
-  // MCP stat
-  const mcpKeys = MCP_SERVERS.map(s => s.key);
-  const mcpSet = mcpKeys.filter(x => k[x]?.set).length;
-  const mcpPending = mcpKeys.length - mcpSet;
-  document.getElementById('stat-mcp-count').textContent = mcpSet + '/' + mcpKeys.length;
-  document.getElementById('stat-mcp-sub').textContent = mcpPending + ' pending URL';
-  // Model stat
-  const model = k.CLAUDE_MODEL?.set ? k.CLAUDE_MODEL.value : 'not set';
-  document.getElementById('stat-model').textContent = model;
-  const thinking = k.CLAUDE_THINKING_MODE?.set ? k.CLAUDE_THINKING_MODE.value : '—';
-  document.getElementById('stat-model-sub').textContent = thinking === '—' ? '—' : thinking.charAt(0).toUpperCase() + thinking.slice(1) + ' thinking';
-  // Tracing stat
-  const hasLs = k.LANGSMITH_API_KEY?.set;
-  document.getElementById('stat-tracing').textContent = hasLs ? 'ON' : 'OFF';
-  document.getElementById('stat-tracing').style.color = hasLs ? 'var(--ok)' : 'var(--muted)';
-  document.getElementById('stat-tracing-sub').textContent = hasLs ? 'LangSmith active' : 'LangSmith';
-  // MCP summary in right col
-  const summaryEl = document.getElementById('keys-mcp-summary');
-  if (summaryEl) {
-    summaryEl.innerHTML = MCP_SERVERS.map(s => {
-      const isSet = k[s.key]?.set;
-      const badge = isSet ? '<span class="badge badge-ok">Online</span>' : '<span class="badge badge-gray">No URL</span>';
-      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--bg);font-size:12px;"><span>${s.name}</span>${badge}</div>`;
-    }).join('');
-  }
-}
-
-/* ── Test: Anthropic ───────────────────────────────────── */
-async function testAnthropic(btn) {
-  const orig = btn.textContent;
-  btn.innerHTML = '<span class="spinner"></span>';
-  btn.disabled = true;
-  const r = await api('/api/test/anthropic', { method: 'POST' });
-  btn.disabled = false;
-  btn.textContent = orig;
-  if (!r) return;
-  const dot = document.getElementById('dot-ANTHROPIC_API_KEY');
-  if (r.ok) {
-    if (dot) dot.className = 'status-dot set';
-    toast('\u2713 Anthropic connected \u2014 ' + r.model + ' (' + r.latency_ms + 'ms)');
-  } else {
-    if (dot) dot.className = 'status-dot error';
-    toast('\u2717 Anthropic: ' + r.error, 'err');
-  }
-}
-
-/* ── Test: LangSmith ───────────────────────────────────── */
-async function testLangSmith(btn) {
-  const orig = btn.textContent;
-  btn.innerHTML = '<span class="spinner"></span>';
-  btn.disabled = true;
-  const r = await api('/api/test/langsmith', { method: 'POST' });
-  btn.disabled = false;
-  btn.textContent = orig;
-  if (!r) return;
-  const dot = document.getElementById('dot-LANGSMITH_API_KEY');
-  if (r.ok) {
-    if (dot) dot.className = 'status-dot set';
-    toast('\u2713 LangSmith connected (' + r.latency_ms + 'ms)');
-  } else {
-    if (dot) dot.className = 'status-dot error';
-    toast('\u2717 LangSmith: ' + r.error, 'err');
-  }
-}
-/* ── Populate: MCP Tools ───────────────────────────────── */
-function populateMcp() {
-  if (!configData.keys) return;
-  const k = configData.keys;
-  const container = document.getElementById('mcp-rows');
-  if (!container) return;
-  container.innerHTML = MCP_SERVERS.map(s => {
-    const isSet = k[s.key]?.set;
-    const url = isSet ? k[s.key].value : '';
-    let badgeClass = 'badge-gray', badgeText = 'No URL', rowClass = '';
-    if (isSet) {
-      badgeClass = 'badge-warn'; badgeText = 'Pending'; rowClass = 'pending';
-    }
-    const toolsList = s.tools.map(t => t).join('\n');
-    return `<div class="mcp-row ${rowClass}" id="mcp-row-${s.id}">
-      <span class="mcp-name">${s.name}</span>
-      <input class="mcp-url-input" type="text" data-key="${s.key}" value="${url}" placeholder="paste Replit URL..." oninput="markDirty('${s.key}',this)" onblur="saveKey('${s.key}',this.value)">
-      <span class="badge ${badgeClass}" id="mcp-badge-${s.id}">${badgeText}</span>
-      <button class="btn-sm" onclick="testMcp('${s.id}',this)">Test</button>
-      <span class="tools-count">${s.tools.length} tools<span class="tools-tip">${toolsList}</span></span>
-    </div>`;
-  }).join('');
-}
-
-/* ── Test: MCP Server ──────────────────────────────────── */
-async function testMcp(serverId, btn) {
-  const orig = btn.textContent;
-  btn.innerHTML = '<span class="spinner"></span>';
-  btn.disabled = true;
-  const r = await api('/api/test/mcp/' + serverId, { method: 'POST' });
-  btn.disabled = false;
-  btn.textContent = orig;
-  if (!r) return;
-  const badge = document.getElementById('mcp-badge-' + serverId);
-  const row = document.getElementById('mcp-row-' + serverId);
-  if (r.ok) {
-    if (badge) { badge.className = 'badge badge-ok'; badge.textContent = 'Online'; }
-    if (row) { row.className = 'mcp-row online'; }
-    toast('\u2713 ' + serverId.replace(/_/g,' ') + ' connected (' + r.latency_ms + 'ms)');
-  } else {
-    if (badge) { badge.className = 'badge badge-err'; badge.textContent = 'Error'; }
-    if (row) { row.className = 'mcp-row'; }
-    toast('\u2717 ' + serverId.replace(/_/g,' ') + ': ' + r.error, 'err');
-  }
-}
-/* ── Populate: Status ──────────────────────────────────── */
-function populateStatus() {
-  if (!configData.keys) return;
-  const k = configData.keys;
-  const c = configData.completeness || { set:0, total:17, pct:0 };
-  // Stat strip
-  document.getElementById('status-keys-val').textContent = c.set + ' / ' + c.total;
-  const mcpKeys = MCP_SERVERS.map(s => s.key);
-  const mcpSet = mcpKeys.filter(x => k[x]?.set).length;
-  document.getElementById('status-mcp-val').textContent = mcpSet + ' / ' + mcpKeys.length;
-  const model = k.CLAUDE_MODEL?.set ? k.CLAUDE_MODEL.value : 'not set';
-  document.getElementById('status-model-val').textContent = model;
-  const hasLs = k.LANGSMITH_API_KEY?.set;
-  const tv = document.getElementById('status-tracing-val');
-  tv.textContent = hasLs ? 'ON' : 'OFF';
-  tv.style.color = hasLs ? 'var(--ok)' : 'var(--muted)';
-  // Service grid
-  const services = [
-    { name:'Anthropic API', key:'ANTHROPIC_API_KEY' },
-    { name:'LangSmith', key:'LANGSMITH_API_KEY' },
-    { name:'Vector Store', key:'VECTOR_STORE_URL' },
-    { name:'FHIR Server', key:'FHIR_BASE_URL' },
-    { name:'Database', key:'DATABASE_URL' },
-    ...MCP_SERVERS.map(s => ({ name:s.name, key:s.key })),
-  ];
-  const grid = document.getElementById('service-grid');
-  if (grid) {
-    grid.innerHTML = services.map(s => {
-      const isSet = k[s.key]?.set;
-      const dotClass = isSet ? 'set' : 'empty';
-      const label = isSet ? 'Configured' : 'Not configured';
-      return `<div class="svc-card"><div class="svc-name">${s.name}</div><div class="svc-status"><span class="status-dot ${dotClass}"></span> ${label}</div></div>`;
-    }).join('');
-  }
-}
-
-/* ── Config Generation ─────────────────────────────────── */
-let lastConfig = null;
-
-async function regenerateConfig() {
-  const btn = document.getElementById('btn-regen');
-  btn.innerHTML = '<span class="spinner"></span> Generating...';
-  btn.disabled = true;
-  const r = await api('/api/generate/claude-config');
-  btn.disabled = false;
-  btn.innerHTML = '&#8635; Regenerate';
-  if (!r) return;
-  lastConfig = r;
-  const jsonEl = document.getElementById('claude-desktop-json');
-  const cmdsEl = document.getElementById('claude-code-cmds');
-  jsonEl.textContent = JSON.stringify(r.config, null, 2);
-  if (r.claude_code_commands.length > 0) {
-    cmdsEl.textContent = r.claude_code_commands.join('\n');
-  } else {
-    cmdsEl.textContent = '# No MCP servers configured yet.\n# Add URLs in the MCP Tools section first.';
-  }
-  toast('\u2713 Config generated (' + r.servers_configured + '/' + r.servers_total + ' servers)');
-}
-
-/* ── Copy to Clipboard ─────────────────────────────────── */
-function copyText(elementId) {
-  const el = document.getElementById(elementId);
-  if (!el) return;
-  navigator.clipboard.writeText(el.textContent).then(() => {
-    toast('\u2713 Copied to clipboard');
-  }).catch(() => {
-    toast('\u2717 Copy failed', 'err');
+// ── Clipboard ───────────────────────────────────────────────────
+function copyCmd(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(()=>{ btn.textContent=orig; }, 1500);
   });
-}
-
-/* ── Download JSON ─────────────────────────────────────── */
-function downloadJson() {
-  if (!lastConfig) { toast('\u26a0 Generate config first', 'err'); return; }
-  const blob = new Blob([JSON.stringify(lastConfig.config, null, 2)], { type:'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'claude_desktop_config.json';
-  a.click();
-  URL.revokeObjectURL(a.href);
-  toast('\u2713 Downloaded claude_desktop_config.json');
-}
-
-/* ── .env Preview ──────────────────────────────────────── */
-async function refreshEnvPreview() {
-  const r = await api('/api/export/env', { raw: true });
-  if (!r) return;
-  const text = await r.text();
-  const el = document.getElementById('env-preview');
-  if (!el) return;
-  // Syntax highlight
-  el.innerHTML = text.split('\n').map(line => {
-    if (line.startsWith('#')) return `<span class="env-comment">${esc(line)}</span>`;
-    const eq = line.indexOf('=');
-    if (eq > 0) {
-      const key = line.substring(0, eq);
-      const val = line.substring(eq + 1);
-      if (val === '' || line.includes('# not set')) {
-        return `<span class="env-unset">${esc(line)}</span>`;
-      }
-      return `<span class="env-key">${esc(key)}</span>=<span class="env-val">${esc(val)}</span>`;
-    }
-    return esc(line);
-  }).join('\n');
 }
 
 function esc(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if (!s) return '';
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/"/g,'&quot;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
 }
 
-async function downloadEnv() {
-  const r = await fetch('/api/export/env?download=true');
-  if (!r.ok) { toast('Download failed', 'err'); return; }
-  const blob = await r.blob();
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = '.env';
-  a.click();
-  URL.revokeObjectURL(a.href);
-  toast('\u2713 Downloaded .env');
-}
-
-async function copyEnvRaw() {
-  const r = await fetch('/api/export/env?download=true');
-  if (!r.ok) { toast('Failed to fetch', 'err'); return; }
-  const text = await r.text();
-  navigator.clipboard.writeText(text).then(() => {
-    toast('\u2713 Copied raw .env to clipboard');
-  }).catch(() => { toast('\u2717 Copy failed', 'err'); });
-}
-
-/* ── Init ──────────────────────────────────────────────── */
-document.addEventListener('DOMContentLoaded', loadConfig);
+// ── Init ────────────────────────────────────────────────────────
+loadConfig();
 </script>
 </body>
 </html>
