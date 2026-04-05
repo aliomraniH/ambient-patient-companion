@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ambient Companion — Config Dashboard</title>
+<style>
+/* ── Reset & Design System ─────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #f5f7fa;
+  --surface:  #ffffff;
+  --card:     #ffffff;
+  --border:   #e2e8f0;
+  --border-hi:#cbd5e1;
+  --text:     #1a202c;
+  --muted:    #718096;
+  --accent:   #00d4aa;
+  --accent2:  #0099cc;
+  --ok:       #22c55e;
+  --warn:     #f59e0b;
+  --danger:   #ef4444;
+  --radius:   8px;
+  --shadow:   0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+}
+
+html { font-size: 13px; }
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+code, .mono { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 12px; }
+
+/* ── Layout Grid ───────────────────────────────────────── */
+.layout {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  grid-template-rows: 50px 1fr;
+  grid-template-areas:
+    "header header"
+    "nav    main";
+  min-height: 100vh;
+}
+
+/* ── Top Bar ───────────────────────────────────────────── */
+header {
+  grid-area: header;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 12px;
+  z-index: 10;
+}
+
+.logo {
+  width: 28px; height: 28px;
+  background: linear-gradient(135deg, #00d4aa, #0099cc);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  color: white; font-size: 16px; font-weight: bold;
+  flex-shrink: 0;
+}
+
+.header-title { font-size: 14px; font-weight: 600; }
+.header-subtitle { font-size: 12px; color: var(--muted); margin-left: -4px; }
+.header-spacer { flex: 1; }
+
+.env-badge {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--muted);
+}
+.env-badge::before {
+  content: ''; width: 7px; height: 7px;
+  background: var(--ok); border-radius: 50%;
+}
+
+.btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:hover { border-color: var(--border-hi); background: var(--bg); }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+.btn-primary:hover { opacity: 0.9; background: var(--accent); border-color: var(--accent); }
+
+/* ── Sidebar ───────────────────────────────────────────── */
+nav {
+  grid-area: nav;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 16px 0;
+  overflow-y: auto;
+}
+
+.nav-group { margin-bottom: 20px; }
+.nav-group-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  padding: 0 16px;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+  border-left: 2.5px solid transparent;
+  transition: all 0.15s;
+  user-select: none;
+}
+.nav-item:hover { color: var(--text); background: var(--bg); }
+.nav-item.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: rgba(0,212,170,0.04);
+  font-weight: 500;
+}
+
+.nav-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #cbd5e1;
+  flex-shrink: 0;
+}
+.nav-dot.ok { background: var(--ok); }
+.nav-dot.warn { background: var(--warn); }
+.nav-dot.empty { background: #cbd5e1; }
+
+/* ── Main Area ─────────────────────────────────────────── */
+main {
+  grid-area: main;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+section { display: none; }
+section.active { display: block; }
+
+.section-header { margin-bottom: 20px; }
+.section-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+.section-desc { font-size: 12px; color: var(--muted); }
+
+/* ── Cards ─────────────────────────────────────────────── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow);
+}
+.card-title {
+  font-size: 14px; font-weight: 600;
+  margin-bottom: 16px;
+  display: flex; align-items: center; gap: 8px;
+}
+
+/* ── Stat Strip ────────────────────────────────────────── */
+.stat-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.stat-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  box-shadow: var(--shadow);
+}
+.stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
+.stat-value { font-size: 22px; font-weight: 700; color: var(--accent); }
+.stat-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* ── Two-column layout ─────────────────────────────────── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 1100px) { .two-col { grid-template-columns: 1fr; } }
+
+/* ── Key Row ───────────────────────────────────────────── */
+.key-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--bg);
+}
+.key-row:last-child { border-bottom: none; }
+.key-label {
+  width: 160px; flex-shrink: 0;
+  font-size: 12px; font-weight: 500;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.key-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.key-input:focus { border-color: var(--accent); }
+.key-input.dirty { border-color: var(--warn); }
+
+.key-select {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  cursor: pointer;
+}
+
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot.set { background: var(--ok); }
+.status-dot.empty { background: #cbd5e1; }
+.status-dot.error { background: var(--danger); }
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn-sm:hover { border-color: var(--border-hi); color: var(--text); }
+
+/* ── Progress Bar ──────────────────────────────────────── */
+.progress-wrap { margin-top: 16px; }
+.progress-label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px; }
+.progress-bar {
+  height: 8px;
+  background: var(--bg);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+
+/* ── Warning Box ───────────────────────────────────────── */
+.warn-box {
+  border: 1px solid var(--warn);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  background: rgba(245,158,11,0.04);
+  color: var(--text);
+}
+
+/* ── MCP Server Row ────────────────────────────────────── */
+.mcp-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--bg);
+  border-left: 2.5px solid var(--border);
+  padding-left: 12px;
+  margin-left: -20px;
+  padding-right: 0;
+  margin-right: -20px;
+  padding-left: 32px;
+}
+.mcp-row:last-child { border-bottom: none; }
+.mcp-row.online { border-left-color: var(--ok); }
+.mcp-row.configured { border-left-color: var(--accent); }
+.mcp-row.pending { border-left-color: var(--warn); }
+
+.mcp-name { width: 150px; flex-shrink: 0; font-weight: 500; font-size: 13px; }
+.mcp-url-input {
+  flex: 1; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 5px;
+  font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace;
+  background: var(--bg); color: var(--text); outline: none;
+}
+.mcp-url-input:focus { border-color: var(--accent); }
+.mcp-url-input::placeholder { color: #a0aec0; font-style: italic; }
+
+.badge {
+  font-size: 10px; padding: 2px 8px;
+  border-radius: 10px; font-weight: 600;
+  white-space: nowrap;
+}
+.badge-ok { background: rgba(34,197,94,0.1); color: var(--ok); }
+.badge-teal { background: rgba(0,212,170,0.1); color: var(--accent); }
+.badge-warn { background: rgba(245,158,11,0.1); color: var(--warn); }
+.badge-gray { background: rgba(113,128,150,0.1); color: var(--muted); }
+.badge-err { background: rgba(239,68,68,0.1); color: var(--danger); }
+
+.tools-count {
+  font-size: 11px; color: var(--accent2); cursor: pointer;
+  position: relative; white-space: nowrap;
+}
+.tools-count:hover .tools-tip { display: block; }
+.tools-tip {
+  display: none; position: absolute;
+  bottom: 100%; left: 50%; transform: translateX(-50%);
+  background: var(--text); color: #fff; padding: 8px 12px;
+  border-radius: 6px; font-size: 11px; white-space: pre-line;
+  z-index: 20; min-width: 180px; margin-bottom: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+/* ── Code Block ────────────────────────────────────────── */
+.code-block {
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.code-actions {
+  display: flex; gap: 8px; margin-top: 12px;
+}
+
+/* ── Info Box ──────────────────────────────────────────── */
+.info-box {
+  background: rgba(0,153,204,0.04);
+  border: 1px solid rgba(0,153,204,0.15);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+
+/* ── Service Grid ──────────────────────────────────────── */
+.service-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.svc-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  box-shadow: var(--shadow);
+}
+.svc-name { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+.svc-status { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+
+/* ── Setup Guide ───────────────────────────────────────── */
+.step-list { list-style: none; counter-reset: step; }
+.step-item {
+  counter-increment: step;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--bg);
+  font-size: 13px;
+}
+.step-item::before {
+  content: counter(step);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px;
+  background: var(--accent);
+  color: #fff; border-radius: 50%;
+  font-size: 11px; font-weight: 600;
+  margin-right: 10px;
+}
+.step-item:last-child { border-bottom: none; }
+
+.card.amber-left { border-left: 3px solid var(--warn); }
+
+/* ── Env Preview ───────────────────────────────────────── */
+.env-preview {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px; line-height: 1.7;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+.env-comment { color: var(--muted); }
+.env-key { color: var(--accent2); }
+.env-val { color: var(--accent); }
+.env-unset { color: var(--danger); }
+
+/* ── Toast ─────────────────────────────────────────────── */
+#toast {
+  position: fixed; bottom: 24px; right: 24px;
+  z-index: 100;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.toast-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  font-size: 12px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  animation: slideIn 0.25s ease;
+  max-width: 380px;
+}
+.toast-item.ok { border-left: 3px solid var(--ok); }
+.toast-item.err { border-left: 3px solid var(--danger); }
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(30px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* ── Spinner ───────────────────────────────────────────── */
+.spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="layout">
+  <!-- ── Top Bar ─────────────────────────────────────── -->
+  <header>
+    <div class="logo">&#9877;</div>
+    <span class="header-title">Ambient Companion</span>
+    <span class="header-subtitle">config dashboard</span>
+    <div class="header-spacer"></div>
+    <span class="env-badge">replit</span>
+    <button class="btn btn-primary" onclick="saveAll()">Save All</button>
+  </header>
+
+  <!-- ── Sidebar ─────────────────────────────────────── -->
+  <nav>
+    <div class="nav-group">
+      <div class="nav-group-label">Configuration</div>
+      <div class="nav-item active" data-section="keys" onclick="showSection('keys')">
+        <span class="nav-dot empty" id="dot-keys"></span> API Keys
+      </div>
+      <div class="nav-item" data-section="mcp" onclick="showSection('mcp')">
+        <span class="nav-dot empty" id="dot-mcp"></span> MCP Tools
+      </div>
+      <div class="nav-item" data-section="config" onclick="showSection('config')">
+        <span class="nav-dot empty" id="dot-config"></span> Claude Config
+      </div>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">System</div>
+      <div class="nav-item" data-section="status" onclick="showSection('status')">
+        <span class="nav-dot ok" id="dot-status"></span> Status
+      </div>
+      <div class="nav-item" data-section="env" onclick="showSection('env')">
+        <span class="nav-dot empty" id="dot-env"></span> .env Export
+      </div>
+      <div class="nav-item" data-section="setup" onclick="showSection('setup')">
+        <span class="nav-dot ok" id="dot-setup"></span> Setup Guide
+      </div>
+    </div>
+  </nav>
+
+  <!-- ── Main Content ────────────────────────────────── -->
+  <main>
+
+    <!-- ===== SECTION: API KEYS ===== -->
+    <section id="section-keys" class="active">
+    </section>
+
+    <!-- ===== SECTION: MCP TOOLS ===== -->
+    <section id="section-mcp">
+    </section>
+
+    <!-- ===== SECTION: CLAUDE CONFIG ===== -->
+    <section id="section-config">
+    </section>
+
+    <!-- ===== SECTION: STATUS ===== -->
+    <section id="section-status">
+    </section>
+
+    <!-- ===== SECTION: .ENV EXPORT ===== -->
+    <section id="section-env">
+    </section>
+
+    <!-- ===== SECTION: SETUP GUIDE ===== -->
+    <section id="section-setup">
+    </section>
+
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ── Global State ──────────────────────────────────────── */
+let configData = {};
+let dirtyFields = new Set();
+
+/* ── MCP Server Definitions ────────────────────────────── */
+const MCP_SERVERS = [
+  { id:"synthetic_patient", name:"Synthetic Patient", desc:"Generate synthetic patient data. Replaces HealthEx MCP.", key:"MCP_SYNTHETIC_PATIENT_URL", tools:["get_patient_record","get_lab_results","get_care_gaps","get_schedule"] },
+  { id:"ehr_integration", name:"EHR Integration", desc:"FHIR R5 read/write, SMART-on-FHIR auth.", key:"MCP_EHR_INTEGRATION_URL", tools:["read_patient","search_observations","create_task","subscribe_topic"] },
+  { id:"care_gap_analyzer", name:"Care Gap Analyzer", desc:"USPSTF/ADA/ACC guideline gap detection.", key:"MCP_CARE_GAP_ANALYZER_URL", tools:["analyze_care_gaps","get_chase_list","score_priority"] },
+  { id:"lab_processor", name:"Lab Processor", desc:"Lab result interpretation, trend analysis.", key:"MCP_LAB_PROCESSOR_URL", tools:["interpret_lab","get_trend","check_critical_values"] },
+  { id:"langsmith_feedback", name:"LangSmith Feedback", desc:"Clinician correction capture, MemPrompt retrieval.", key:"MCP_LANGSMITH_FEEDBACK_URL", tools:["capture_feedback","retrieve_corrections","store_correction"] },
+];
+
+/* ── Navigation ────────────────────────────────────────── */
+function showSection(id) {
+  document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('section-' + id).classList.add('active');
+  document.querySelector(`.nav-item[data-section="${id}"]`).classList.add('active');
+}
+
+/* ── Toast ─────────────────────────────────────────────── */
+function toast(msg, type = 'ok') {
+  const el = document.createElement('div');
+  el.className = 'toast-item ' + type;
+  el.textContent = msg;
+  document.getElementById('toast').appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 2800);
+}
+
+/* ── API Helpers ───────────────────────────────────────── */
+async function api(path, opts = {}) {
+  try {
+    const r = await fetch(path, opts);
+    if (opts.raw) return r;
+    return await r.json();
+  } catch (e) {
+    toast('Network error: ' + e.message, 'err');
+    return null;
+  }
+}
+
+/* ── Load Config ───────────────────────────────────────── */
+async function loadConfig() {
+  const data = await api('/api/config');
+  if (!data) return;
+  configData = data;
+  populateAllSections();
+}
+
+/* ── Populate All Sections (called after loadConfig) ──── */
+function populateAllSections() {
+  populateKeys();
+  populateMcp();
+  populateStatus();
+  updateNavDots();
+  updateProgressBar();
+}
+
+/* ── Save All ──────────────────────────────────────────── */
+async function saveAll() {
+  const body = {};
+  dirtyFields.forEach(key => {
+    const el = document.querySelector(`[data-key="${key}"]`);
+    if (el) body[key] = el.value;
+  });
+  if (Object.keys(body).length === 0) { toast('No changes to save'); return; }
+  const r = await api('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r && r.saved) {
+    dirtyFields.clear();
+    document.querySelectorAll('.key-input.dirty, .mcp-url-input.dirty').forEach(el => el.classList.remove('dirty'));
+    toast('Saved ' + r.saved.length + ' key(s)');
+    await loadConfig();
+  }
+}
+
+/* ── Save Single Key ───────────────────────────────────── */
+async function saveKey(key, value) {
+  const r = await api('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ [key]: value }),
+  });
+  if (r && r.saved) {
+    dirtyFields.delete(key);
+    const el = document.querySelector(`[data-key="${key}"]`);
+    if (el) el.classList.remove('dirty');
+    toast('Saved');
+    await loadConfig();
+  }
+}
+
+/* ── Reveal Key ────────────────────────────────────────── */
+async function revealKey(key, btn) {
+  const r = await api('/api/reveal/' + key);
+  if (!r) return;
+  const input = document.querySelector(`[data-key="${key}"]`);
+  if (!input) return;
+  input.type = 'text';
+  input.value = r.value;
+  btn.textContent = 'Hide';
+  setTimeout(() => {
+    input.type = 'password';
+    input.value = configData.keys[key]?.set ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : '';
+    btn.textContent = 'Show';
+  }, 10000);
+}
+
+/* ── Mark Dirty ────────────────────────────────────────── */
+function markDirty(key, el) {
+  dirtyFields.add(key);
+  el.classList.add('dirty');
+}
+
+/* ── Update Nav Dots ───────────────────────────────────── */
+function updateNavDots() {
+  if (!configData.keys) return;
+  const k = configData.keys;
+  // Keys section
+  const keyKeys = ['ANTHROPIC_API_KEY','CLAUDE_MODEL','CLAUDE_THINKING_MODE','LANGSMITH_API_KEY','LANGSMITH_PROJECT','VECTOR_STORE_URL','VECTOR_STORE_API_KEY','VECTOR_STORE_INDEX','FHIR_BASE_URL','FHIR_CLIENT_ID','FHIR_CLIENT_SECRET','DATABASE_URL'];
+  const keySet = keyKeys.filter(x => k[x]?.set).length;
+  setDot('dot-keys', keySet === 0 ? 'empty' : keySet === keyKeys.length ? 'ok' : 'warn');
+  // MCP section
+  const mcpKeys = MCP_SERVERS.map(s => s.key);
+  const mcpSet = mcpKeys.filter(x => k[x]?.set).length;
+  setDot('dot-mcp', mcpSet === 0 ? 'empty' : mcpSet === mcpKeys.length ? 'ok' : 'warn');
+  // Config
+  setDot('dot-config', mcpSet > 0 ? 'ok' : 'empty');
+  // Status
+  setDot('dot-status', 'ok');
+  // Env
+  setDot('dot-env', configData.completeness?.pct > 0 ? 'ok' : 'empty');
+}
+
+function setDot(id, state) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = 'nav-dot ' + state;
+}
+
+/* ── Update Progress Bar ───────────────────────────────── */
+function updateProgressBar() {
+  const c = configData.completeness || { set: 0, total: 17, pct: 0 };
+  const pct = document.getElementById('progress-pct');
+  const fill = document.getElementById('progress-fill');
+  const label = document.getElementById('progress-label');
+  if (pct) pct.textContent = c.pct + '%';
+  if (fill) fill.style.width = c.pct + '%';
+  if (label) label.textContent = c.set + ' / ' + c.total;
+}
+
+/* ── PLACEHOLDER: Section populators (Parts 2-6) ──────── */
+function populateKeys() { /* Part 2 */ }
+function populateMcp() { /* Part 3 */ }
+function populateStatus() { /* Part 4 */ }
+
+/* ── Init ──────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', loadConfig);
+</script>
+</body>
+</html>
