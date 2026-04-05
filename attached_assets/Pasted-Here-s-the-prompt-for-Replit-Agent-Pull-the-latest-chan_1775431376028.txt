@@ -1,0 +1,139 @@
+Here's the prompt for Replit Agent:
+
+---
+
+```
+Pull the latest changes from main and verify the new MCP tools that were
+just merged from PR #9.
+
+## What Was Merged
+
+Branch `claude/add-healthex-switch-tool-VnpEh` added two new zero-argument
+MCP tools to `mcp-server/skills/ingestion_tools.py` for natural-language
+data track switching on Claude web:
+
+1. **`use_healthex()`** — Switches DATA_TRACK to "healthex" (real patient
+   records). Users say "use healthex" or "switch to real data".
+
+2. **`use_demo_data()`** — Switches DATA_TRACK to "synthea" (synthetic
+   demo data). Users say "use demo data" or "switch to synthea".
+
+Both delegate to a shared `_set_data_track()` helper. The existing
+`switch_data_track(track)` tool was refactored to use the same helper
+(no behavior change).
+
+Four new tests were added (S19–S22) in `mcp-server/tests/test_skills.py`.
+
+`replit.md` was updated: 12 MCP skills (was 10), 49 backend tests (was 44),
+231 total tests (was 226).
+
+## Your Tasks
+
+### 1. Pull latest main
+```bash
+git pull origin main
+```
+
+### 2. Verify the new tools are registered
+
+Run this to confirm both tools appear:
+```bash
+cd mcp-server && python -c "
+from skills.ingestion_tools import register
+class MockMCP:
+    def tool(self, fn):
+        print(f'  Registered: {fn.__name__}')
+        return fn
+register(MockMCP())
+"
+```
+
+Expected output should include `use_healthex` and `use_demo_data`
+alongside the existing tools (check_data_freshness, run_ingestion,
+get_source_conflicts, get_data_source_status, ingest_from_healthex,
+switch_data_track).
+
+### 3. Run ALL test suites
+
+**a. Backend MCP skills (expect 49 tests, S19–S22 are the new ones):**
+```bash
+cd mcp-server && python -m pytest tests/test_skills.py -v
+```
+Confirm these 4 new tests PASS:
+- `test_use_healthex_sets_track` (S19)
+- `test_use_demo_data_sets_track` (S20)
+- `test_data_track_round_trip` (S21)
+- `test_switch_data_track_positive` (S22)
+
+**b. Full backend suite:**
+```bash
+cd mcp-server && python -m pytest tests/ -v
+```
+
+**c. Phase 1 Clinical Intelligence (100 tests):**
+```bash
+python -m pytest tests/phase1/ -v
+```
+
+**d. End-to-end MCP use-case suite (15 tests):**
+```bash
+python -m pytest tests/e2e/ -v
+```
+
+**e. Config Dashboard (30 tests):**
+```bash
+cd replit_dashboard && python -m pytest tests/ -v
+```
+
+**f. Frontend (37 tests):**
+```bash
+cd replit-app && npm test
+```
+
+### 4. Report results
+
+Fill in this table:
+
+| Suite | Expected | Actual | Status |
+|-------|----------|--------|--------|
+| Backend MCP skills | 49 | ? | ? |
+| Phase 1 integration | 100 | ? | ? |
+| End-to-end MCP | 15 | ? | ? |
+| Config Dashboard | 30 | ? | ? |
+| Frontend (Jest) | 37 | ? | ? |
+| **Total** | **231** | **?** | **?** |
+
+### 5. Verify tool behavior (smoke test)
+
+If the MCP server is running, test the new tools via MCP protocol:
+
+**Switch to HealthEx:**
+```bash
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"use_healthex","arguments":{}}}' | python -m json.tool
+```
+
+**Switch back to demo data:**
+```bash
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"use_demo_data","arguments":{}}}' | python -m json.tool
+```
+
+**Confirm the track persisted:**
+```bash
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_data_source_status","arguments":{}}}' | python -m json.tool
+```
+
+The `active_track` field should be `"synthea"` and the recommendation
+should mention "say 'use healthex' to switch".
+
+## Constraints
+- Do NOT modify any code — this is verification only
+- If a test fails, investigate whether it is a pre-existing issue
+  (e.g., missing Synthea FHIR fixtures for S1–S3) or a regression
+- Report any failures with the error message
+```
