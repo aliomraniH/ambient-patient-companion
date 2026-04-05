@@ -4,4 +4,4 @@ faker
 numpy
 python-dateutil
 pytest
-pytest-asyncio>=0.23
+pytest-asyncio==0.21.2
