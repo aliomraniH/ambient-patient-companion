@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 from fastmcp import FastMCP
 
-mcp = FastMCP("PatientIngestion", description="Data ingestion pipeline for patient data sources")
+mcp = FastMCP("PatientIngestion")
 
 
 @mcp.tool
@@ -54,4 +54,10 @@ async def trigger_ingestion(
 
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    host = os.environ.get("MCP_HOST", "0.0.0.0")
+    port = int(os.environ.get("MCP_PORT", "8003"))
+    if transport == "streamable-http":
+        mcp.run(transport="streamable-http", host=host, port=port)
+    else:
+        mcp.run(transport="stdio")

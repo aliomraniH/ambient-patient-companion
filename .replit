@@ -25,6 +25,14 @@ args = "Config Dashboard"
 task = "workflow.run"
 args = "Clinical MCP Server"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Skills MCP Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Ingestion MCP Server"
+
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
@@ -60,6 +68,28 @@ outputType = "console"
 task = "shell.exec"
 args = "MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server"
 
+[[workflows.workflow]]
+name = "Skills MCP Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd mcp-server && MCP_TRANSPORT=streamable-http MCP_PORT=8002 python server.py"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Ingestion MCP Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "MCP_TRANSPORT=streamable-http MCP_PORT=8003 python -m ingestion.server"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[ports]]
 localPort = 5000
 externalPort = 80
@@ -71,6 +101,14 @@ externalPort = 8000
 [[ports]]
 localPort = 8001
 externalPort = 3000
+
+[[ports]]
+localPort = 8002
+externalPort = 3001
+
+[[ports]]
+localPort = 8003
+externalPort = 3003
 
 [[ports]]
 localPort = 8080
