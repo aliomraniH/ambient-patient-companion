@@ -1,4 +1,4 @@
-"""S1-S18: MCP skill tool correctness tests.
+"""S1-S22: MCP skill tool correctness tests.
 
 All tests are async, use db_pool and test_patient fixtures,
 and call skill functions directly via the MockMCP pattern.
@@ -315,3 +315,75 @@ async def test_switch_data_track_invalid(db_pool):
     result = await fn(track="unknown_source")
     assert isinstance(result, str)
     assert result.startswith("Error"), f"Expected Error, got: {result[:80]}"
+
+
+# ── S19: use_healthex sets DATA_TRACK to healthex ──
+@pytest.mark.asyncio
+async def test_use_healthex_sets_track(db_pool):
+    mod = importlib.import_module("skills.ingestion_tools")
+    fn = _get_skill_function(mod, "use_healthex")
+    result = await fn()
+    assert isinstance(result, str)
+    assert "HealthEx" in result, f"Expected HealthEx mention: {result[:80]}"
+    async with db_pool.acquire() as conn:
+        track = await conn.fetchval(
+            "SELECT value FROM system_config WHERE key = $1",
+            "DATA_TRACK",
+        )
+        assert track == "healthex", f"Expected healthex, got {track}"
+
+
+# ── S20: use_demo_data sets DATA_TRACK to synthea ──
+@pytest.mark.asyncio
+async def test_use_demo_data_sets_track(db_pool):
+    mod = importlib.import_module("skills.ingestion_tools")
+    fn = _get_skill_function(mod, "use_demo_data")
+    result = await fn()
+    assert isinstance(result, str)
+    assert "demo" in result.lower(), f"Expected demo mention: {result[:80]}"
+    async with db_pool.acquire() as conn:
+        track = await conn.fetchval(
+            "SELECT value FROM system_config WHERE key = $1",
+            "DATA_TRACK",
+        )
+        assert track == "synthea", f"Expected synthea, got {track}"
+
+
+# ── S21: use_healthex then use_demo_data round-trips correctly ──
+@pytest.mark.asyncio
+async def test_data_track_round_trip(db_pool):
+    mod = importlib.import_module("skills.ingestion_tools")
+    use_hx = _get_skill_function(mod, "use_healthex")
+    use_demo = _get_skill_function(mod, "use_demo_data")
+
+    await use_hx()
+    async with db_pool.acquire() as conn:
+        track = await conn.fetchval(
+            "SELECT value FROM system_config WHERE key = $1",
+            "DATA_TRACK",
+        )
+        assert track == "healthex", f"After use_healthex: expected healthex, got {track}"
+
+    await use_demo()
+    async with db_pool.acquire() as conn:
+        track = await conn.fetchval(
+            "SELECT value FROM system_config WHERE key = $1",
+            "DATA_TRACK",
+        )
+        assert track == "synthea", f"After use_demo_data: expected synthea, got {track}"
+
+
+# ── S22: switch_data_track positive case still works after refactor ──
+@pytest.mark.asyncio
+async def test_switch_data_track_positive(db_pool):
+    mod = importlib.import_module("skills.ingestion_tools")
+    fn = _get_skill_function(mod, "switch_data_track")
+    result = await fn(track="synthea")
+    assert isinstance(result, str)
+    assert result.startswith("OK"), f"Expected OK, got: {result[:80]}"
+    async with db_pool.acquire() as conn:
+        track = await conn.fetchval(
+            "SELECT value FROM system_config WHERE key = $1",
+            "DATA_TRACK",
+        )
+        assert track == "synthea", f"Expected synthea, got {track}"
