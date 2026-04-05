@@ -18,37 +18,6 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 
-async def _set_data_track(track: str, tool_name: str) -> str:
-    """Persist the active data track to system_config.
-
-    Args:
-        track: "synthea" or "healthex"
-        tool_name: name of the calling tool (for audit log)
-
-    Returns:
-        The track value that was set.
-
-    Raises:
-        Exception: on database errors.
-    """
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO system_config (key, value, updated_at)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (key)
-            DO UPDATE SET value = $2, updated_at = NOW()
-            """,
-            "DATA_TRACK", track,
-        )
-        await log_skill_execution(
-            conn, tool_name, None, "completed",
-            output_data={"track": track},
-        )
-    return track
-
-
 def register(mcp: FastMCP):
     @mcp.tool
     async def check_data_freshness(patient_id: str) -> str:
@@ -264,7 +233,7 @@ def register(mcp: FastMCP):
                 "recommendation": (
                     "HealthEx connected — offer to ingest real records"
                     if track == "healthex"
-                    else "Running on synthetic data — say 'use healthex' to switch"
+                    else "Running on synthetic data — switch with switch_data_track"
                 ),
             }
             return json.dumps(result, indent=2)
@@ -551,55 +520,26 @@ def register(mcp: FastMCP):
                 "Error: track must be 'synthea' or 'healthex'. "
                 f"Got: '{track}'"
             )
+        pool = await get_pool()
         try:
-            await _set_data_track(track, "switch_data_track")
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO system_config (key, value, updated_at)
+                    VALUES ($1, $2, NOW())
+                    ON CONFLICT (key)
+                    DO UPDATE SET value = $2, updated_at = NOW()
+                    """,
+                    "DATA_TRACK", track,
+                )
+                await log_skill_execution(
+                    conn, "switch_data_track", None, "completed",
+                    output_data={"track": track},
+                )
             return (
                 f"OK Data track switched to '{track}' — "
                 f"all future pipeline runs will use the {track} adapter"
             )
         except Exception as e:
             logger.error("switch_data_track failed: %s", e)
-            return f"Error: {e}"
-
-    @mcp.tool
-    async def use_healthex() -> str:
-        """Switch to HealthEx real patient records.
-
-        Call this when the user wants to use real clinical data from
-        HealthEx instead of synthetic demo data. Trigger phrases:
-        "use healthex", "switch to real data", "connect healthex",
-        "use real records", "switch to healthex".
-
-        Note: HealthEx requires a Claude web session with the HealthEx
-        MCP server authenticated. It will not work in Claude Code.
-        """
-        try:
-            await _set_data_track("healthex", "use_healthex")
-            return (
-                "Switched to HealthEx real records. "
-                "All future data pulls will use the HealthEx adapter. "
-                "Make sure the HealthEx MCP server is authenticated in "
-                "this session."
-            )
-        except Exception as e:
-            logger.error("use_healthex failed: %s", e)
-            return f"Error: {e}"
-
-    @mcp.tool
-    async def use_demo_data() -> str:
-        """Switch to Synthea synthetic demo data.
-
-        Call this when the user wants to use synthetic demo data
-        instead of real records. Trigger phrases: "use demo data",
-        "switch to synthea", "use synthetic data", "go back to demo",
-        "use fake data", "switch to demo mode".
-        """
-        try:
-            await _set_data_track("synthea", "use_demo_data")
-            return (
-                "Switched to demo mode (Synthea synthetic data). "
-                "All future data pulls will use synthetic records."
-            )
-        except Exception as e:
-            logger.error("use_demo_data failed: %s", e)
             return f"Error: {e}"
