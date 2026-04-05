@@ -24,7 +24,13 @@ ambient-patient-companion/
 │   ├── seed.py          ← Data seeding: python mcp-server/seed.py --patients 10 --months 6
 │   ├── orchestrator.py  ← Daily pipeline sequencer
 │   └── tests/           ← pytest test suite (44 backend tests)
-└── ingestion/           ← Data ingestion service (Synthea FHIR)
+├── replit_dashboard/    ← FastAPI config dashboard (API keys, MCP URLs, Claude config)
+│   ├── server.py        ← FastAPI app (port 8000)
+│   ├── index.html       ← Single-page dashboard UI
+│   └── tests/           ← 30 dashboard tests (anyio-based)
+├── ingestion/           ← Data ingestion service (Synthea FHIR)
+├── CLAUDE.md            ← Full implementation guide for Claude Code agents
+└── requirements.txt     ← Root Python dependencies (pytest-asyncio==0.21.2)
 ```
 
 ## Running the App
@@ -71,6 +77,11 @@ cd mcp-server && pytest tests/ -v
 cd replit-app && npm test
 ```
 
+### Config Dashboard (anyio/pytest) — 30 tests
+```bash
+cd replit_dashboard && python -m pytest tests/ -v
+```
+
 ## Package Manager
 
 - Frontend: `npm` (package-lock.json in replit-app/)
@@ -98,53 +109,6 @@ cd replit-app && npm test
 3. **crisis_escalation.py**: Same INTERVAL fix; returns JSON with `escalation_triggered` field
 4. **pytest-asyncio**: Pinned to 0.21.2 (1.x broke session-scoped event_loop pattern)
 5. **schema.sql**: Added FK constraints to 10 previously unlinked tables; added UNIQUE index on biometric_readings
-
-## Config Dashboard (replit_dashboard/)
-
-A standalone FastAPI + vanilla JS control panel for managing API keys, MCP server URLs, and generating Claude Desktop configuration.
-
-### Quick Start
-
-```bash
-# Step 1: Install dashboard dependencies
-cd replit_dashboard && pip install -r requirements.txt
-
-# Step 2: Start the dashboard server (port 8080)
-python server.py
-```
-
-The dashboard is now live at `http://localhost:8080`.
-
-### Step-by-Step Walkthrough
-
-1. **Open the dashboard** — navigate to port 8080 in the Replit webview or browser
-2. **Enter API keys** — go to the "API Keys" section in the sidebar, fill in `ANTHROPIC_API_KEY` and `CLAUDE_MODEL` (`claude-sonnet-4-6`)
-3. **Test connectivity** — click the "Test" button next to Anthropic; a green dot + latency toast confirms success
-4. **Add LangSmith** — enter `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` (`ambient-patient-companion`), click "Test"
-5. **Register MCP servers** — go to "MCP Tools", paste each deployed Replit URL (e.g. `https://synthetic-patient.replit.app/mcp`), click "Test" per server
-6. **Generate Claude config** — go to "Claude Config", click "Regenerate"; copy the JSON into `claude_desktop_config.json` or use the CLI commands
-7. **Export .env** — go to ".env Export", click "Download .env" to get a ready-to-use environment file
-8. **Check status** — the "Status" section shows a full service grid; "Setup Guide" lists implementation priorities
-
-### Dashboard API Endpoints
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/` | Serve dashboard HTML |
-| GET | `/api/config` | Return all 17 keys (secrets masked) |
-| POST | `/api/config` | Save key-value pairs to `.env` |
-| GET | `/api/reveal/{key}` | Unmask a single secret key |
-| POST | `/api/test/anthropic` | Test Anthropic API connectivity |
-| POST | `/api/test/langsmith` | Test LangSmith connectivity |
-| POST | `/api/test/mcp/{server_id}` | Test MCP server health |
-| GET | `/api/generate/claude-config` | Generate Claude Desktop JSON + CLI commands |
-| GET | `/api/export/env` | Preview/download `.env` file |
-
-### Running Dashboard Tests
-
-```bash
-cd replit_dashboard && pytest tests/ -v
-```
 
 ## Key Notes
 
