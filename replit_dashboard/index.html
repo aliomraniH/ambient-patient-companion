@@ -693,6 +693,22 @@ section.active { display: block; }
 
     <!-- ===== SECTION: MCP TOOLS ===== -->
     <section id="section-mcp">
+      <div class="section-header" style="display:flex;align-items:flex-start;justify-content:space-between;">
+        <div>
+          <div class="section-title">MCP Tools</div>
+          <div class="section-desc">Register FastMCP server URLs deployed as separate Replit apps.</div>
+        </div>
+        <button class="btn" onclick="showSection('config')">&#8594; Generate Config</button>
+      </div>
+
+      <div class="card">
+        <div class="card-title">&#9881; FastMCP Servers</div>
+        <div id="mcp-rows"></div>
+      </div>
+
+      <div class="info-box">
+        Each MCP server exposes tools via the FastMCP framework. Enter the full Replit URL (e.g. <code>https://synthetic-patient.replit.app/mcp</code>), then click <strong>Test</strong> to verify connectivity.
+      </div>
     </section>
 
     <!-- ===== SECTION: CLAUDE CONFIG ===== -->
@@ -959,7 +975,51 @@ async function testLangSmith(btn) {
     toast('\u2717 LangSmith: ' + r.error, 'err');
   }
 }
-function populateMcp() { /* Part 3 */ }
+/* ── Populate: MCP Tools ───────────────────────────────── */
+function populateMcp() {
+  if (!configData.keys) return;
+  const k = configData.keys;
+  const container = document.getElementById('mcp-rows');
+  if (!container) return;
+  container.innerHTML = MCP_SERVERS.map(s => {
+    const isSet = k[s.key]?.set;
+    const url = isSet ? k[s.key].value : '';
+    let badgeClass = 'badge-gray', badgeText = 'No URL', rowClass = '';
+    if (isSet) {
+      badgeClass = 'badge-warn'; badgeText = 'Pending'; rowClass = 'pending';
+    }
+    const toolsList = s.tools.map(t => t).join('\n');
+    return `<div class="mcp-row ${rowClass}" id="mcp-row-${s.id}">
+      <span class="mcp-name">${s.name}</span>
+      <input class="mcp-url-input" type="text" data-key="${s.key}" value="${url}" placeholder="paste Replit URL..." oninput="markDirty('${s.key}',this)" onblur="saveKey('${s.key}',this.value)">
+      <span class="badge ${badgeClass}" id="mcp-badge-${s.id}">${badgeText}</span>
+      <button class="btn-sm" onclick="testMcp('${s.id}',this)">Test</button>
+      <span class="tools-count">${s.tools.length} tools<span class="tools-tip">${toolsList}</span></span>
+    </div>`;
+  }).join('');
+}
+
+/* ── Test: MCP Server ──────────────────────────────────── */
+async function testMcp(serverId, btn) {
+  const orig = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>';
+  btn.disabled = true;
+  const r = await api('/api/test/mcp/' + serverId, { method: 'POST' });
+  btn.disabled = false;
+  btn.textContent = orig;
+  if (!r) return;
+  const badge = document.getElementById('mcp-badge-' + serverId);
+  const row = document.getElementById('mcp-row-' + serverId);
+  if (r.ok) {
+    if (badge) { badge.className = 'badge badge-ok'; badge.textContent = 'Online'; }
+    if (row) { row.className = 'mcp-row online'; }
+    toast('\u2713 ' + serverId.replace(/_/g,' ') + ' connected (' + r.latency_ms + 'ms)');
+  } else {
+    if (badge) { badge.className = 'badge badge-err'; badge.textContent = 'Error'; }
+    if (row) { row.className = 'mcp-row'; }
+    toast('\u2717 ' + serverId.replace(/_/g,' ') + ': ' + r.error, 'err');
+  }
+}
 function populateStatus() { /* Part 4 */ }
 
 /* ── Init ──────────────────────────────────────────────── */
