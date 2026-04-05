@@ -786,10 +786,72 @@ section.active { display: block; }
 
     <!-- ===== SECTION: .ENV EXPORT ===== -->
     <section id="section-env">
+      <div class="section-header">
+        <div class="section-title">.env Export</div>
+        <div class="section-desc">Preview and download your environment configuration file.</div>
+      </div>
+
+      <!-- Preview card -->
+      <div class="card">
+        <div class="card-title">Preview</div>
+        <div class="env-preview" id="env-preview">Loading...</div>
+        <div class="code-actions">
+          <button class="btn" onclick="refreshEnvPreview()">&#8634; Refresh</button>
+          <button class="btn" onclick="copyText('env-preview')">&#9112; Copy</button>
+        </div>
+      </div>
+
+      <!-- Download card -->
+      <div class="card">
+        <div class="card-title">Download</div>
+        <div class="info-box" style="border-color:var(--warn);background:rgba(245,158,11,0.04);">
+          &#9888; <strong>Never commit .env to GitHub.</strong> This file contains secrets. Ensure <code>.env</code> is in your <code>.gitignore</code>.
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-primary" onclick="downloadEnv()">&#8595; Download .env</button>
+          <button class="btn" onclick="copyEnvRaw()">&#9112; Copy raw</button>
+        </div>
+      </div>
     </section>
 
     <!-- ===== SECTION: SETUP GUIDE ===== -->
     <section id="section-setup">
+      <div class="section-header">
+        <div class="section-title">Setup Guide</div>
+        <div class="section-desc">Implementation priority sequence for the Ambient Patient Companion.</div>
+      </div>
+
+      <!-- Week 1 -->
+      <div class="card">
+        <div class="card-title">Week 1 &#8212; Foundation</div>
+        <ol class="step-list">
+          <li class="step-item">Configure <strong>Anthropic API key</strong> and set Claude model to <code>claude-sonnet-4-6</code> with adaptive thinking.</li>
+          <li class="step-item">Deploy the <strong>FastMCP synthetic patient server</strong> on Replit with Maria Chen canonical data (MRN 4829341).</li>
+          <li class="step-item">Set up <strong>LangSmith tracing</strong> — add API key and project name, verify traces appear in dashboard.</li>
+          <li class="step-item">Wire the <strong>clinical priority queue</strong> (<code>core/priority_queue.py</code>) with 6-tier event classification.</li>
+          <li class="step-item">Build the <strong>constitutional system prompt</strong> (<code>core/constitutional.py</code>) with healthcare guardrails.</li>
+        </ol>
+      </div>
+
+      <!-- Week 2 -->
+      <div class="card">
+        <div class="card-title">Week 2 &#8212; Feedback Loop</div>
+        <ol class="step-list">
+          <li class="step-item">Deploy <strong>Vector Store</strong> (Pinecone/Qdrant) for MemPrompt correction storage and retrieval.</li>
+          <li class="step-item">Wire <strong>LangSmith feedback capture</strong> to provider UI — thumbs up/down on every AI suggestion.</li>
+          <li class="step-item">Inject <strong>few-shot corrections</strong> into system prompt on every API call (3-5 examples via XML tags).</li>
+        </ol>
+      </div>
+
+      <!-- Critical Reminders -->
+      <div class="card amber-left">
+        <div class="card-title">&#9888; Critical Reminders</div>
+        <ol class="step-list">
+          <li class="step-item"><strong>HealthEx MCP</strong> cannot generate synthetic data and is incompatible with Claude Code. Always use the FastMCP <code>synthetic_patient</code> server instead.</li>
+          <li class="step-item"><strong>Never use LangGraph SummarizationMiddleware</strong> — it strips thinking blocks from Claude responses. Use direct <code>ChatAnthropic</code> for thinking-block tracing.</li>
+          <li class="step-item"><strong>California AB 3030</strong>: All patient-facing AI communications must include the disclosure: <em>"This message was generated with AI assistance. Please contact your healthcare provider for medical decisions."</em></li>
+        </ol>
+      </div>
     </section>
 
   </main>
@@ -855,6 +917,7 @@ function populateAllSections() {
   populateStatus();
   updateNavDots();
   updateProgressBar();
+  refreshEnvPreview();
 }
 
 /* ── Save All ──────────────────────────────────────────── */
@@ -1165,6 +1228,54 @@ function downloadJson() {
   a.click();
   URL.revokeObjectURL(a.href);
   toast('\u2713 Downloaded claude_desktop_config.json');
+}
+
+/* ── .env Preview ──────────────────────────────────────── */
+async function refreshEnvPreview() {
+  const r = await api('/api/export/env', { raw: true });
+  if (!r) return;
+  const text = await r.text();
+  const el = document.getElementById('env-preview');
+  if (!el) return;
+  // Syntax highlight
+  el.innerHTML = text.split('\n').map(line => {
+    if (line.startsWith('#')) return `<span class="env-comment">${esc(line)}</span>`;
+    const eq = line.indexOf('=');
+    if (eq > 0) {
+      const key = line.substring(0, eq);
+      const val = line.substring(eq + 1);
+      if (val === '' || line.includes('# not set')) {
+        return `<span class="env-unset">${esc(line)}</span>`;
+      }
+      return `<span class="env-key">${esc(key)}</span>=<span class="env-val">${esc(val)}</span>`;
+    }
+    return esc(line);
+  }).join('\n');
+}
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function downloadEnv() {
+  const r = await fetch('/api/export/env?download=true');
+  if (!r.ok) { toast('Download failed', 'err'); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '.env';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('\u2713 Downloaded .env');
+}
+
+async function copyEnvRaw() {
+  const r = await fetch('/api/export/env?download=true');
+  if (!r.ok) { toast('Failed to fetch', 'err'); return; }
+  const text = await r.text();
+  navigator.clipboard.writeText(text).then(() => {
+    toast('\u2713 Copied raw .env to clipboard');
+  }).catch(() => { toast('\u2717 Copy failed', 'err'); });
 }
 
 /* ── Init ──────────────────────────────────────────────── */
