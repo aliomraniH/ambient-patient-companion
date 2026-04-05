@@ -16,7 +16,7 @@ async def test_generate_config_empty(client):
     assert data["config"]["mcpServers"] == {}
     assert data["claude_code_commands"] == []
     assert data["servers_configured"] == 0
-    assert data["servers_total"] == 5
+    assert data["servers_total"] == len(SERVER_MAP)
 
 
 @pytest.mark.anyio
@@ -50,21 +50,22 @@ async def test_generate_config_cli_commands(client):
 
 @pytest.mark.anyio
 async def test_generate_config_multiple_servers(client):
-    """Setting all 5 MCP URLs should produce 5 entries."""
+    """Setting all MCP URLs should produce one entry per server."""
     urls = {
         "MCP_SYNTHETIC_PATIENT_URL": "https://a.replit.app/mcp",
         "MCP_EHR_INTEGRATION_URL": "https://b.replit.app/mcp",
         "MCP_CARE_GAP_ANALYZER_URL": "https://c.replit.app/mcp",
         "MCP_LAB_PROCESSOR_URL": "https://d.replit.app/mcp",
         "MCP_LANGSMITH_FEEDBACK_URL": "https://e.replit.app/mcp",
+        "MCP_CLINICAL_INTELLIGENCE_URL": "https://f.replit.app/mcp",
     }
     await client.post("/api/config", json=urls)
     r = await client.get("/api/generate/claude-config")
     data = r.json()
-    assert data["servers_configured"] == 5
-    assert data["servers_total"] == 5
-    assert len(data["config"]["mcpServers"]) == 5
-    assert len(data["claude_code_commands"]) == 5
+    assert data["servers_configured"] == len(SERVER_MAP)
+    assert data["servers_total"] == len(SERVER_MAP)
+    assert len(data["config"]["mcpServers"]) == len(SERVER_MAP)
+    assert len(data["claude_code_commands"]) == len(SERVER_MAP)
 
 
 @pytest.mark.anyio
@@ -136,4 +137,4 @@ async def test_index_serves_html(client):
     r = await client.get("/")
     assert r.status_code == 200
     assert "<!DOCTYPE html>" in r.text
-    assert "Ambient Companion" in r.text
+    assert "Ambient Patient Companion" in r.text
