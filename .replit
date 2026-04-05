@@ -85,4 +85,4 @@ DATA_TRACK = "synthea"
 [deployment]
 deploymentTarget = "vm"
 run = ["bash", "start.sh"]
-build = ["bash", "-c", "cd replit-app && npm run build"]
+build = ["bash", "-c", "pip install -r requirements.txt && pip install -r replit_dashboard/requirements.txt && cd replit-app && npm ci && npm run build"]
