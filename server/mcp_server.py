@@ -21,6 +21,8 @@ from pathlib import Path
 
 import anthropic
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from server.guardrails.input_validator import validate_input
 from server.guardrails.output_validator import validate_output
@@ -702,8 +704,66 @@ async def get_synthetic_patient(mrn: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# REST wrapper routes (for HTML prototypes via claude-client.js)
+# ---------------------------------------------------------------------------
+
+@mcp.custom_route("/health", methods=["GET"])
+async def rest_health(request: Request) -> JSONResponse:
+    return JSONResponse({"ok": True, "server": "ClinicalIntelligence", "version": "1.0.0"})
+
+
+@mcp.custom_route("/tools/clinical_query", methods=["POST"])
+async def rest_clinical_query(request: Request) -> JSONResponse:
+    body = await request.json()
+    result = await clinical_query(
+        query=body.get("query", ""),
+        role=body.get("role", "patient"),
+        patient_context=body.get("patient_context", {}),
+    )
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/tools/get_guideline", methods=["GET"])
+async def rest_get_guideline(request: Request) -> JSONResponse:
+    rec_id = request.query_params.get("recommendation_id", "")
+    result = await get_guideline(recommendation_id=rec_id)
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/tools/check_screening_due", methods=["POST"])
+async def rest_check_screening_due(request: Request) -> JSONResponse:
+    body = await request.json()
+    result = await check_screening_due(
+        patient_age=body.get("patient_age", 0),
+        sex=body.get("sex", ""),
+        conditions=body.get("conditions", []),
+    )
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/tools/flag_drug_interaction", methods=["POST"])
+async def rest_flag_drug_interaction(request: Request) -> JSONResponse:
+    body = await request.json()
+    result = await flag_drug_interaction(medications=body.get("medications", []))
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/tools/get_synthetic_patient", methods=["GET"])
+async def rest_get_synthetic_patient(request: Request) -> JSONResponse:
+    mrn = request.query_params.get("mrn", "")
+    result = await get_synthetic_patient(mrn=mrn)
+    return JSONResponse(result)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    host = os.environ.get("MCP_HOST", "0.0.0.0")
+    port = int(os.environ.get("MCP_PORT", "8000"))
+    if transport in ("streamable-http", "http"):
+        mcp.run(transport="streamable-http", host=host, port=port)
+    else:
+        mcp.run(transport="stdio")
