@@ -27,6 +27,11 @@ ambient-patient-companion/
 │   ├── seed.py          ← Data seeding: python mcp-server/seed.py --patients 10 --months 6
 │   ├── orchestrator.py  ← Daily pipeline sequencer
 │   └── tests/           ← pytest test suite (44 backend tests)
+├── docs/                ← Planning documents (mcp_use_cases.md — story line + action plan)
+├── tests/e2e/           ← End-to-end use-case suite (15 tests, all 15 MCP tools)
+│   ├── data_entry_agent.py  ← PatientDataEntryAgent: seeds 6 months of Maria Chen history
+│   ├── conftest.py          ← Session-scoped DB pool + maria_chen fixture
+│   └── test_all_mcp_tools.py ← 15 use-case tests (UC-01 → UC-15)
 ├── replit_dashboard/    ← FastAPI config dashboard (API keys, MCP URLs, Claude config)
 │   ├── server.py        ← FastAPI app (port 8080)
 │   ├── index.html       ← Single-page dashboard UI
