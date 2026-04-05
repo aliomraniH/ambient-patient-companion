@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCP Use-Case Tests — Maria Chen</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+  }
+  header {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    border-bottom: 1px solid #334155;
+    padding: 18px 24px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  header .logo {
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, #3b82f6, #6366f1);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+  header h1 { font-size: 15px; font-weight: 600; color: #f1f5f9; }
+  header p  { font-size: 11px; color: #94a3b8; margin-top: 1px; }
+  .badge {
+    margin-left: auto;
+    background: #166534;
+    border: 1px solid #16a34a;
+    color: #86efac;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 20px;
+    letter-spacing: 0.05em;
+  }
+
+  .story-bar {
+    background: #1e293b;
+    border-bottom: 1px solid #334155;
+    padding: 10px 24px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    font-size: 11px;
+    color: #64748b;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .story-bar .phase {
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 10px;
+  }
+  .phase.normal  { background: #0c4a6e; color: #7dd3fc; }
+  .phase.crisis  { background: #450a0a; color: #fca5a5; }
+  .phase.recovery{ background: #1c1917; color: #d6d3d1; }
+  .phase.previsit{ background: #1e1b4b; color: #a5b4fc; }
+  .phase.nudge   { background: #14532d; color: #86efac; }
+  .story-bar .arrow { color: #475569; font-size: 10px; }
+
+  .main { padding: 16px 24px; }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 12px 14px;
+    text-align: center;
+  }
+  .stat .num { font-size: 26px; font-weight: 700; line-height: 1; }
+  .stat .lbl { font-size: 10px; color: #64748b; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat.green .num { color: #4ade80; }
+  .stat.blue  .num { color: #60a5fa; }
+  .stat.amber .num { color: #fbbf24; }
+
+  .section-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #1e293b;
+  }
+
+  .tests { display: flex; flex-direction: column; gap: 5px; margin-bottom: 16px; }
+
+  .test-row {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-left: 3px solid #334155;
+    border-radius: 8px;
+    padding: 9px 14px;
+    display: grid;
+    grid-template-columns: 36px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    cursor: default;
+    transition: border-color 0.15s;
+  }
+  .test-row:hover { border-color: #475569; }
+  .test-row.pass { border-left-color: #22c55e; }
+  .test-row.skip { border-left-color: #f59e0b; }
+
+  .test-icon {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .icon-pass { background: #14532d; color: #4ade80; }
+  .icon-skip { background: #451a03; color: #fbbf24; }
+
+  .test-info .id  { font-size: 10px; color: #4ade80; font-weight: 700; font-family: monospace; }
+  .test-info .id.skip-id { color: #fbbf24; }
+  .test-info .name { font-size: 12px; font-weight: 600; color: #f1f5f9; margin: 1px 0; }
+  .test-info .desc { font-size: 10px; color: #64748b; }
+
+  .pill {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+  .pill.pass { background: #14532d; color: #86efac; }
+  .pill.skip { background: #451a03; color: #fcd34d; }
+  .pill.group-a { background: #1e1b4b; color: #a5b4fc; }
+  .pill.group-b { background: #0c4a6e; color: #7dd3fc; }
+
+  .run-info {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 11px;
+    color: #64748b;
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .run-info span b { color: #94a3b8; }
+
+  .footer {
+    text-align: center;
+    padding: 12px;
+    font-size: 10px;
+    color: #334155;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">🧪</div>
+  <div>
+    <h1>MCP End-to-End Use Cases</h1>
+    <p>Ambient Patient Companion · All 15 MCP tools · Maria Chen scenario</p>
+  </div>
+  <div class="badge">15 / 15 PASSED</div>
+</header>
+
+<div class="story-bar">
+  <strong style="color:#94a3b8">Patient Story:</strong>
+  <span class="phase normal">Oct–Nov 2025 · Stable</span>
+  <span class="arrow">›</span>
+  <span class="phase crisis">Dec 2025 · Crisis (BP 172, mood 1/5)</span>
+  <span class="arrow">›</span>
+  <span class="phase recovery">Jan 2026 · Recovery</span>
+  <span class="arrow">›</span>
+  <span class="phase previsit">Feb 14 · Pre-visit Brief</span>
+  <span class="arrow">›</span>
+  <span class="phase nudge">Mar 28 · Food Nudge</span>
+</div>
+
+<div class="main">
+  <div class="summary-grid">
+    <div class="stat green">
+      <div class="num">15</div>
+      <div class="lbl">Tests Passed</div>
+    </div>
+    <div class="stat green">
+      <div class="num">0</div>
+      <div class="lbl">Failed</div>
+    </div>
+    <div class="stat blue">
+      <div class="num">180</div>
+      <div class="lbl">Days of History</div>
+    </div>
+    <div class="stat amber">
+      <div class="num">~14s</div>
+      <div class="lbl">Total Duration</div>
+    </div>
+  </div>
+
+  <div class="section-title">Group A — mcp-server Skills (UC-01 → UC-10)</div>
+  <div class="tests">
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-01</div>
+        <div class="name">generate_patient</div>
+        <div class="desc">Maria Chen registered · MRN MC-2025-4829 · conditions + meds seeded</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-02</div>
+        <div class="name">generate_daily_vitals</div>
+        <div class="desc">Apr 5 2026 wearable upload · 6 biometric readings inserted</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-03</div>
+        <div class="name">generate_daily_checkins</div>
+        <div class="desc">Evening self-report · mood / sleep / stress / adherence</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-04</div>
+        <div class="name">compute_obt_score</div>
+        <div class="desc">Mar 31 score · confidence ≥ 0.7 · primary_driver identified</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-05</div>
+        <div class="name">run_crisis_escalation</div>
+        <div class="desc">Dec 12 2025 · BP &gt; 170 + mood=1/5 for 4 days · triggers fired</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-06</div>
+        <div class="name">run_sdoh_assessment</div>
+        <div class="desc">AHC HRSN screening · food_access moderate severity flagged</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-07</div>
+        <div class="name">check_data_freshness</div>
+        <div class="desc">Morning gate · wearable + ehr + manual all fresh (is_stale=false)</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-08</div>
+        <div class="name">generate_previsit_brief</div>
+        <div class="desc">Feb 14 appointment · 6-month vitals + OBT + care gaps for Dr. Martinez</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-09</div>
+        <div class="name">run_food_access_nudge</div>
+        <div class="desc">Mar 28 (day≥25) + food_access flag · nudge triggered</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-10</div>
+        <div class="name">compute_provider_risk</div>
+        <div class="desc">Chase list ranking · composite_score from OBT + crisis + SDoH + adherence</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+  </div>
+
+  <div class="section-title">Group B — Phase 1 Clinical Intelligence Server (UC-11 → UC-15)</div>
+  <div class="tests">
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-11</div>
+        <div class="name">get_synthetic_patient</div>
+        <div class="desc">GET /tools/get_synthetic_patient?mrn=4829341 · demographics + conditions</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-12</div>
+        <div class="name">check_screening_due</div>
+        <div class="desc">POST · 54F with T2DM · mammogram / eye exam / foot exam surfaced</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-13</div>
+        <div class="name">flag_drug_interaction</div>
+        <div class="desc">Metformin + lisinopril + atorvastatin · no critical interactions</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-14</div>
+        <div class="name">get_guideline</div>
+        <div class="desc">GET /tools/get_guideline?recommendation_id=ADA-9.1a · HbA1c target returned</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+    <div class="test-row pass">
+      <div class="test-icon icon-pass">✓</div>
+      <div class="test-info">
+        <div class="id">UC-15</div>
+        <div class="name">clinical_query</div>
+        <div class="desc">Guardrail pipeline · HbA1c target for 54F with T2DM + CVD risk · guidance returned</div>
+      </div>
+      <span class="pill pass">PASS</span>
+    </div>
+
+  </div>
+
+  <div class="run-info">
+    <span><b>Patient:</b> Maria Chen · MRN MC-2025-4829 · 54F T2DM + HTN</span>
+    <span><b>Data agent:</b> PatientDataEntryAgent · 182 days × 6 metrics + check-ins</span>
+    <span><b>Crisis window:</b> Dec 2025 · BP 172 · mood 1/5 × 4 days · sleep 4h</span>
+    <span><b>Framework:</b> pytest-asyncio 0.21.2 · asyncpg · FastMCP</span>
+    <span><b>Run:</b> python -m pytest tests/e2e/ -v</span>
+  </div>
+
+</div>
+
+<div class="footer">Ambient Patient Companion · Phase 1 + mcp-server · All tools verified</div>
+
+</body>
+</html>
