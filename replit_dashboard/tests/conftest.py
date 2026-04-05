@@ -1,10 +1,10 @@
 """Fixtures for dashboard tests."""
 
+import os
 import pytest
 import sys
 from pathlib import Path
 
-# Add replit_dashboard to path so server module is importable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from server import app, ENV_FILE, ALL_KEYS, SECRET_KEYS, SERVER_MAP
@@ -19,10 +19,16 @@ def anyio_backend():
 
 @pytest.fixture(autouse=True)
 def clean_env():
-    """Ensure a clean .env file for each test, restore after."""
+    """Ensure a clean .env and isolated os.environ for each test."""
     backup = ENV_FILE.read_text() if ENV_FILE.exists() else ""
     ENV_FILE.write_text("")
+    saved = {k: os.environ.pop(k, None) for k in ALL_KEYS}
     yield
+    for k, v in saved.items():
+        if v is not None:
+            os.environ[k] = v
+        elif k in os.environ:
+            del os.environ[k]
     ENV_FILE.write_text(backup)
 
 
