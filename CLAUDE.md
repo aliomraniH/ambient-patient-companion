@@ -1,974 +1,746 @@
-# ambient-patient-companion
-# Claude Code Context — Full Architecture
+# CLAUDE.md — Ambient Patient Companion
+## Implementation Guide for Claude Code
 
-> **Read this file completely before writing any code or making any plan.**
-> This is the single source of truth for the entire system.
-> Update the session checklists at the bottom as you work.
-> Repo: https://github.com/aliomraniH/ambient-patient-companion
-
----
-
-## Visual Reference Cards
-
-Read all five images before planning any session.
-They contain build specs, file orders, physiological ranges, schema, and acceptance criteria.
-
-```
-cc_01_architecture.png  — Five-layer system + dual-track data + 3-session map
-cc_02_session1_mcp.png  — Session 1: files in dependency order + OBT algorithm
-cc_03_session2_data.png — Session 2: 22-table schema + ingestion pipeline + seed targets
-cc_04_session3_ui.png   — Session 3: component specs + data-testid requirements
-cc_05_acceptance.png    — 15-item acceptance criteria + daily pipeline + /compact strategy
-```
+> **Project**: Ambient Patient Companion  
+> **Model**: Ambient Action Model — `S = f(R, C, P, T)`  
+> **Stack**: Claude 4.6 + FastMCP + LangGraph + LangSmith + Replit  
+> **Canonical Patient**: Maria Chen, 54F, MRN 4829341 · Dr. Rahul Patel · Patel Family Medicine  
+> **GitHub**: https://github.com/aliomraniH/ambient-patient-companion
 
 ---
 
-## What We Are Building
+## 1. Project Overview
 
-**Ambient Patient Companion** — a multi-agent AI system that generates a
-continuously derived patient health UX from Role x Context x Patient State x Time.
+The Ambient Patient Companion transforms static patient dashboards into a continuously-derived, context-aware clinical intelligence surface. The system surface (`S`) is a function of:
 
-```
-S = f(R, C, P, T)  →  optimal clinical surface
-```
+| Variable | Meaning | Example |
+|---|---|---|
+| `R` | Role | Patient, Provider, Care Coordinator |
+| `C` | Context | Pre-visit, In-encounter, Post-visit, Async |
+| `P` | Patient State | HbA1c trend, BP readings, SDoH flags, med adherence |
+| `T` | Time | Current timestamp, time-since-last-contact, care gap age |
 
-Seven specialized agents communicate through a shared MCP tool registry.
-All agents read from a local PostgreSQL warehouse. No agent calls an
-external API directly. The Data Ingestion Service handles all external sources.
-
-Phase 1 (this build): Full system running on Synthea synthetic data.
-HealthEx, device APIs, and multi-user auth are Phase 2+.
+**Core design principle**: Zero activation cost. The right action surfaces before the clinician thinks to look for it.
 
 ---
 
-## Repository Structure
+## 2. Architecture — Five Layers
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Layer 1: Ambient UX                                     │
+│  Pre-session dashboard · In-encounter workspace ·        │
+│  Population panel · Message triage inbox                 │
+└────────────────────┬────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│  Layer 2: Agent Orchestration (LangGraph v1.0)           │
+│  Orchestrator-worker pattern · Clinical priority queue   │
+│  Event-driven triggers · Human-in-the-loop checkpoints   │
+└────────────────────┬────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│  Layer 3: Semantic Health Fabric                         │
+│  Claude 4.6 + Extended Thinking · LangSmith tracing     │
+│  Constitutional AI guardrails · MemPrompt corrections    │
+│  Proactive suggestion engine (separate API call)         │
+└────────────────────┬────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│  Layer 4: MCP Tool Registry (FastMCP)                    │
+│  Synthetic patient data · EHR integration               │
+│  Lab result processing · Care gap analysis              │
+└────────────────────┬────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│  Layer 5: Sources of Truth                               │
+│  Vector store (corrections + patient history)            │
+│  FHIR R5 subscriptions · Event sourcing (audit log)     │
+│  LangSmith datasets (few-shot retrieval)                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Repository Structure
 
 ```
 ambient-patient-companion/
+├── CLAUDE.md                    ← This file
+├── .env.example                 ← All required env vars (no secrets)
+├── replit_dashboard/
+│   └── index.html               ← API key + MCP config dashboard
 │
-├── CLAUDE.md                        ← you are here
-├── cc_01_architecture.png           ← plan mode reference (READ FIRST)
-├── cc_02_session1_mcp.png           ← plan mode reference
-├── cc_03_session2_data.png          ← plan mode reference
-├── cc_04_session3_ui.png            ← plan mode reference
-├── cc_05_acceptance.png             ← plan mode reference
+├── mcp_servers/
+│   ├── synthetic_patient/       ← FastMCP: generate synthetic patient data
+│   │   ├── server.py
+│   │   └── schemas.py
+│   ├── ehr_integration/         ← FastMCP: FHIR R5 read/write
+│   │   └── server.py
+│   ├── care_gap_analyzer/       ← FastMCP: USPSTF/ADA gap detection
+│   │   └── server.py
+│   ├── lab_processor/           ← FastMCP: lab result interpretation
+│   │   └── server.py
+│   └── langsmith_feedback/      ← FastMCP: correction capture + retrieval
+│       └── server.py
 │
-├── ingestion/                       ← NEW: Data Ingestion Service (Session 1)
-│   ├── CLAUDE.md
-│   ├── server.py                    ← FastMCP ingestion server entry point
-│   ├── pipeline.py                  ← IngestionPipeline class (6 stages)
-│   ├── conflict_resolver.py         ← Multi-source conflict resolution
-│   ├── adapters/
-│   │   ├── base.py                  ← PatientRecord dataclass + BaseAdapter ABC
-│   │   ├── synthea.py               ← Track A: Synthea FHIR Bundle parser
-│   │   ├── healthex.py              ← Track B: HealthEx MCP caller (Phase 2 only)
-│   │   └── manual_entry.py          ← Patient check-in direct writes
-│   └── tests/
-│       ├── test_pipeline.py         ← P1-P8 ingestion pipeline tests
-│       └── test_adapters.py         ← A1-A8 adapter tests
+├── agents/
+│   ├── orchestrator.py          ← LangGraph orchestrator-worker graph
+│   ├── triage_agent.py          ← Message triage + priority classification
+│   ├── suggestion_agent.py      ← Proactive suggestion generation
+│   ├── safety_reviewer.py       ← Constitutional AI critic agent
+│   └── correction_refiner.py   ← MemPrompt injection + refinement
 │
-├── mcp-server/                      ← Sessions 1 + 2: Agent MCP servers
-│   ├── CLAUDE.md
-│   ├── .mcp.json                    ← Claude Code MCP connection config
-│   ├── server.py                    ← FastMCP entry point (auto-discovers skills)
-│   ├── config.py                    ← env vars, DATA_TRACK, adapter selection
-│   ├── orchestrator.py              ← Daily pipeline sequencer
-│   ├── seed.py                      ← argparse: --patients 10 --months 6
-│   ├── db/
-│   │   ├── connection.py            ← asyncpg pool + get_pool()
-│   │   └── schema.sql               ← 22-table DDL (source of truth)
-│   ├── generators/
-│   │   ├── vitals_timeseries.py     ← BP, glucose, HRV, steps generators
-│   │   ├── behavioral_model.py      ← mood, energy, adherence patterns
-│   │   └── sdoh_profile.py          ← SDoH flag generation
-│   ├── transforms/
-│   │   └── fhir_to_schema.py        ← FHIR resources → DB table records
-│   ├── skills/
-│   │   ├── __init__.py              ← auto-discovery loader
-│   │   ├── base.py                  ← BaseSkill abstract class
-│   │   ├── generate_patient.py      ← import Synthea patient → DB
-│   │   ├── generate_vitals.py       ← biometric readings generation
-│   │   ├── generate_checkins.py     ← daily check-in + adherence
-│   │   ├── compute_obt_score.py     ← One Big Thing algorithm
-│   │   ├── sdoh_assessment.py       ← SDoH flags + interventions
-│   │   ├── crisis_escalation.py     ← 7-signal crisis detection
-│   │   ├── previsit_brief.py        ← pre-visit synthesis
-│   │   ├── food_access_nudge.py     ← end-of-month food access trigger
-│   │   ├── compute_provider_risk.py ← provider panel risk scores
-│   │   └── ingestion_tools.py       ← check_freshness + run_ingestion + conflicts
-│   └── tests/
-│       ├── conftest.py
-│       ├── test_generators.py       ← V1-V14 (14 tests)
-│       ├── test_skills.py           ← S1-S18 (18 tests)
-│       └── test_schema.py           ← D1-D12 (12 tests)
+├── core/
+│   ├── thinking_config.py       ← Claude extended thinking config
+│   ├── priority_queue.py        ← Clinical event priority queue (6-tier)
+│   ├── event_sourcing.py        ← Immutable event log for HIPAA audit
+│   ├── constitutional.py        ← System prompt builder + guardrails
+│   └── feedback_loop.py         ← Clinician correction storage + retrieval
 │
-└── replit-app/                      ← Session 3: Next.js companion UX
-    ├── CLAUDE.md
-    ├── app/
-    │   ├── page.tsx                 ← patient selector home
-    │   ├── patient/[id]/page.tsx    ← ambient companion (3-tab)
-    │   ├── provider/page.tsx        ← chase list + care gaps
-    │   └── api/
-    │       ├── obt/[id]/route.ts
-    │       ├── vitals/[id]/route.ts
-    │       ├── checkin/route.ts     ← direct write to daily_checkins
-    │       ├── patients/route.ts
-    │       └── sse/[id]/route.ts    ← SSE real-time updates
-    ├── components/
-    │   ├── OBTScoreCard.tsx
-    │   ├── VitalsChart.tsx
-    │   ├── CheckInFlow.tsx
-    │   ├── SDoHFlags.tsx
-    │   ├── ChaseList.tsx
-    │   ├── CareGapTracker.tsx
-    │   └── AgentMemoryLog.tsx
-    ├── lib/
-    │   └── db.ts                    ← pg Pool singleton + query<T>()
-    └── tests/
-        ├── components/
-        │   ├── OBTScoreCard.test.tsx
-        │   ├── VitalsChart.test.tsx
-        │   ├── CheckInFlow.test.tsx
-        │   └── provider.test.tsx
-        └── api/
-            └── routes.test.ts
+├── prototypes/
+│   ├── pre_session_dashboard.html
+│   ├── in_encounter_workspace.html
+│   ├── population_health_panel.html
+│   └── message_triage_inbox.html
+│
+└── tests/
+    ├── test_priority_queue.py
+    ├── test_constitutional.py
+    └── eval_trajectory.py       ← LangSmith trajectory evaluation
 ```
 
 ---
 
-## Seven-Agent Architecture
+## 4. Environment Variables
 
-Agents read ONLY from the PostgreSQL warehouse.
-No agent calls HealthEx, Synthea, or any external API directly.
+Copy `.env.example` → `.env` and populate:
 
-```
-EXTERNAL SOURCES  →  DATA INGESTION SERVICE  →  PATIENT DATA WAREHOUSE
-                                                         |
-                                              MCP TOOL REGISTRY (Replit)
-                                                         |
-        Health Data | Synthesis | Crisis | Provider Brief | Nudge
-                                         |
-                                  Orchestrator Agent
-                                         |
-                                  UX Surface Agent
-                                         |
-                                  REPLIT NEXT.JS APP
-```
+```bash
+# ── Anthropic ──────────────────────────────────────────────
+ANTHROPIC_API_KEY=sk-ant-...
+CLAUDE_MODEL=claude-sonnet-4-6
+CLAUDE_THINKING_MODE=adaptive          # or "enabled" for explicit budget
+CLAUDE_THINKING_BUDGET=10000           # tokens (min 1024, only for explicit mode)
+CLAUDE_MAX_TOKENS=16000
 
-### Agent to model mapping
+# ── LangSmith ──────────────────────────────────────────────
+LANGSMITH_API_KEY=ls__...
+LANGSMITH_TRACING=true
+LANGSMITH_PROJECT=ambient-patient-companion
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 
-| Agent           | Model            | Reason                           |
-|-----------------|------------------|----------------------------------|
-| Orchestrator    | claude-sonnet-4  | Routing decisions, low latency   |
-| Health Data     | claude-haiku-4   | Structured retrieval, fast       |
-| Synthesis       | claude-sonnet-4  | Pattern detection, OBT reasoning |
-| UX Surface      | claude-sonnet-4  | Component selection, phase logic |
-| Crisis          | claude-sonnet-4  | Always-on 15-min polling loop    |
-| Provider Brief  | claude-opus-4    | Deep 6-month synthesis, complex  |
-| Nudge           | claude-haiku-4   | Short-form generation, fast      |
+# ── Vector Store (for MemPrompt corrections) ───────────────
+VECTOR_STORE_URL=...                   # Pinecone / Qdrant / Weaviate
+VECTOR_STORE_API_KEY=...
+VECTOR_STORE_INDEX=clinical-corrections
 
----
+# ── FHIR / EHR ─────────────────────────────────────────────
+FHIR_BASE_URL=https://your-fhir-server/R4
+FHIR_CLIENT_ID=...
+FHIR_CLIENT_SECRET=...
 
-## Stack
+# ── FastMCP Servers (Replit-hosted) ───────────────────────
+MCP_SYNTHETIC_PATIENT_URL=https://synthetic-patient.repl.co/mcp
+MCP_EHR_INTEGRATION_URL=https://ehr-integration.repl.co/mcp
+MCP_CARE_GAP_ANALYZER_URL=https://care-gap-analyzer.repl.co/mcp
+MCP_LAB_PROCESSOR_URL=https://lab-processor.repl.co/mcp
+MCP_LANGSMITH_FEEDBACK_URL=https://langsmith-feedback.repl.co/mcp
 
-### Ingestion Service + MCP Server (Python)
+# ── Event Sourcing ──────────────────────────────────────────
+DATABASE_URL=postgresql://...          # For event store
+KAFKA_BOOTSTRAP_SERVERS=...            # Optional: for production Kafka
 
-```
-Python          3.11+
-FastMCP         3.x          pip install fastmcp
-asyncpg         latest       pip install asyncpg
-faker           latest       pip install faker
-numpy           latest       pip install numpy
-python-dateutil latest       pip install python-dateutil
-pytest          latest       pip install pytest pytest-asyncio
-```
-
-### Replit App (Node.js)
-
-```
-Next.js         14  (App Router, TypeScript strict)
-Tailwind CSS    3.x
-shadcn/ui       card badge tabs progress button input
-pg              node-postgres
-recharts        time-series charts
-Jest 29         + React Testing Library 14 + MSW
-```
-
-### Database
-
-```
-PostgreSQL 16   Replit Postgres (Neon-backed)
-                Connect: DATABASE_URL env var (Replit Secret)
-                Schema:  psql $DATABASE_URL < mcp-server/db/schema.sql
-                Tables:  22 total
+# ── Compliance ─────────────────────────────────────────────
+HIPAA_AUDIT_LOG=true
+AI_DISCLOSURE_REQUIRED=true            # California AB 3030
 ```
 
 ---
 
-## Environment Variables
+## 5. Six Technical Pillars — Implementation
 
-| Variable             | Value                            | Set in        |
-|----------------------|----------------------------------|---------------|
-| DATABASE_URL         | postgresql://... (Neon)          | Replit Secret |
-| DATA_TRACK           | synthea                          | Replit Secret |
-| SYNTHEA_OUTPUT_DIR   | /home/runner/synthea-output      | Replit Secret |
-| ANTHROPIC_API_KEY    | sk-ant-...                       | Replit Secret |
-
-Never hardcode credentials. Always read from os.environ.
-
----
-
-## Dual-Track Data Strategy
-
-```
-DATA_TRACK=synthea   → ingestion/adapters/synthea.py   → PatientRecord
-DATA_TRACK=healthex  → ingestion/adapters/healthex.py  → PatientRecord (Phase 2)
-```
-
-Both adapters produce identical PatientRecord output.
-The warehouse schema is identical for both tracks.
-Phase 1: DATA_TRACK=synthea only. Do not activate healthex adapter.
-
-### What each source covers vs what custom generators must fill
-
-| Data domain          | Synthea | HealthEx | Custom generator  |
-|----------------------|---------|----------|-------------------|
-| Patient demographics | YES     | YES      | No                |
-| Conditions (ICD-10)  | YES     | YES      | No                |
-| Medications (RxNorm) | YES     | YES      | No                |
-| Lab results (LOINC)  | YES     | YES      | No                |
-| In-clinic vitals     | YES     | YES      | No                |
-| Home device vitals   | NO      | NO       | vitals_timeseries |
-| Daily check-ins      | NO      | NO       | behavioral_model  |
-| SDoH flags           | PARTIAL | PARTIAL  | sdoh_profile      |
-| Medication adherence | NO      | NO       | behavioral_model  |
-
----
-
-## 22-Table PostgreSQL Schema
-
-Full DDL in mcp-server/db/schema.sql.
-All tables have: data_source VARCHAR(50) NOT NULL DEFAULT 'synthea'
-
-### Original 17 tables (+ data_source column added)
-
-```
-patients                UNIQUE: mrn
-patient_conditions      FK → patients CASCADE
-patient_medications     FK → patients CASCADE
-patient_sdoh_flags      UNIQUE: patient_id + domain
-biometric_readings      INDEX: patient_id + metric_type + measured_at DESC
-daily_checkins          UNIQUE: patient_id + checkin_date
-medication_adherence    UNIQUE: patient_id + medication_id + adherence_date
-clinical_events         INDEX: patient_id + event_date DESC
-care_gaps               INDEX: patient_id + status
-obt_scores              UNIQUE: patient_id + score_date
-clinical_facts          INDEX: ttl_expires_at (for expiry queries)
-behavioral_correlations FK → patients
-agent_interventions     INDEX: patient_id + delivered_at DESC
-agent_memory_episodes   FK → patients
-skill_executions        INDEX: execution_date + skill_name
-provider_risk_scores    UNIQUE: patient_id + score_date
-pipeline_runs           audit table (standalone)
-```
-
-### 4 new ingestion management tables
-
-```
-data_sources
-  id UUID PK
-  patient_id UUID FK → patients.id
-  source_name VARCHAR(50)        -- synthea | healthex | withings | apple_health | manual
-  is_active BOOLEAN
-  auth_token_ref VARCHAR(200)    -- reference to OAuth token (not stored here)
-  connected_at TIMESTAMPTZ
-  UNIQUE(patient_id, source_name)
-
-source_freshness
-  id UUID PK
-  patient_id UUID FK → patients.id
-  source_name VARCHAR(50)
-  last_ingested_at TIMESTAMPTZ
-  records_count INT
-  ttl_hours INT                  -- staleness threshold
-  is_stale BOOL GENERATED        -- (last_ingested_at + ttl_hours * INTERVAL '1h' < NOW())
-  UNIQUE(patient_id, source_name)
-
-ingestion_log
-  id UUID PK
-  patient_id UUID FK → patients.id
-  source_name VARCHAR(50)
-  status VARCHAR(20)             -- completed | failed | skipped_fresh | partial
-  records_upserted INT
-  conflicts_detected INT
-  duration_ms INT
-  error_message TEXT
-  retry_count INT DEFAULT 0
-  triggered_by VARCHAR(50)       -- schedule | pre_visit | force_refresh
-  started_at TIMESTAMPTZ DEFAULT NOW()
-
-raw_fhir_cache
-  id UUID PK
-  patient_id UUID FK → patients.id
-  source_name VARCHAR(50)
-  resource_type VARCHAR(50)      -- Patient | Observation | Condition | etc
-  raw_json JSONB
-  fhir_resource_id VARCHAR(100)  -- source system ID
-  retrieved_at TIMESTAMPTZ DEFAULT NOW()
-  processed BOOL DEFAULT false
-  UNIQUE(patient_id, source_name, fhir_resource_id)
-
-system_config
-  key VARCHAR(100) PK
-  value TEXT NOT NULL
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-  Seed: DATA_TRACK=synthea
-```
-
-### HealthEx Session-Bridge Tools
-
-Three tools in `skills/ingestion_tools.py` enable HealthEx data flow:
-
-```
-get_data_source_status    → session startup · active track + freshness
-ingest_from_healthex      → accepts HealthEx FHIR JSON → runs stages 4-8
-switch_data_track         → persists DATA_TRACK to system_config
-```
-
-Claude acts as the HealthEx client (holds OAuth token from connected session)
-and passes FHIR responses into the MCP for warehouse writing. The MCP server
-never calls HealthEx directly. `transform_by_type()` in `fhir_to_schema.py`
-routes resource types to the correct transformer.
-
----
-
-## Data Ingestion Pipeline — Six Stages
-
-The ingestion service runs BEFORE the agent skill pipeline each day.
-
-```
-Stage 1: Adapter selection    read DATA_TRACK → import adapter class
-Stage 2: Freshness check      query source_freshness → skip if not stale
-Stage 3: Raw retrieval        adapter.fetch(patient_id) → raw FHIR JSON
-Stage 4: Cache raw bundle     INSERT INTO raw_fhir_cache (before transform)
-Stage 5: Normalization        fhir_to_schema.py → flat DB records
-Stage 6: Conflict resolution  patient-reported > device > HealthEx > Synthea
-Stage 7: Warehouse write      INSERT ... ON CONFLICT DO UPDATE
-Stage 8: Update freshness     UPDATE source_freshness SET last_ingested_at=NOW()
-```
-
-### Freshness TTL per source
-
-| Source         | TTL       | Trigger                                  |
-|----------------|-----------|------------------------------------------|
-| Synthea        | Never     | One-time seed + daily increments         |
-| HealthEx       | 24 hours  | Nightly 3AM + pre-visit force-refresh    |
-| Device APIs    | 1 hour    | Webhooks (Phase 3) or polling fallback   |
-| Patient input  | Real-time | Direct write on check-in submit          |
-| OBT scores     | 24 hours  | Computed daily by Synthesis Agent        |
-| Clinical facts | 30-72h-1yr| TTL set per fact type by skills          |
-
----
-
-## MCP Server Absolute Rules
-
-```
-RULE 1  NEVER print() in tool handlers or generators
-        FastMCP uses stdout for JSON-RPC. print() corrupts the stream.
-        All logging: logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-        VERIFY: grep -r "print(" mcp-server/skills/ mcp-server/generators/ → EMPTY
-
-RULE 2  ALL SQL parameterized (no f-strings)
-        CORRECT:   await conn.execute("... WHERE id=$1", patient_id)
-        WRONG:     await conn.execute(f"... WHERE id='{patient_id}'")
-        VERIFY: grep -rn 'f".*SELECT\|f".*INSERT\|f".*UPDATE' mcp-server/ → EMPTY
-
-RULE 3  Every tool returns a string
-        FastMCP requirement. Never return dict, list, or None.
-        Success: return f"OK Generated {N} readings for {patient_id}"
-        Error:   return f"Error: {str(e)}"
-
-RULE 4  Every tool catches all exceptions
-        try/except wraps the entire tool body.
-        On exception: log to skill_executions status='failed', return error string.
-
-RULE 5  Every tool logs to skill_executions
-        Both on success (status='completed') and failure (status='failed').
-        This is the pipeline audit trail.
-
-RULE 6  Idempotent writes only
-        All INSERTs use ON CONFLICT DO NOTHING or ON CONFLICT DO UPDATE.
-        Running the same tool twice for the same date must produce the same state.
-
-RULE 7  data_source column on every INSERT
-        Every row written to any table must include data_source.
-        Phase 1 default: 'synthea'
-```
-
----
-
-## Vital Sign Physiological Ranges
-
-```
-Metric           Unit    Min    Max    Behavioral model notes
-bp_systolic      mmHg     90    180    Baseline ~141. Morning +8, evening -5.
-                                       EOM (days 25-31): +11 avg. StdDev >= 8.
-bp_diastolic     mmHg     55    115    Correlated with systolic (r > 0.7).
-                                       Pulse pressure always 20-80 mmHg.
-glucose_fasting  mg/dL    70    300    EOM spike +25 avg. Stress days +20.
-                                       Postprandial = fasting + 30-80.
-hrv_rmssd        ms       12    100    Lower = more stress. Correlates with mood.
-spo2             %        88    100    Stable 95-99 baseline.
-steps_daily      count   800  14000    Weekday vs weekend +/-20%.
-                                       Crisis month: -40% from baseline.
-sleep_hours      hours   4.0    9.5    Normal avg 7.2. Crisis avg 5.8.
-stress_level     int       1     10    Normal avg 4. Caregiver stress avg 7.5.
-check-in rate              65%   90%   Normal. Crisis: 55-75%.
-```
-
----
-
-## OBT Score Algorithm
-
-Implement exactly. Weights are non-negotiable.
+### Pillar 1: Claude Extended Thinking → LangSmith Traces
 
 ```python
-# Domain scores 0-100, based on patient's OWN 30-day baseline
-bp_score       = deviation_score(avg_systolic, patient_baseline_systolic,
-                                 good_threshold=5mmHg, bad_threshold=30mmHg)
-glucose_score  = deviation_score(avg_fasting, patient_baseline_fasting,
-                                 good_threshold=10mg_dL, bad_threshold=60mg_dL)
-behavioral     = normalize(mood_avg, energy_avg)  # great=5,good=4,okay=3,low=2,bad=1
-adherence      = (taken_count / total_due) * 100
-sleep          = 100 if 7.0 <= avg_sleep <= 9.0 else linear_decay
+# core/thinking_config.py
 
-score = (bp_score * 0.30 + glucose_score * 0.25 + behavioral * 0.20
-         + adherence * 0.15 + sleep * 0.10)
+from anthropic import Anthropic
+from langchain_anthropic import ChatAnthropic
+import os
 
-primary_driver  = domain with LOWEST individual score
-trend_direction = this-week avg vs last-week avg
-confidence      = 1.0 (>=14d) | 0.7 (7-13d) | 0.4 (<7d)
+def get_claude_client():
+    """Claude 4.6 with adaptive thinking, LangSmith tracing enabled."""
+    return ChatAnthropic(
+        model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
+        thinking={"type": "adaptive"},          # Adaptive = let model decide
+        output_config={"effort": "medium"},      # "low" | "medium" | "high"
+        max_tokens=int(os.getenv("CLAUDE_MAX_TOKENS", "16000")),
+        # LangSmith captures all reasoning blocks automatically
+        # when LANGSMITH_TRACING=true
+    )
 
-# DB writes
-INSERT INTO obt_scores ON CONFLICT (patient_id, score_date) DO UPDATE
-INSERT INTO clinical_facts ttl_expires_at = NOW() + INTERVAL '30 days'
-                           source_skill = 'compute_obt_score'
+def get_claude_client_explicit(budget_tokens: int = 10000):
+    """Use when you need explicit budget control (e.g., complex diagnostics)."""
+    return ChatAnthropic(
+        model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
+        thinking={"type": "enabled", "budget_tokens": budget_tokens},
+        max_tokens=budget_tokens + 4000,  # max_tokens must exceed budget_tokens
+    )
+
+# IMPORTANT: LangGraph's SummarizationMiddleware strips thinking blocks.
+# Use direct ChatAnthropic (not Bedrock routing) for thinking-block tracing.
+# See: langsmith-sdk issue #2055 (resolved Oct 2025) — but summarization
+# middleware issue remains active. Avoid it in multi-turn agent workflows.
+```
+
+### Pillar 2: LangSmith Trajectory Evaluation + Self-Learning Loop
+
+```python
+# core/feedback_loop.py
+
+from langsmith import Client
+from langsmith.evaluation import evaluate
+from agentevals import TrajectoryEvaluator
+
+ls_client = Client()
+
+# ── Self-Learning Data Flywheel ─────────────────────────────────────────
+
+async def capture_clinician_feedback(run_id: str, score: int, correction: str = None):
+    """
+    Attach clinician feedback to a specific LangSmith trace run.
+    score: 1 = positive, 0 = negative
+    correction: Optional text correction from clinician
+    """
+    ls_client.create_feedback(
+        run_id=run_id,
+        key="clinician_score",
+        score=score,
+        comment=correction,
+    )
+    if correction and score == 0:
+        # Store correction in vector store for MemPrompt retrieval
+        await store_correction(run_id, correction)
+
+async def get_few_shot_corrections(query: str, k: int = 3):
+    """
+    Retrieve semantically similar past corrections for MemPrompt injection.
+    Uses LangSmith's indexed dataset (BM25-like retrieval, open beta on paid plans).
+    """
+    examples = ls_client.similar_examples(
+        inputs={"query": query},
+        limit=k,
+        dataset_name="clinical-corrections",
+    )
+    return examples
+
+# ── Trajectory Evaluation ───────────────────────────────────────────────
+
+def evaluate_agent_trajectory(run_id: str, expected_tools: list[str]):
+    """
+    Validate that a triage agent consulted the right clinical tools
+    in the right order — not merely that its final answer was correct.
+    """
+    evaluator = TrajectoryEvaluator(
+        mode="subset",   # "strict" | "unordered" | "subset" | "superset"
+        expected_trajectory=expected_tools,
+    )
+    return evaluator.evaluate_run(run_id)
+```
+
+### Pillar 3: Proactive Suggestion Engine
+
+```python
+# agents/suggestion_agent.py
+# Pattern: Separate hidden API call triggered by clinical events
+# Informed by Google AMIE's uncertainty-directed questioning
+
+import anthropic
+from core.priority_queue import ClinicalEvent, Priority
+
+async def generate_proactive_suggestions(
+    patient_state: dict,
+    encounter_context: str,
+    n_suggestions: int = 3,
+) -> list[str]:
+    """
+    Generates proactive follow-up suggestions via a SEPARATE API call.
+    This is middleware-level — not intrinsic model capability.
+    Runs after the primary response completes.
+    
+    Diagnostic uncertainty drives suggestion selection (AMIE pattern):
+    - Maintain internal state tracking knowledge gaps
+    - Generate questions that most reduce uncertainty
+    """
+    client = anthropic.Anthropic()
+    
+    suggestion_prompt = f"""You are analyzing a primary care encounter to generate
+proactive clinical suggestions. Patient state: {patient_state}
+Context: {encounter_context}
+
+Generate exactly {n_suggestions} follow-up suggestions that would MOST REDUCE
+DIAGNOSTIC UNCERTAINTY given what we don't yet know about this patient.
+
+Format as JSON array: ["suggestion1", "suggestion2", "suggestion3"]
+Prioritize: (1) gaps in history, (2) missing labs, (3) care guideline gaps.
+NEVER suggest anything diagnostic — frame as "possible considerations" only.
+Include CA AB 3030 disclaimer: this is AI-generated, contact provider for medical decisions."""
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=500,
+        messages=[{"role": "user", "content": suggestion_prompt}],
+    )
+    
+    import json
+    suggestions = json.loads(response.content[0].text)
+    return suggestions
+
+# ── Event-Triggered Suggestion Pattern ─────────────────────────────────
+
+async def on_lab_result_received(lab_event: ClinicalEvent):
+    """Lab results import → auto-trigger dynamic clinical questionnaire."""
+    if lab_event.priority <= Priority.HIGH:
+        suggestions = await generate_proactive_suggestions(
+            patient_state=lab_event.patient_state,
+            encounter_context=f"Lab result received: {lab_event.data}",
+        )
+        await deliver_suggestions_via_appropriate_channel(
+            suggestions=suggestions,
+            channel="provider_dashboard",   # NOT patient-facing (FDA Criterion 3)
+            require_hcp_review=True,
+        )
+```
+
+### Pillar 4: Lightweight Feedback Loop (No Retraining)
+
+```python
+# core/constitutional.py
+
+HEALTHCARE_CONSTITUTION = """
+PRIORITY HIERARCHY (in order of precedence):
+1. SAFETY — Never output anything that could cause patient harm
+2. ETHICS — Respect patient autonomy, privacy, dignity  
+3. COMPLIANCE — FDA CDS criteria, HIPAA, California AB 3030, ONC HTI-1
+4. HELPFULNESS — Be maximally useful within the above constraints
+
+CLINICAL ACCURACY REQUIREMENTS:
+- Never make diagnostic claims; use "possible considerations" language
+- Always cite evidence basis for clinical suggestions (USPSTF, ADA, ACC)
+- Scope-of-practice: surface information, do not replace clinical judgment
+- Escalation triggers: flag any output that could influence treatment decisions
+
+SCOPE-OF-PRACTICE BOUNDARIES:
+- Patient-facing: general wellness only (FDA General Wellness exemption)
+- Provider-facing: CDS exclusion criteria — must enable independent HCP review
+- Never: diagnose, prescribe, or give specific dosing recommendations
+
+DISCLOSURE REQUIREMENTS (California AB 3030):
+- All AI-generated patient communications must include:
+  "This message was generated with AI assistance. Please contact your
+   healthcare provider for medical decisions."
+
+PATIENT DATA HANDLING:
+- PHI must never appear in: logs, error messages, embeddings, or examples
+- Use MRN references only, never full patient names in system context
+
+ESCALATION TRIGGERS — route to human review when:
+- Confidence < 0.7 on any clinical recommendation
+- Patient mentions: suicidal ideation, abuse, neglect, emergency symptoms
+- Output involves: medication changes, test ordering, specialist referral
+"""
+
+def build_system_prompt(
+    role: str,          # "provider" | "patient" | "coordinator"
+    context: str,       # "pre_session" | "in_encounter" | "post_visit"
+    few_shot_corrections: list = None,
+) -> str:
+    """Build constitutional system prompt with MemPrompt corrections injected."""
+    
+    base = f"""You are the Ambient Patient Companion AI assistant.
+Current role: {role}
+Current context: {context}
+
+{HEALTHCARE_CONSTITUTION}"""
+
+    if few_shot_corrections:
+        corrections_xml = "\n".join([
+            f"<example>\n  <query>{c['query']}</query>\n  <correction>{c['correction']}</correction>\n</example>"
+            for c in few_shot_corrections[:5]  # Claude recommends 3-5 examples
+        ])
+        base += f"\n\n<corrections>\n{corrections_xml}\n</corrections>"
+    
+    return base
+```
+
+### Pillar 5: Event-Driven Architecture + Clinical Priority Queue
+
+```python
+# core/priority_queue.py
+
+import asyncio
+from dataclasses import dataclass, field
+from enum import IntEnum
+from itertools import count
+
+_seq = count()   # Monotonic sequence for FIFO tie-breaking within priority
+
+class Priority(IntEnum):
+    CRITICAL  = 0   # Life-threatening: SpO2 < 90%, cardiac arrest alerts → Immediate
+    URGENT    = 1   # Critical labs, sepsis indicators → < 1 minute
+    HIGH      = 2   # Provider messages requiring clinical action → < 5 minutes
+    MODERATE  = 3   # Routine labs, appointment notifications → < 30 minutes
+    LOW       = 4   # Patient messages, scheduling, refills → < 2 hours
+    DEFERRED  = 5   # Analytics, background sync, reporting → Best effort
+
+@dataclass(order=True)
+class ClinicalEvent:
+    priority: int              # Priority enum value (lower = more urgent)
+    seq: int = field(default_factory=lambda: next(_seq))  # FIFO tie-break
+    event_type: str = field(compare=False, default="")
+    patient_mrn: str = field(compare=False, default="")
+    patient_state: dict = field(compare=False, default_factory=dict)
+    data: dict = field(compare=False, default_factory=dict)
+    
+    # Event sourcing — immutable audit trail
+    event_id: str = field(compare=False, default="")
+    timestamp: str = field(compare=False, default="")
+
+class ClinicalPriorityQueue:
+    def __init__(self, maxsize: int = 1000):
+        self._queue = asyncio.PriorityQueue(maxsize=maxsize)
+        self._event_log = []   # Immutable event sourcing log
+    
+    async def put(self, event: ClinicalEvent):
+        # Event sourcing: append to immutable log before queuing
+        self._event_log.append({
+            "event_id": event.event_id,
+            "priority": event.priority,
+            "type": event.event_type,
+            "mrn": event.patient_mrn,
+            "timestamp": event.timestamp,
+        })
+        await self._queue.put(event)
+    
+    async def get(self) -> ClinicalEvent:
+        return await self._queue.get()
+    
+    def replay_events(self, from_timestamp: str = None) -> list:
+        """HIPAA audit support: replay all events from a given point in time."""
+        if from_timestamp:
+            return [e for e in self._event_log if e["timestamp"] >= from_timestamp]
+        return self._event_log.copy()
+```
+
+### Pillar 6: FDA Compliance + Regulatory Guardrails
+
+```python
+# core/compliance.py
+
+from enum import Enum
+
+class DeliveryChannel(Enum):
+    PROVIDER_DASHBOARD = "provider"    # CDS exclusion eligible (Criterion 3)
+    PATIENT_PORTAL = "patient"         # FDA regulation applies
+    GENERAL_WELLNESS = "wellness"      # General Wellness exemption
+    HCP_REVIEWED = "hcp_reviewed"      # CA AB 3030 exception: reviewed before send
+
+def validate_output_compliance(
+    content: str,
+    channel: DeliveryChannel,
+    requires_hcp_review: bool = True,
+) -> dict:
+    """
+    Validate output against FDA CDS four-criteria test and state law.
+    Returns: { "compliant": bool, "issues": list, "required_additions": list }
+    """
+    issues = []
+    additions = []
+    
+    # FDA Criterion 3: patient-facing AI fails CDS non-device exclusion
+    if channel == DeliveryChannel.PATIENT_PORTAL and not requires_hcp_review:
+        issues.append("Patient-facing AI suggestions require HCP review (FDA Criterion 3)")
+    
+    # California AB 3030 (effective Jan 2025)
+    if channel in [DeliveryChannel.PATIENT_PORTAL, DeliveryChannel.GENERAL_WELLNESS]:
+        ab3030_disclaimer = (
+            "This message was generated with AI assistance. "
+            "Please contact your healthcare provider for medical decisions."
+        )
+        if ab3030_disclaimer not in content:
+            additions.append(("disclaimer", ab3030_disclaimer))
+    
+    # ONC HTI-1: no predictive DSI without source attribution
+    if "recommend" in content.lower() or "suggest" in content.lower():
+        if "USPSTF" not in content and "ADA" not in content and "ACC" not in content:
+            additions.append(("source_required", "Add evidence basis citation (USPSTF/ADA/ACC)"))
+    
+    # Language check: no diagnostic terminology in patient-facing content
+    diagnostic_terms = ["diagnosis", "diagnose", "you have", "you are suffering from"]
+    for term in diagnostic_terms:
+        if term in content.lower() and channel == DeliveryChannel.PATIENT_PORTAL:
+            issues.append(f"Diagnostic language detected: '{term}' — use 'possible considerations'")
+    
+    return {
+        "compliant": len(issues) == 0,
+        "issues": issues,
+        "required_additions": additions,
+    }
 ```
 
 ---
 
-## Skill Registry Pattern
+## 6. FastMCP Synthetic Data Server
+
+> **CRITICAL**: HealthEx MCP cannot generate synthetic data and is incompatible with Claude Code.  
+> Use FastMCP (Python) for all synthetic patient data generation.
 
 ```python
-# skills/__init__.py — auto-discovery
-import importlib, pkgutil, logging, sys
+# mcp_servers/synthetic_patient/server.py
 
-def load_skills(mcp):
-    import skills
-    for _, modname, _ in pkgutil.iter_modules(skills.__path__):
-        if modname in ("base",) or modname.startswith("_"):
-            continue
-        module = importlib.import_module(f"skills.{modname}")
-        if hasattr(module, "register"):
-            module.register(mcp)
-            logging.info(f"Loaded skill: {modname}")  # stderr only
-
-# skills/my_skill.py — canonical template for every skill file
 from fastmcp import FastMCP
-from fastmcp.dependencies import Depends
-from db.connection import get_pool
-import logging, json, sys
+from datetime import datetime, timedelta
+import random
 
-def register(mcp: FastMCP):
-    @mcp.tool
-    async def tool_name(patient_id: str, pool=Depends(get_pool)) -> str:
-        """Brief description under 100 chars.
-        Args:
-            patient_id: UUID of patient in the database
-        """
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO skill_executions "
-                    "(skill_name, patient_id, status, output_data) "
-                    "VALUES ($1, $2, $3, $4)",
-                    "tool_name", patient_id, "completed", json.dumps({"n": 0})
-                )
-            return f"OK Done for {patient_id}"
-        except Exception as e:
-            logging.error(f"tool_name failed: {e}")
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO skill_executions "
-                    "(skill_name, patient_id, status, error_message) "
-                    "VALUES ($1, $2, $3, $4)",
-                    "tool_name", patient_id, "failed", str(e)
-                )
-            return f"Error: {str(e)}"
+mcp = FastMCP("synthetic-patient-data")
+
+@mcp.tool()
+async def get_patient_record(mrn: str = "4829341") -> dict:
+    """
+    Get synthetic patient record. Default: Maria Chen (canonical demo patient).
+    Returns FHIR-compatible patient bundle.
+    """
+    if mrn == "4829341":
+        return MARIA_CHEN_RECORD
+    return generate_synthetic_patient(mrn)
+
+@mcp.tool()
+async def get_lab_results(mrn: str, days_back: int = 180) -> list:
+    """Get synthetic lab results for the past N days."""
+    return generate_lab_trend(mrn, days_back)
+
+@mcp.tool()
+async def get_care_gaps(mrn: str) -> list:
+    """Return USPSTF/ADA care gaps for a patient."""
+    return analyze_care_gaps(mrn)
+
+@mcp.tool()
+async def get_schedule(provider_id: str = "patel_rahul", date: str = None) -> list:
+    """Get provider's day schedule with patient state summaries."""
+    if date is None:
+        date = datetime.today().strftime("%Y-%m-%d")
+    return generate_schedule(provider_id, date)
+
+# Canonical demo patient
+MARIA_CHEN_RECORD = {
+    "mrn": "4829341",
+    "name": "Maria Chen",
+    "age": 54,
+    "gender": "F",
+    "provider": "Dr. Rahul Patel",
+    "practice": "Patel Family Medicine",
+    "conditions": ["Type 2 Diabetes (E11.9)", "Hypertension (I10)", "Hyperlipidemia (E78.5)"],
+    "medications": [
+        {"name": "Metformin", "dose": "1000mg", "frequency": "BID", "adherence": 0.78},
+        {"name": "Lisinopril", "dose": "10mg", "frequency": "QD", "adherence": 0.91},
+        {"name": "Atorvastatin", "dose": "40mg", "frequency": "QD", "adherence": 0.85},
+    ],
+    "vitals": {"bp": "141/86", "weight": "168 lbs", "bmi": 27.4},
+    "labs": {"hba1c": 7.8, "ldl": 112, "egfr": 68, "last_labs": "2025-11-14"},
+    "care_gaps": [
+        {"gap": "Retinal exam", "due_since": "2024-12-01", "priority": "HIGH"},
+        {"gap": "Foot exam", "due_since": "2025-03-01", "priority": "MODERATE"},
+        {"gap": "UACR", "due_since": "2025-01-01", "priority": "HIGH"},
+    ],
+    "sdoh_flags": ["Transportation barrier (NLP-detected)", "Food insecurity risk"],
+}
+
+if __name__ == "__main__":
+    mcp.run(transport="streamable-http", port=8001)
 ```
 
 ---
 
-## .mcp.json
+## 7. LangGraph Agent Orchestration
 
-Place in mcp-server/ directory:
+```python
+# agents/orchestrator.py
+
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+from typing import TypedDict, Annotated
+import operator
+
+class ClinicalAgentState(TypedDict):
+    messages: Annotated[list, operator.add]
+    patient_mrn: str
+    priority: int
+    suggestions: list[str]
+    safety_approved: bool
+    requires_human_review: bool
+    audit_trail: Annotated[list, operator.add]
+
+def build_clinical_graph():
+    graph = StateGraph(ClinicalAgentState)
+    
+    # Nodes
+    graph.add_node("triage", triage_agent)
+    graph.add_node("generate", suggestion_agent)
+    graph.add_node("safety_review", safety_reviewer)     # Constitutional AI critic
+    graph.add_node("refine", correction_refiner)         # MemPrompt refinement
+    graph.add_node("human_checkpoint", human_review)     # Human-in-the-loop
+    graph.add_node("deliver", delivery_agent)
+    
+    # Edges
+    graph.set_entry_point("triage")
+    graph.add_edge("triage", "generate")
+    graph.add_edge("generate", "safety_review")
+    graph.add_conditional_edges("safety_review", route_after_safety, {
+        "approved": "deliver",
+        "needs_refinement": "refine",
+        "human_required": "human_checkpoint",
+    })
+    graph.add_edge("refine", "safety_review")        # Critic-refiner loop
+    graph.add_edge("human_checkpoint", "deliver")
+    graph.add_edge("deliver", END)
+    
+    # Durable checkpointing for HIPAA audit trail
+    checkpointer = MemorySaver()
+    return graph.compile(checkpointer=checkpointer)
+
+def route_after_safety(state: ClinicalAgentState) -> str:
+    if state["requires_human_review"]:
+        return "human_required"
+    if not state["safety_approved"]:
+        return "needs_refinement"
+    return "approved"
+```
+
+---
+
+## 8. MCP Tools for Claude Desktop/Code
+
+After deploying FastMCP servers to Replit, add these to your Claude settings (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
-    "patient-companion": {
-      "command": "python",
-      "args": ["server.py"],
-      "env": {
-        "DATABASE_URL": "${DATABASE_URL}",
-        "DATA_TRACK": "synthea",
-        "SYNTHEA_OUTPUT_DIR": "${SYNTHEA_OUTPUT_DIR}",
-        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"
-      }
+    "synthetic-patient": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://synthetic-patient.YOUR-REPLIT-URL.repl.co/mcp"]
+    },
+    "ehr-integration": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://ehr-integration.YOUR-REPLIT-URL.repl.co/mcp"]
+    },
+    "care-gap-analyzer": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://care-gap-analyzer.YOUR-REPLIT-URL.repl.co/mcp"]
+    },
+    "lab-processor": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://lab-processor.YOUR-REPLIT-URL.repl.co/mcp"]
+    },
+    "langsmith-feedback": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://langsmith-feedback.YOUR-REPLIT-URL.repl.co/mcp"]
     }
   }
 }
 ```
 
----
-
-## Frontend Component Requirements
-
-data-testid attributes are tested by Jest. Missing = failing test.
-
-### OBTScoreCard.tsx (F1-F8)
-```
-"use client"                    required
-data-testid="score-skeleton"    when data is null
-data-color="green"              score >= 70
-data-color="amber"              score 40-69
-data-color="red"                score < 40
-data-testid="trend-arrow"       always present
-data-direction="up"             trend_direction==="improving"
-data-direction="down"           trend_direction==="declining"
-data-direction="right"          trend_direction==="stable"
-"Limited data — score may vary" when confidence < 0.6 (exact text match)
-```
-
-### VitalsChart.tsx (F9-F15)
-```
-data-testid="vitals-chart-container"
-Tab buttons: "BP" | "Glucose" | "HRV"
-Time range buttons: "7d" | "30d" | "90d"
-data-count attribute on chart element   updates on range change
-"No data yet"                           when readings prop is empty
-```
-
-### CheckInFlow.tsx (F16-F24)
-```
-5 steps: mood → energy → stress → sleep → medications
-Validation: cannot advance without selecting (Next disabled)
-data-testid="submit-checkin"    on submit button (step 5)
-"Check-in complete"             on successful POST
-"Try again"                     on API 500 error
-```
-
-### Provider components (F32-F38)
-```
-data-testid="patient-name"      on each row in ChaseList
-data-testid="sdoh-{domain}"     e.g. "sdoh-food_access"
-role="progressbar"              on each care gap bar
-data-testid="memory-episode"    on each AgentMemoryLog row
-```
+> **Generate this config automatically**: Use the Replit Dashboard at `/replit_dashboard/index.html`
+> to enter your Replit URLs → it generates the exact JSON to paste into Claude settings.
 
 ---
 
-## Test Suite Reference
+## 9. Implementation Priority Sequence
 
-```
-Total: 90 tests
+### Week 1 — Foundation
+- [ ] Constitutional system prompt live (`core/constitutional.py`)
+- [ ] FastMCP synthetic data server deployed on Replit (Maria Chen data)
+- [ ] Claude 4.6 + adaptive thinking configured with LangSmith tracing
+- [ ] Clinical priority queue running (`core/priority_queue.py`)
 
-Backend — pytest mcp-server/tests/
-  V1-V14  Vital sign generators  14 tests
-  A1-A8   Synthea FHIR adapter    8 tests
-  S1-S18  MCP skill tools + DB   18 tests
-  D1-D12  Schema integrity       12 tests
-  Total:  52 backend tests
+### Week 2 — Feedback Infrastructure
+- [ ] LangSmith feedback capture wired to provider UI (thumbs up/down)
+- [ ] Vector store deployed for MemPrompt corrections
+- [ ] Correction retrieval injected into system prompt on every call
+- [ ] LangSmith annotation queue for clinical reviewer workflow
 
-Frontend — npm test (replit-app/)
-  F1-F8   OBTScoreCard            8 tests
-  F9-F15  VitalsChart             7 tests
-  F16-F24 CheckInFlow             9 tests
-  F25-F31 API routes              7 tests
-  F32-F38 Provider + SDoH         7 tests
-  Total:  38 frontend tests
+### Month 1 — Agent Orchestration
+- [ ] LangGraph multi-agent graph: triage → generate → safety → deliver
+- [ ] Critic-refiner loop with iteration cap (max 3 refinements)
+- [ ] Proactive suggestion engine (separate API call post-response)
+- [ ] FHIR R5 subscription events feeding priority queue
 
-Run backend:   cd mcp-server && pytest tests/ -v --tb=short
-Run frontend:  cd replit-app && npm test -- --coverage
-```
+### Month 2 — Continuous Improvement
+- [ ] Automated system prompt updates from feedback pattern analysis
+- [ ] Trajectory evaluation in LangSmith (agentevals, subset mode)
+- [ ] Multi-turn online evaluation for patient-facing interactions
+- [ ] AI Model Registry + Applied Model Cards (CHAI standard)
 
----
-
-## Daily Pipeline Sequence
-
-```
-STEP 1 — Freshness check (run before agents)
-  For each patient:
-    check_data_freshness(patient_id)
-    If stale: run_ingestion(patient_id, force_refresh=False)
-    Wait for completion before running agent skills.
-
-STEP 2 — Agent skill pipeline
-  For each patient:
-    1. generate_daily_vitals(patient_id, days_back=1)
-    2. generate_daily_checkins(patient_id, days_back=1)
-    3. compute_obt_score(patient_id, score_date=today)
-    4. run_sdoh_assessment(patient_id)
-    5. run_crisis_escalation(patient_id, lookback_days=7)
-    6. run_food_access_nudge(patient_id, current_date=today)
-    7. compute_provider_risk(patient_id)
-
-  Error handling: per-skill try/except
-  Failed skill → log skill_executions status=failed → continue
-
-STEP 3 — Summary
-  Report: patients, records upserted, escalations, stale sources
-```
+### Quarter 2 — Scale + Compliance
+- [ ] ONC HTI-1 FAVES methodology documentation for predictive DSI
+- [ ] Joint Commission / CHAI certification preparation
+- [ ] Optional: DPO fine-tuning on accumulated preference data
+- [ ] Population health panel with 11-patient schedule (full day view)
 
 ---
 
-## Session Plans
+## 10. Key Constraints & Hard Rules
 
-### Pre-session setup (manual, done once)
+| Rule | Detail |
+|---|---|
+| **HealthEx MCP** | Cannot generate synthetic data. Incompatible with Claude Code. Use FastMCP. |
+| **Thinking blocks** | Do NOT use LangGraph SummarizationMiddleware — strips thinking blocks. |
+| **Bedrock routing** | Use direct ChatAnthropic, not Bedrock, for thinking-block tracing. |
+| **Few-shot examples** | Always 3–5 examples. Use XML tags: `<corrections>`, `<example>`, `<clinician_guidance>`. |
+| **Patient-facing AI** | Must route through HCP review OR carry AB 3030 disclaimer. Cannot be diagnostic. |
+| **Token billing** | Thinking tokens billed at output rates. Claude 4.6 Sonnet: 64k output max. |
+| **Priority queue backpressure** | Set `maxsize=1000` on asyncio.PriorityQueue to handle surges. |
+| **Event sourcing** | All state changes stored as immutable events. Never mutate event log. |
+| **PHI in logs** | Never. Use MRN references only. Validate before any logging call. |
+
+---
+
+## 11. Testing & Evaluation
 
 ```bash
-git clone https://github.com/aliomraniH/ambient-patient-companion.git
-cd ambient-patient-companion
+# Run constitutional prompt tests
+pytest tests/test_constitutional.py -v
 
-# Synthea install and patient generation
-mkdir -p ~/synthea && cd ~/synthea
-wget -q https://github.com/synthetichealth/synthea/releases/download/master-branch-latest/synthea-with-dependencies.jar
-java -Xmx1g -jar synthea-with-dependencies.jar \
-  -p 10 -s 42 \
-  --exporter.fhir.export true \
-  --exporter.baseDirectory ~/synthea-output \
-  --exporter.years_of_history 6 \
-  Massachusetts Boston
-# Verify: ls ~/synthea-output/fhir/ | wc -l → 10
+# Run priority queue tests
+pytest tests/test_priority_queue.py -v
 
-# Python deps
-pip install fastmcp asyncpg faker numpy python-dateutil pytest pytest-asyncio
+# Run LangSmith trajectory evaluation
+python tests/eval_trajectory.py \
+  --dataset clinical-triage-v1 \
+  --mode subset \
+  --project ambient-patient-companion
 
-# Replit Secrets (Tools → Secrets in sidebar)
-# DATABASE_URL, DATA_TRACK=synthea, SYNTHEA_OUTPUT_DIR, ANTHROPIC_API_KEY
+# Start synthetic patient MCP server locally
+cd mcp_servers/synthetic_patient
+uvicorn server:app --port 8001
+
+# Start full agent system
+python agents/orchestrator.py
 ```
 
 ---
 
-### Session 1 — Ingestion Service + MCP Server (4-5 hrs)
+## 12. Demo Personas (for prototype testing)
 
-Build order (strict dependency order):
-
-```
-ingestion/adapters/base.py
-ingestion/adapters/synthea.py
-ingestion/adapters/manual_entry.py
-ingestion/conflict_resolver.py
-ingestion/pipeline.py
-ingestion/server.py
-
-mcp-server/db/connection.py
-mcp-server/generators/vitals_timeseries.py
-mcp-server/generators/behavioral_model.py
-mcp-server/generators/sdoh_profile.py
-mcp-server/transforms/fhir_to_schema.py
-mcp-server/skills/__init__.py
-mcp-server/skills/base.py
-mcp-server/skills/generate_patient.py
-mcp-server/skills/generate_vitals.py
-mcp-server/skills/generate_checkins.py
-mcp-server/skills/compute_obt_score.py
-mcp-server/skills/sdoh_assessment.py
-mcp-server/skills/crisis_escalation.py
-mcp-server/skills/ingestion_tools.py
-mcp-server/server.py
-mcp-server/.mcp.json
-```
-
-Verify:
-```bash
-python mcp-server/server.py 2>&1 | grep "Loaded skill"  # 9+ lines
-grep -r "print(" mcp-server/skills/ mcp-server/generators/  # EMPTY
-grep -rn 'f".*SELECT\|f".*INSERT' mcp-server/               # EMPTY
-```
-
-Commit message:
-```
-Session 1: Ingestion service + FastMCP server + 9 skills
-
-- ingestion/: pipeline (6 stages), adapters, conflict resolver
-- mcp-server/: asyncpg, generators, transforms, 9 skills, .mcp.json
-- Verified: 9+ skills loaded, no stdout, no f-string SQL
-```
+| MRN | Name | Age | Key Conditions | Demo Purpose |
+|---|---|---|---|---|
+| 4829341 | Maria Chen | 54F | T2DM, HTN, HLD | Primary canonical patient |
+| 4829342 | James Rivera | 67M | CHF, CKD Stage 3 | High-acuity complexity |
+| 4829343 | Aisha Okonkwo | 41F | Prenatal, anxiety | Care gap & SDoH focus |
+| 4829344 | Robert Kim | 72M | COPD, depression | Polypharmacy + mental health |
+| 4829345 | Sarah Patel | 29F | Hypothyroidism | Low-acuity, preventive care |
 
 ---
 
-### Session 2 — Schema + Seeding (2-3 hrs)
-
-Pre-session manual step:
-```bash
-psql $DATABASE_URL < mcp-server/db/schema.sql
-psql $DATABASE_URL -c "\dt" | wc -l  # must be 21+
-```
-
-Build:
-```
-mcp-server/orchestrator.py
-mcp-server/seed.py
-mcp-server/skills/previsit_brief.py
-mcp-server/skills/food_access_nudge.py
-mcp-server/skills/compute_provider_risk.py
-```
-
-Verify:
-```bash
-python mcp-server/seed.py --patients 2 --months 1  # quick test
-psql $DATABASE_URL -c "SELECT COUNT(*) FROM patients;"           # 2
-psql $DATABASE_URL -c "SELECT COUNT(*) FROM biometric_readings;" # 300+
-
-python mcp-server/seed.py --patients 10 --months 6  # full seed
-psql $DATABASE_URL -c "SELECT COUNT(*) FROM patients;"           # 10
-psql $DATABASE_URL -c "SELECT COUNT(*) FROM biometric_readings;" # >10000
-psql $DATABASE_URL -c "SELECT COUNT(*) FROM source_freshness;"   # 10
-python mcp-server/orchestrator.py --daily  # run twice, same counts
-```
-
-Commit message:
-```
-Session 2: 22-table schema deployed, 10 patients seeded, orchestrator complete
-
-- 22-table schema deployed to Replit Postgres
-- seed.py: 10 patients x 6 months (~18K biometric readings)
-- orchestrator.py: freshness-first daily pipeline
-- 3 new skills: previsit_brief, food_access_nudge, compute_provider_risk
-- source_freshness populated for all 10 patients
-```
-
----
-
-### Session 3 — Replit App UI (3-4 hrs)
-
-Pre-session manual step:
-```bash
-cd replit-app
-npx create-next-app@latest . --typescript --tailwind --app --src-dir=false --yes
-npm install pg recharts
-npx shadcn@latest init --yes
-npx shadcn@latest add card badge tabs progress button input
-npm run dev  # verify no errors
-```
-
-Build order:
-```
-lib/db.ts
-app/api/obt/[id]/route.ts
-app/api/vitals/[id]/route.ts
-app/api/checkin/route.ts
-app/api/patients/route.ts
-app/api/sse/[id]/route.ts
-components/OBTScoreCard.tsx
-components/VitalsChart.tsx
-components/CheckInFlow.tsx
-components/SDoHFlags.tsx
-components/ChaseList.tsx
-components/CareGapTracker.tsx
-components/AgentMemoryLog.tsx
-app/patient/[id]/page.tsx
-app/provider/page.tsx
-app/page.tsx
-```
-
-Session 3 rules:
-```
-Server Components fetch data. "use client" only for interactive elements.
-SSE not WebSockets — Replit WebSocket connections are unreliable.
-All SQL parameterized (no string interpolation).
-Mobile-first Tailwind.
-ALL data-testid attributes from Frontend Requirements section above.
-Run npm run build after every 3-4 files to catch TypeScript errors early.
-```
-
-Verify:
-```bash
-npm run build   # must exit 0
-npm test        # must pass F1-F38 (38 tests)
-psql $DATABASE_URL -c "SELECT id FROM patients LIMIT 1;"
-# Navigate to /patient/[uuid] — verify OBT score renders
-```
-
-Commit message:
-```
-Session 3: Full Replit app — patient companion + provider panel
-
-- lib/db.ts, 5 API routes, 7 components, 3 pages
-- Patient dashboard: 3-tab UX (Today, Vitals, My Health)
-- Provider panel: chase list + care gap tracker
-- npm run build: 0 errors. npm test: 38/38 passing.
-- Deployed to Replit Reserved VM.
-```
-
----
-
-## /compact Strategy
-
-| Session   | Trigger point                                  |
-|-----------|------------------------------------------------|
-| Session 1 | After ingestion/ complete, before mcp-server/skills/ |
-| Session 2 | After orchestrator.py, before seed run         |
-| Session 3 | After API routes, before UI components         |
-
-Always commit before /compact. Git is the safety net.
-After /compact: CLAUDE.md content survives. Conversation details do not.
-
----
-
-## Phase 1 Acceptance Criteria
-
-All 15 must be true:
-
-```
-□  pytest tests/ -v exits 0  — 52 backend tests pass
-□  npm test exits 0, coverage > 80%  — 38 frontend tests pass
-□  SELECT COUNT(*) FROM patients = 10
-□  SELECT COUNT(*) FROM biometric_readings > 10000
-□  SELECT COUNT(DISTINCT patient_id) FROM obt_scores = 10
-□  SELECT COUNT(*) FROM source_freshness = 10
-□  Daily pipeline idempotent (run twice, same row counts)
-□  MCP Inspector shows 9+ tools registered
-□  Replit public URL returns 200
-□  /patient/[uuid] renders OBT score card with correct data-color
-□  Vitals chart shows 30-day data points
-□  Check-in flow completes 5 steps, writes to daily_checkins
-□  Provider panel shows patients sorted by risk_score DESC
-□  grep -r "print(" mcp-server/skills/ → EMPTY
-□  grep -rn 'f".*SELECT' mcp-server/ → EMPTY
-```
-
----
-
-## What Comes After Phase 1
-
-```
-Phase 2 — HealthEx adapter (1 Claude Code session)
-  ingestion/adapters/healthex.py
-  Connect HealthEx MCP to Claude Project
-  DATA_TRACK=healthex
-  Requires Claude.ai session (not Claude Code) for CLEAR OAuth consent
-
-Phase 3 — Device APIs + LangSmith
-  ingestion/adapters/withings.py, apple_health.py, dexcom.py
-  LangSmith tracing around all agent calls
-  Webhook-based continuous device data streams
-
-Phase 4 — Full Orchestrator + LangGraph
-  Multi-user authentication for real patient pilots
-  LangGraph state machine for complex agent routing
-  Clinical validation of OBT scoring algorithm
-```
-
----
-
-## Session Checklists
-
-### Session 1 — Ingestion Service + MCP Server
-```
-Ingestion service:
-- [x] ingestion/adapters/base.py
-- [x] ingestion/adapters/synthea.py
-- [x] ingestion/adapters/manual_entry.py
-- [x] ingestion/adapters/healthex.py (Phase 2 stub)
-- [x] ingestion/conflict_resolver.py
-- [x] ingestion/pipeline.py (8-stage IngestionPipeline)
-- [x] ingestion/server.py
-
-MCP server:
-- [x] mcp-server/db/connection.py (command_timeout=30 added)
-- [x] mcp-server/db/schema.sql (22 tables with data_source column)
-- [x] mcp-server/generators/vitals_timeseries.py (6 generator functions)
-- [x] mcp-server/generators/behavioral_model.py
-- [x] mcp-server/generators/sdoh_profile.py
-- [x] mcp-server/transforms/fhir_to_schema.py
-- [x] mcp-server/skills/__init__.py
-- [x] mcp-server/skills/base.py (data_source param added)
-- [x] mcp-server/skills/generate_patient.py (synthea_file + data_source)
-- [x] mcp-server/skills/generate_vitals.py (data_source + is_abnormal)
-- [x] mcp-server/skills/generate_checkins.py (data_source)
-- [x] mcp-server/skills/compute_obt_score.py (data_source)
-- [x] mcp-server/skills/sdoh_assessment.py (data_source)
-- [x] mcp-server/skills/crisis_escalation.py (data_source + channel)
-- [x] mcp-server/skills/ingestion_tools.py (6 tools: check_data_freshness, run_ingestion, get_source_conflicts, get_data_source_status, ingest_from_healthex, switch_data_track)
-- [x] mcp-server/server.py (transport="stdio")
-- [x] mcp-server/.mcp.json (ANTHROPIC_API_KEY added)
-
-Verified:
-- [x] python server.py 2>&1 | grep "Loaded skill" shows 10 lines
-- [x] grep -r "print(" mcp-server/skills/ → EMPTY
-- [x] grep -rn 'f".*SELECT' mcp-server/ → EMPTY
-
-Design notes for future sessions:
-- FastMCP 3.x does not accept description= kwarg in constructor
-- Skills call get_pool() internally (no Depends injection needed)
-- Orchestrator uses MockMCP pattern to extract tool functions for direct calls
-- mcp-server/adapters/ kept for backward compat; ingestion/adapters/ is canonical
-```
-
-### Session 2 — Schema + Data + Pipeline
-```
-- [ ] Schema deployed: psql $DATABASE_URL < mcp-server/db/schema.sql
-- [ ] 22 tables confirmed: psql -c "\dt" | wc -l
-- [x] mcp-server/orchestrator.py
-- [x] mcp-server/seed.py
-- [x] mcp-server/skills/previsit_brief.py
-- [x] mcp-server/skills/food_access_nudge.py
-- [x] mcp-server/skills/compute_provider_risk.py
-- [ ] Quick seed: 2 patients, 1 month verified
-- [ ] Full seed: 10 patients x 6 months complete
-- [ ] COUNT(*) FROM patients = 10
-- [ ] COUNT(*) FROM biometric_readings > 10000
-- [ ] COUNT(*) FROM source_freshness = 10
-- [ ] Pipeline idempotent (run twice, same counts)
-- [ ] git commit: "Session 2: 22-table schema deployed, 10 patients seeded"
-```
-
-### Session 3 — Replit App UI
-```
-- [x] lib/db.ts
-- [x] app/api/obt/[id]/route.ts
-- [x] app/api/vitals/[id]/route.ts
-- [x] app/api/checkin/route.ts
-- [x] app/api/patients/route.ts
-- [x] app/api/sse/[id]/route.ts
-- [x] components/OBTScoreCard.tsx (data-testid attrs verified)
-- [x] components/VitalsChart.tsx
-- [x] components/CheckInFlow.tsx (5 steps + validation)
-- [x] components/SDoHFlags.tsx
-- [x] components/ChaseList.tsx
-- [x] components/CareGapTracker.tsx
-- [x] components/AgentMemoryLog.tsx
-- [x] components/PatientTabs.tsx (client-side tab switcher)
-- [x] app/patient/[id]/page.tsx (3-tab layout via PatientTabs)
-- [x] app/provider/page.tsx
-- [x] app/page.tsx (patient selector)
-- [x] npm run build exits 0
-- [x] npm test: 37/37 passing
-- [ ] Manual: /patient/[uuid] renders OBT score card
-- [ ] Manual: check-in flow writes to daily_checkins
-- [ ] Deployed to Replit Reserved VM (public URL working)
-
-Notes:
-- Used system fonts instead of Google Fonts (no network access at build)
-- Pages use export const dynamic = "force-dynamic" to skip SSG DB calls
-- PatientTabs.tsx added as client wrapper for 3-tab layout
-- Tests: Jest 30 + ts-jest + @testing-library/react + jsdom
-- API route tests mock query() directly (no Next.js server needed)
-```
-
----
-
-*Last updated: All three sessions complete*
-*Repo: https://github.com/aliomraniH/ambient-patient-companion*
+*Last updated: April 2026 — Ambient Action Model v2.0*
+*Architecture source: "Healthcare AI Architecture: Six Technical Pillars" (2026)*

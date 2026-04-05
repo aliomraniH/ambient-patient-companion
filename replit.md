@@ -24,7 +24,13 @@ ambient-patient-companion/
 │   ├── seed.py          ← Data seeding: python mcp-server/seed.py --patients 10 --months 6
 │   ├── orchestrator.py  ← Daily pipeline sequencer
 │   └── tests/           ← pytest test suite (44 backend tests)
-└── ingestion/           ← Data ingestion service (Synthea FHIR)
+├── replit_dashboard/    ← FastAPI config dashboard (API keys, MCP URLs, Claude config)
+│   ├── server.py        ← FastAPI app (port 8000)
+│   ├── index.html       ← Single-page dashboard UI
+│   └── tests/           ← 30 dashboard tests (anyio-based)
+├── ingestion/           ← Data ingestion service (Synthea FHIR)
+├── CLAUDE.md            ← Full implementation guide for Claude Code agents
+└── requirements.txt     ← Root Python dependencies (pytest-asyncio==0.21.2)
 ```
 
 ## Running the App
@@ -69,6 +75,11 @@ cd mcp-server && pytest tests/ -v
 ### Frontend (Next.js/Jest) — 37 tests
 ```bash
 cd replit-app && npm test
+```
+
+### Config Dashboard (anyio/pytest) — 30 tests
+```bash
+cd replit_dashboard && python -m pytest tests/ -v
 ```
 
 ## Package Manager
