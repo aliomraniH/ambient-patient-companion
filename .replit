@@ -17,6 +17,14 @@ author = "agent"
 task = "workflow.run"
 args = "Start application"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Config Dashboard"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Clinical MCP Server"
+
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
@@ -29,12 +37,52 @@ waitForPort = 5000
 [workflows.workflow.metadata]
 outputType = "webview"
 
+[[workflows.workflow]]
+name = "Config Dashboard"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd replit_dashboard && python server.py"
+waitForPort = 8080
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Clinical MCP Server"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server"
+
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
+
+[[ports]]
+localPort = 8001
+externalPort = 3000
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
 
 [userenv]
 
 [userenv.shared]
 SYNTHEA_OUTPUT_DIR = "/home/runner/synthea-output"
 DATA_TRACK = "synthea"
+
+[deployment]
+deploymentTarget = "vm"
+run = ["bash", "start.sh"]
+build = ["bash", "-c", "pip install -r requirements.txt && pip install -r replit_dashboard/requirements.txt && cd replit-app && npm ci && npm run build"]
