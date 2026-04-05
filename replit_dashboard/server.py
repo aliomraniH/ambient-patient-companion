@@ -5,6 +5,7 @@ Claude Desktop configuration files.
 """
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from dotenv import dotenv_values, set_key
 import httpx
@@ -77,6 +78,13 @@ def completeness(env: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="Ambient Companion Config Dashboard")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 # ---- Serve index.html ----------------------------------------------------
 
