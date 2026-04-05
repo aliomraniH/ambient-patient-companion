@@ -99,7 +99,7 @@ KEY_META = {
         "label":       "MCP · Clinical Intelligence",
         "description": "FastMCP clinical decision support server (Phase 1) — guardrails, guidelines, drug interactions.",
         "secret":      False,
-        "default":     "http://localhost:8000/mcp",
+        "default":     "http://localhost:8001/mcp",
         "help_url":    None,
     },
 
@@ -465,10 +465,64 @@ async def test_mcp(server_id: str):
         return {"ok": False, "server": server_id, "error": str(e)[:200]}
 
 
-# ---- Claude config generation --------------------------------------------
+# ---- URL helpers ----------------------------------------------------------
+
+def _dev_domain() -> str:
+    """The live Replit dev domain (janeway.replit.dev)."""
+    return os.environ.get("REPLIT_DEV_DOMAIN", "")
+
+
+def _prod_domain() -> str:
+    """The deployed production domain (.replit.app), if available.
+
+    After deployment REPLIT_DOMAINS contains the .replit.app domain.
+    Falls back to empty string so callers can detect 'not deployed yet'.
+    """
+    domains = os.environ.get("REPLIT_DOMAINS", "")
+    for d in domains.split(","):
+        d = d.strip()
+        if d.endswith(".replit.app"):
+            return d
+    return ""
+
+
+def _mcp_url(domain: str, port: int = 8001) -> str:
+    return f"https://{domain}:{port}/mcp" if domain else ""
+
+
+def _build_mcp_config(domain: str) -> dict:
+    """Build the mcpServers block for a given domain.
+
+    Uses streamable-http — compatible with Claude web (claude.ai),
+    Claude Desktop, and the Claude Code CLI.
+    Phase 1 clinical intelligence server runs on port 8001.
+    """
+    servers: dict = {}
+    if domain:
+        servers["ambient-clinical-intelligence"] = {
+            "type": "streamable-http",
+            "url": _mcp_url(domain, port=8001),
+        }
+    for sid, env_key in SERVER_MAP.items():
+        if sid == "clinical_intelligence":
+            continue
+        url = _explicitly_set(env_key)
+        if url:
+            servers[MCP_DISPLAY_NAMES[sid]] = {
+                "type": "streamable-http",
+                "url": url,
+            }
+    return {"mcpServers": servers}
+
+
+# ---- Claude config generation ---------------------------------------------
 
 @app.get("/api/generate/claude-config")
 async def generate_claude_config():
+    """Claude Desktop / Claude Code config (npx mcp-remote format).
+
+    Backward-compatible with existing tests and tooling.
+    """
     env = read_env()
     mcp_servers, cli_commands = {}, []
     for sid, env_key in SERVER_MAP.items():
@@ -485,6 +539,32 @@ async def generate_claude_config():
         "servers_configured":   len(mcp_servers),
         "servers_total":        len(SERVER_MAP),
     }
+
+
+@app.get("/api/generate/mcp-config")
+async def generate_mcp_config(env: str = Query("dev")):
+    """Return a downloadable Claude web MCP config JSON.
+
+    ?env=dev  → uses the live REPLIT_DEV_DOMAIN (always available)
+    ?env=prod → uses the deployed .replit.app domain (available after deployment)
+    """
+    domain = _dev_domain() if env != "prod" else _prod_domain()
+    if not domain:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Production domain not found. "
+                "Deploy the app first — the domain will be set automatically."
+            ),
+        )
+
+    config = _build_mcp_config(domain)
+    filename = f"claude_mcp_config_{env}.json"
+    return Response(
+        content=json.dumps(config, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---- .env export ---------------------------------------------------------

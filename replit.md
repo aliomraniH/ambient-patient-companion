@@ -18,7 +18,7 @@ ambient-patient-companion/
 │   ├── app/             ← App Router pages + API routes
 │   ├── components/      ← React UI components
 │   └── lib/db.ts        ← PostgreSQL pool (pg)
-├── server/              ← Phase 1 Clinical Intelligence FastMCP server (port 8000)
+├── server/              ← Phase 1 Clinical Intelligence FastMCP server (port 8001)
 │   ├── mcp_server.py    ← FastMCP server: 5 tools + REST wrappers + guardrails
 │   └── guardrails/      ← input_validator, output_validator, clinical_rules
 ├── mcp-server/          ← FastMCP Python agent server
@@ -51,11 +51,11 @@ ambient-patient-companion/
 |---------|---------|------|
 | Start application | `cd replit-app && npm run dev` | 5000 |
 | Config Dashboard | `cd replit_dashboard && python server.py` | 8080 |
-| Clinical MCP Server | `MCP_TRANSPORT=streamable-http MCP_PORT=8000 python -m server.mcp_server` | 8000 |
+| Clinical MCP Server | `MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server` | 8001 |
 
 ## Phase 1 Clinical Intelligence (server/)
 
-Five tools live at `http://localhost:8000`:
+Five tools live at `http://localhost:8001`:
 
 | Endpoint | Tool | Description |
 |---------|------|-------------|
@@ -66,7 +66,12 @@ Five tools live at `http://localhost:8000`:
 | `POST /tools/flag_drug_interaction` | `flag_drug_interaction` | Known drug interactions |
 | `GET /tools/get_synthetic_patient` | `get_synthetic_patient` | Maria Chen demo patient (MRN 4829341) |
 
-Also accessible via MCP protocol at `http://localhost:8000/mcp` (streamable-http transport).
+Also accessible via MCP protocol at `http://localhost:8001/mcp` (streamable-http transport).
+
+**Claude web MCP config** — download from Config Dashboard (port 8080):
+- Dev (always available): `GET /api/generate/mcp-config?env=dev`
+- Prod (after deployment): `GET /api/generate/mcp-config?env=prod`
+- Full summary (both URLs): `GET /api/generate/claude-config`
 
 Guardrails pipeline:
 1. **Input**: PHI detection, jailbreak blocking, scope check, emotional tone flag
@@ -90,7 +95,7 @@ Guardrails pipeline:
 | `LANGSMITH_API_KEY` | THIRD_PARTY | Replit Secret — optional tracing |
 | `DATABASE_URL` | AUTO | Replit PostgreSQL (auto-set) |
 | `CLAUDE_MODEL` | AUTO | Default: `claude-sonnet-4-5` |
-| `MCP_CLINICAL_INTELLIGENCE_URL` | AUTO | Default: `http://localhost:8000/mcp` |
+| `MCP_CLINICAL_INTELLIGENCE_URL` | AUTO | Default: `http://localhost:8001/mcp` |
 | `SYNTHEA_OUTPUT_DIR` | AUTO | Default: `/home/runner/synthea-output` |
 
 Config dashboard at port 8080 manages all 18 keys in three categories (AUTO / SELF_HOSTED / THIRD_PARTY).
@@ -113,6 +118,11 @@ python mcp-server/scripts/create_minimal_fixtures.py
 python -m pytest tests/phase1/ -v
 ```
 
+### End-to-end MCP use-case suite — 15 tests
+```bash
+python -m pytest tests/e2e/ -v
+```
+
 ### Backend (Python/pytest) — 44 tests
 ```bash
 cd mcp-server && pytest tests/ -v
@@ -128,7 +138,7 @@ cd replit-app && npm test
 cd replit_dashboard && python -m pytest tests/ -v
 ```
 
-**Total: 211 tests, all passing.**
+**Total: 226 tests, all passing.**
 
 ## Package Manager
 
@@ -158,7 +168,7 @@ cd replit_dashboard && python -m pytest tests/ -v
 - **pytest-asyncio**: Pinned to 0.21.2 — 1.x breaks session-scoped event_loop
 - **Replit Secrets**: Take priority over local `.env` in dashboard and connectivity tests
 - **Dashboard tests**: `clean_env` fixture pops ALL_KEYS from os.environ — isolates from Replit Secrets
-- **Port config**: Next.js=5000, Config Dashboard=8080, Clinical MCP Server=8000
+- **Port config**: Next.js=5000, Config Dashboard=8080, Clinical MCP Server=8001
 
 ## Key Bug Fixes Applied
 

@@ -16,7 +16,7 @@
  * @type {string}
  */
 const FASTMCP_BASE_URL = (typeof window !== 'undefined' && window.FASTMCP_BASE_URL)
-  || 'http://localhost:8000';
+  || 'http://localhost:8001';
 
 /**
  * @typedef {Object} ClinicalResponse

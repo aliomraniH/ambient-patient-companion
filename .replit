@@ -53,13 +53,12 @@ outputType = "console"
 name = "Clinical MCP Server"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "MCP_TRANSPORT=streamable-http MCP_PORT=8000 python -m server.mcp_server"
-waitForPort = 8000
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server"
 
 [[ports]]
 localPort = 5000
@@ -70,6 +69,10 @@ localPort = 8000
 externalPort = 8000
 
 [[ports]]
+localPort = 8001
+externalPort = 3000
+
+[[ports]]
 localPort = 8080
 externalPort = 8080
 
@@ -78,3 +81,8 @@ externalPort = 8080
 [userenv.shared]
 SYNTHEA_OUTPUT_DIR = "/home/runner/synthea-output"
 DATA_TRACK = "synthea"
+
+[deployment]
+deploymentTarget = "vm"
+run = ["bash", "start.sh"]
+build = ["bash", "-c", "cd replit-app && npm run build"]
