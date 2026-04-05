@@ -713,10 +713,75 @@ section.active { display: block; }
 
     <!-- ===== SECTION: CLAUDE CONFIG ===== -->
     <section id="section-config">
+      <div class="section-header">
+        <div class="section-title">Claude Config</div>
+        <div class="section-desc">Generate configuration files for Claude Desktop and Claude Code CLI.</div>
+      </div>
+
+      <!-- Card: Claude Desktop Config -->
+      <div class="card">
+        <div class="card-title">Claude Desktop Config</div>
+        <div class="info-box">
+          Paste this JSON into your Claude Desktop settings file:<br>
+          <strong>macOS:</strong> <code>~/Library/Application Support/Claude/claude_desktop_config.json</code><br>
+          <strong>Windows:</strong> <code>%APPDATA%\Claude\claude_desktop_config.json</code>
+        </div>
+        <div class="code-block" id="claude-desktop-json">Click "Regenerate" to generate config...</div>
+        <div class="code-actions">
+          <button class="btn btn-primary" onclick="regenerateConfig()" id="btn-regen">&#8635; Regenerate</button>
+          <button class="btn" onclick="copyText('claude-desktop-json')">&#9112; Copy</button>
+          <button class="btn" onclick="downloadJson()">&#8595; Download</button>
+        </div>
+      </div>
+
+      <!-- Card: Claude Code Commands -->
+      <div class="card">
+        <div class="card-title">Claude Code CLI Commands</div>
+        <div class="info-box">
+          Run these commands in your terminal to register MCP servers with Claude Code using <code>claude mcp add</code>.
+        </div>
+        <div class="code-block" id="claude-code-cmds" style="white-space:pre-wrap;">Click "Regenerate" above to generate commands...</div>
+        <div class="code-actions">
+          <button class="btn" onclick="copyText('claude-code-cmds')">&#9112; Copy</button>
+        </div>
+      </div>
     </section>
 
     <!-- ===== SECTION: STATUS ===== -->
     <section id="section-status">
+      <div class="section-header" style="display:flex;align-items:flex-start;justify-content:space-between;">
+        <div>
+          <div class="section-title">Status</div>
+          <div class="section-desc">System-wide configuration and connectivity overview.</div>
+        </div>
+        <button class="btn" onclick="loadConfig()">&#8634; Refresh</button>
+      </div>
+
+      <!-- Stat strip -->
+      <div class="stat-strip" id="status-stat-strip">
+        <div class="stat-card">
+          <div class="stat-label">Keys Configured</div>
+          <div class="stat-value" id="status-keys-val">0 / 17</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">MCP Servers</div>
+          <div class="stat-value" id="status-mcp-val">0 / 5</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Claude Model</div>
+          <div class="stat-value" id="status-model-val" style="font-size:16px;">not set</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Tracing</div>
+          <div class="stat-value" id="status-tracing-val">OFF</div>
+        </div>
+      </div>
+
+      <!-- Service grid -->
+      <div class="card">
+        <div class="card-title">Service Grid</div>
+        <div class="service-grid" id="service-grid"></div>
+      </div>
     </section>
 
     <!-- ===== SECTION: .ENV EXPORT ===== -->
@@ -1020,7 +1085,87 @@ async function testMcp(serverId, btn) {
     toast('\u2717 ' + serverId.replace(/_/g,' ') + ': ' + r.error, 'err');
   }
 }
-function populateStatus() { /* Part 4 */ }
+/* ── Populate: Status ──────────────────────────────────── */
+function populateStatus() {
+  if (!configData.keys) return;
+  const k = configData.keys;
+  const c = configData.completeness || { set:0, total:17, pct:0 };
+  // Stat strip
+  document.getElementById('status-keys-val').textContent = c.set + ' / ' + c.total;
+  const mcpKeys = MCP_SERVERS.map(s => s.key);
+  const mcpSet = mcpKeys.filter(x => k[x]?.set).length;
+  document.getElementById('status-mcp-val').textContent = mcpSet + ' / ' + mcpKeys.length;
+  const model = k.CLAUDE_MODEL?.set ? k.CLAUDE_MODEL.value : 'not set';
+  document.getElementById('status-model-val').textContent = model;
+  const hasLs = k.LANGSMITH_API_KEY?.set;
+  const tv = document.getElementById('status-tracing-val');
+  tv.textContent = hasLs ? 'ON' : 'OFF';
+  tv.style.color = hasLs ? 'var(--ok)' : 'var(--muted)';
+  // Service grid
+  const services = [
+    { name:'Anthropic API', key:'ANTHROPIC_API_KEY' },
+    { name:'LangSmith', key:'LANGSMITH_API_KEY' },
+    { name:'Vector Store', key:'VECTOR_STORE_URL' },
+    { name:'FHIR Server', key:'FHIR_BASE_URL' },
+    { name:'Database', key:'DATABASE_URL' },
+    ...MCP_SERVERS.map(s => ({ name:s.name, key:s.key })),
+  ];
+  const grid = document.getElementById('service-grid');
+  if (grid) {
+    grid.innerHTML = services.map(s => {
+      const isSet = k[s.key]?.set;
+      const dotClass = isSet ? 'set' : 'empty';
+      const label = isSet ? 'Configured' : 'Not configured';
+      return `<div class="svc-card"><div class="svc-name">${s.name}</div><div class="svc-status"><span class="status-dot ${dotClass}"></span> ${label}</div></div>`;
+    }).join('');
+  }
+}
+
+/* ── Config Generation ─────────────────────────────────── */
+let lastConfig = null;
+
+async function regenerateConfig() {
+  const btn = document.getElementById('btn-regen');
+  btn.innerHTML = '<span class="spinner"></span> Generating...';
+  btn.disabled = true;
+  const r = await api('/api/generate/claude-config');
+  btn.disabled = false;
+  btn.innerHTML = '&#8635; Regenerate';
+  if (!r) return;
+  lastConfig = r;
+  const jsonEl = document.getElementById('claude-desktop-json');
+  const cmdsEl = document.getElementById('claude-code-cmds');
+  jsonEl.textContent = JSON.stringify(r.config, null, 2);
+  if (r.claude_code_commands.length > 0) {
+    cmdsEl.textContent = r.claude_code_commands.join('\n');
+  } else {
+    cmdsEl.textContent = '# No MCP servers configured yet.\n# Add URLs in the MCP Tools section first.';
+  }
+  toast('\u2713 Config generated (' + r.servers_configured + '/' + r.servers_total + ' servers)');
+}
+
+/* ── Copy to Clipboard ─────────────────────────────────── */
+function copyText(elementId) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent).then(() => {
+    toast('\u2713 Copied to clipboard');
+  }).catch(() => {
+    toast('\u2717 Copy failed', 'err');
+  });
+}
+
+/* ── Download JSON ─────────────────────────────────────── */
+function downloadJson() {
+  if (!lastConfig) { toast('\u26a0 Generate config first', 'err'); return; }
+  const blob = new Blob([JSON.stringify(lastConfig.config, null, 2)], { type:'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'claude_desktop_config.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('\u2713 Downloaded claude_desktop_config.json');
+}
 
 /* ── Init ──────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', loadConfig);
