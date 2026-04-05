@@ -1,11 +1,15 @@
 """FastMCP server for clinical decision support — Phase 1.
 
-Provides 5 tools:
-1. clinical_query — Three-layer guardrail pipeline with Claude API
-2. get_guideline — Fetch specific guideline by recommendation ID
-3. check_screening_due — Return overdue USPSTF screenings for a patient
+Provides 9 tools:
+1. clinical_query        — Three-layer guardrail pipeline with Claude API
+2. get_guideline         — Fetch specific guideline by recommendation ID
+3. check_screening_due   — Return overdue USPSTF screenings for a patient
 4. flag_drug_interaction — Return known drug interactions
 5. get_synthetic_patient — Return canonical demo patient (Maria Chen)
+6. use_healthex          — Switch data track to HealthEx real records
+7. use_demo_data         — Switch data track to Synthea demo data
+8. switch_data_track     — Switch data track to a named source
+9. get_data_source_status — Report active data track and available sources
 
 All AI calls route through the guardrail pipeline. HTML prototypes never
 call Claude API directly.
@@ -20,6 +24,7 @@ import sys
 from pathlib import Path
 
 import anthropic
+import asyncpg
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -704,6 +709,115 @@ async def get_synthetic_patient(mrn: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Data-source / HealthEx tools (share a lightweight asyncpg pool)
+# ---------------------------------------------------------------------------
+
+_db_pool: asyncpg.Pool | None = None
+
+async def _get_db_pool() -> asyncpg.Pool:
+    global _db_pool
+    if _db_pool is None:
+        dsn = os.environ.get("DATABASE_URL")
+        if not dsn:
+            raise RuntimeError("DATABASE_URL not set")
+        _db_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+    return _db_pool
+
+
+async def _set_data_track(track: str) -> None:
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO system_config (key, value, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """,
+            "DATA_TRACK",
+            track,
+        )
+
+
+@mcp.tool()
+async def use_healthex() -> str:
+    """Switch the active data track to HealthEx real patient records.
+
+    Persists the selection in system_config so all subsequent ingestion
+    calls pull from the HealthEx adapter instead of synthetic demo data.
+
+    Returns:
+        Confirmation string indicating the active track has been set.
+    """
+    await _set_data_track("healthex")
+    return (
+        "Switched to HealthEx real records. "
+        "All future data pulls will use the HealthEx adapter. "
+        "Call get_data_source_status() to confirm."
+    )
+
+
+@mcp.tool()
+async def use_demo_data() -> str:
+    """Switch the active data track to Synthea synthetic demo data.
+
+    Persists the selection in system_config so all subsequent ingestion
+    calls pull from the Synthea adapter instead of real records.
+
+    Returns:
+        Confirmation string indicating the active track has been set.
+    """
+    await _set_data_track("synthea")
+    return (
+        "Switched to Synthea demo data. "
+        "All future data pulls will use synthetic records — safe for testing. "
+        "Call get_data_source_status() to confirm."
+    )
+
+
+@mcp.tool()
+async def switch_data_track(track: str) -> str:
+    """Switch the active data track to a named source.
+
+    Args:
+        track: One of 'synthea', 'healthex', or 'auto'.
+               'auto' reads the DATA_TRACK environment variable at runtime.
+
+    Returns:
+        'OK: switched to <track>' on success, or an error string.
+    """
+    valid = {"synthea", "healthex", "auto"}
+    if track not in valid:
+        return f"ERROR: unknown track '{track}'. Valid values: {sorted(valid)}"
+    await _set_data_track(track)
+    return f"OK: switched to {track}"
+
+
+@mcp.tool()
+async def get_data_source_status() -> dict:
+    """Report the currently active data track and available sources.
+
+    Returns:
+        Dict with keys: active_track, available_tracks, env_override.
+    """
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT value, updated_at FROM system_config WHERE key = $1",
+            "DATA_TRACK",
+        )
+    db_track = row["value"] if row else None
+    env_track = os.environ.get("DATA_TRACK")
+    active = env_track if env_track else (db_track or "synthea")
+    return {
+        "active_track": active,
+        "db_track": db_track,
+        "env_override": env_track,
+        "available_tracks": ["synthea", "healthex", "auto"],
+        "last_updated": str(row["updated_at"]) if row else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # REST wrapper routes (for HTML prototypes via claude-client.js)
 # ---------------------------------------------------------------------------
 
@@ -752,6 +866,31 @@ async def rest_flag_drug_interaction(request: Request) -> JSONResponse:
 async def rest_get_synthetic_patient(request: Request) -> JSONResponse:
     mrn = request.query_params.get("mrn", "")
     result = await get_synthetic_patient(mrn=mrn)
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/tools/use_healthex", methods=["POST"])
+async def rest_use_healthex(request: Request) -> JSONResponse:
+    result = await use_healthex()
+    return JSONResponse({"message": result})
+
+
+@mcp.custom_route("/tools/use_demo_data", methods=["POST"])
+async def rest_use_demo_data(request: Request) -> JSONResponse:
+    result = await use_demo_data()
+    return JSONResponse({"message": result})
+
+
+@mcp.custom_route("/tools/switch_data_track", methods=["POST"])
+async def rest_switch_data_track(request: Request) -> JSONResponse:
+    body = await request.json()
+    result = await switch_data_track(track=body.get("track", "synthea"))
+    return JSONResponse({"message": result})
+
+
+@mcp.custom_route("/tools/get_data_source_status", methods=["GET"])
+async def rest_get_data_source_status(request: Request) -> JSONResponse:
+    result = await get_data_source_status()
     return JSONResponse(result)
 
 
