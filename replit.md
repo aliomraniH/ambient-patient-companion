@@ -23,10 +23,10 @@ ambient-patient-companion/
 │   └── guardrails/      ← input_validator, output_validator, clinical_rules
 ├── mcp-server/          ← FastMCP Python agent server
 │   ├── db/schema.sql    ← 22-table PostgreSQL schema (source of truth)
-│   ├── skills/          ← 10 MCP agent skill implementations
+│   ├── skills/          ← 12 MCP agent skill implementations
 │   ├── seed.py          ← Data seeding: python mcp-server/seed.py --patients 10 --months 6
 │   ├── orchestrator.py  ← Daily pipeline sequencer
-│   └── tests/           ← pytest test suite (44 backend tests)
+│   └── tests/           ← pytest test suite (49 backend tests)
 ├── docs/                ← Planning documents (mcp_use_cases.md — story line + action plan)
 ├── tests/e2e/           ← End-to-end use-case suite (15 tests, all 15 MCP tools)
 │   ├── data_entry_agent.py  ← PatientDataEntryAgent: seeds 6 months of Maria Chen history
@@ -123,7 +123,7 @@ python -m pytest tests/phase1/ -v
 python -m pytest tests/e2e/ -v
 ```
 
-### Backend (Python/pytest) — 44 tests
+### Backend (Python/pytest) — 49 tests
 ```bash
 cd mcp-server && pytest tests/ -v
 ```
@@ -138,14 +138,14 @@ cd replit-app && npm test
 cd replit_dashboard && python -m pytest tests/ -v
 ```
 
-**Total: 226 tests, all passing.**
+**Total: 231 tests, all passing.**
 
 ## Package Manager
 
 - Frontend: `npm` (package-lock.json in replit-app/)
 - Backend: Python 3.12 (pip / requirements); pytest-asyncio==0.21.2 required
 
-## MCP Skills (10 implemented in mcp-server/)
+## MCP Skills (12 implemented in mcp-server/)
 
 | Skill | Function |
 |-------|----------|
@@ -155,7 +155,7 @@ cd replit_dashboard && python -m pytest tests/ -v
 | `compute_obt_score.py` | Computes Optimal Being Trajectory scores (returns JSON) |
 | `crisis_escalation.py` | Detects crisis indicators (returns JSON with escalation_triggered) |
 | `sdoh_assessment.py` | Social Determinants of Health assessment |
-| `ingestion_tools.py` | Data freshness checks and source status |
+| `ingestion_tools.py` | Data freshness, source status, `use_healthex()`, `use_demo_data()` |
 | `previsit_brief.py` | Pre-visit clinical brief generation |
 | `food_access_nudge.py` | Food access intervention nudges |
 | `compute_provider_risk.py` | Provider-level risk score computation |
