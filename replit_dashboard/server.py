@@ -486,8 +486,9 @@ def _prod_domain() -> str:
     return ""
 
 
-def _mcp_url(domain: str, port: int = 8001) -> str:
-    return f"https://{domain}:{port}/mcp" if domain else ""
+def _mcp_url(domain: str) -> str:
+    """Public MCP URL — served via the Next.js reverse proxy at /mcp (no port required)."""
+    return f"https://{domain}/mcp" if domain else ""
 
 
 def _build_mcp_config(domain: str) -> dict:
@@ -495,13 +496,13 @@ def _build_mcp_config(domain: str) -> dict:
 
     Uses streamable-http — compatible with Claude web (claude.ai),
     Claude Desktop, and the Claude Code CLI.
-    Phase 1 clinical intelligence server runs on port 8001.
+    The MCP server is proxied through Next.js at /mcp (standard HTTPS, no port).
     """
     servers: dict = {}
     if domain:
         servers["ambient-clinical-intelligence"] = {
             "type": "streamable-http",
-            "url": _mcp_url(domain, port=8001),
+            "url": _mcp_url(domain),
         }
     for sid, env_key in SERVER_MAP.items():
         if sid == "clinical_intelligence":
