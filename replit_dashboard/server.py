@@ -94,6 +94,14 @@ KEY_META = {
         "default":     "http://localhost:9005/mcp",
         "help_url":    None,
     },
+    "MCP_CLINICAL_INTELLIGENCE_URL": {
+        "category":    "AUTO",
+        "label":       "MCP · Clinical Intelligence",
+        "description": "FastMCP clinical decision support server (Phase 1) — guardrails, guidelines, drug interactions.",
+        "secret":      False,
+        "default":     "http://localhost:8000/mcp",
+        "help_url":    None,
+    },
 
     # ── Self-hosted ────────────────────────────────────────────────────────
     "VECTOR_STORE_URL": {
@@ -196,19 +204,21 @@ ALL_KEYS = list(KEY_META.keys())
 SECRET_KEYS = {k for k, m in KEY_META.items() if m["secret"]}
 
 SERVER_MAP = {
-    "synthetic_patient":  "MCP_SYNTHETIC_PATIENT_URL",
-    "ehr_integration":    "MCP_EHR_INTEGRATION_URL",
-    "care_gap_analyzer":  "MCP_CARE_GAP_ANALYZER_URL",
-    "lab_processor":      "MCP_LAB_PROCESSOR_URL",
-    "langsmith_feedback": "MCP_LANGSMITH_FEEDBACK_URL",
+    "synthetic_patient":      "MCP_SYNTHETIC_PATIENT_URL",
+    "ehr_integration":        "MCP_EHR_INTEGRATION_URL",
+    "care_gap_analyzer":      "MCP_CARE_GAP_ANALYZER_URL",
+    "lab_processor":          "MCP_LAB_PROCESSOR_URL",
+    "langsmith_feedback":     "MCP_LANGSMITH_FEEDBACK_URL",
+    "clinical_intelligence":  "MCP_CLINICAL_INTELLIGENCE_URL",
 }
 
 MCP_DISPLAY_NAMES = {
-    "synthetic_patient":  "synthetic-patient",
-    "ehr_integration":    "ehr-integration",
-    "care_gap_analyzer":  "care-gap-analyzer",
-    "lab_processor":      "lab-processor",
-    "langsmith_feedback": "langsmith-feedback",
+    "synthetic_patient":      "synthetic-patient",
+    "ehr_integration":        "ehr-integration",
+    "care_gap_analyzer":      "care-gap-analyzer",
+    "lab_processor":          "lab-processor",
+    "langsmith_feedback":     "langsmith-feedback",
+    "clinical_intelligence":  "clinical-intelligence",
 }
 
 # ---------------------------------------------------------------------------
@@ -216,11 +226,10 @@ MCP_DISPLAY_NAMES = {
 # ---------------------------------------------------------------------------
 
 def read_env() -> dict[str, str]:
-    """Merge: os.environ (Replit Secrets) wins over local .env."""
+    """Merge: os.environ (Replit Secrets) wins over local .env, then defaults."""
     local = dotenv_values(ENV_FILE)
     merged = {}
     for k in ALL_KEYS:
-        # Replit Secret takes priority
         if os.environ.get(k):
             merged[k] = os.environ[k]
         elif local.get(k):
@@ -228,6 +237,12 @@ def read_env() -> dict[str, str]:
         else:
             merged[k] = KEY_META[k]["default"]
     return merged
+
+
+def _explicitly_set(key: str) -> str:
+    """Return the value if set via Replit Secret or local .env; else empty string."""
+    local = dotenv_values(ENV_FILE)
+    return os.environ.get(key) or local.get(key, "")
 
 
 def value_source(key: str, env: dict) -> str:
@@ -248,9 +263,10 @@ def mask(key: str, value: str) -> str:
     return value
 
 
-def completeness(env: dict) -> dict:
+def completeness() -> dict:
+    """Count only keys explicitly set by the user (Replit Secret or local .env)."""
     required = [k for k in ALL_KEYS if not KEY_META[k].get("optional")]
-    set_count = sum(1 for k in required if env.get(k))
+    set_count = sum(1 for k in required if _explicitly_set(k))
     total = len(required)
     return {
         "set": set_count,
@@ -287,13 +303,13 @@ async def get_config():
     env = read_env()
     keys = {}
     for k in ALL_KEYS:
-        val = env.get(k, "")
         meta = KEY_META[k]
         source = value_source(k, env)
+        xval = _explicitly_set(k)
         keys[k] = {
-            "value":       mask(k, val),
-            "raw_value":   val if not meta["secret"] else "",
-            "set":         bool(val),
+            "value":       mask(k, xval),
+            "raw_value":   xval if not meta["secret"] else "",
+            "set":         bool(xval),
             "source":      source,
             "category":    meta["category"],
             "label":       meta["label"],
@@ -310,7 +326,7 @@ async def get_config():
             "free_tier":   meta.get("free_tier", False),
             "help_url":    meta.get("help_url", ""),
         }
-    return {"keys": keys, "completeness": completeness(env)}
+    return {"keys": keys, "completeness": completeness()}
 
 
 @app.get("/api/reveal/{key}")
@@ -320,7 +336,7 @@ async def reveal_key(key: str):
     env = read_env()
     return {
         "key":    key,
-        "value":  env.get(key, ""),
+        "value":  _explicitly_set(key) if key not in SECRET_KEYS else env.get(key, ""),
         "source": value_source(key, env),
     }
 
@@ -341,7 +357,7 @@ async def save_config(body: dict):
     env = read_env()
     return {
         "saved":        saved,
-        "completeness": completeness(env),
+        "completeness": completeness(),
         "note":         "Saved to local .env. For secrets, also add them to Replit Secrets (Settings → Secrets) so they persist across restarts.",
     }
 
@@ -365,7 +381,7 @@ async def apply_defaults():
 @app.post("/api/test/anthropic")
 async def test_anthropic():
     env = read_env()
-    api_key = env.get("ANTHROPIC_API_KEY")
+    api_key = _explicitly_set("ANTHROPIC_API_KEY")
     if not api_key:
         return {"ok": False, "error": "No ANTHROPIC_API_KEY set — add it above"}
     model = env.get("CLAUDE_MODEL", "claude-sonnet-4-5")
@@ -394,9 +410,9 @@ async def test_anthropic():
 @app.post("/api/test/langsmith")
 async def test_langsmith():
     env = read_env()
-    api_key = env.get("LANGSMITH_API_KEY")
+    api_key = _explicitly_set("LANGSMITH_API_KEY")
     if not api_key:
-        return {"ok": False, "error": "No LANGSMITH_API_KEY — optional, skip if not using tracing"}
+        return {"ok": False, "error": "No LANGSMITH_API_KEY set — optional, skip if not using tracing"}
     try:
         async with httpx.AsyncClient() as client:
             t0 = time.monotonic()
@@ -433,7 +449,7 @@ async def test_mcp(server_id: str):
     if server_id not in SERVER_MAP:
         raise HTTPException(404, f"Unknown server: {server_id}")
     env = read_env()
-    url = env.get(SERVER_MAP[server_id], "")
+    url = _explicitly_set(SERVER_MAP[server_id])
     if not url:
         return {"ok": False, "server": server_id, "error": "No URL configured"}
     base = url.rstrip("/").removesuffix("/mcp")
@@ -456,7 +472,7 @@ async def generate_claude_config():
     env = read_env()
     mcp_servers, cli_commands = {}, []
     for sid, env_key in SERVER_MAP.items():
-        url = env.get(env_key, "")
+        url = _explicitly_set(env_key)
         if url:
             display = MCP_DISPLAY_NAMES[sid]
             mcp_servers[display] = {"command": "npx", "args": ["mcp-remote", url]}

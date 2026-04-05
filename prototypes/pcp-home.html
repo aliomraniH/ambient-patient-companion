@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PCP Home — Pre-Session Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; color: #1a1a2e; }
+    .header { background: #1a1a2e; color: #fff; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }
+    .header h1 { font-size: 1.25rem; font-weight: 600; }
+    .header .provider { font-size: 0.875rem; opacity: 0.8; }
+    .container { max-width: 1200px; margin: 2rem auto; padding: 0 2rem; }
+    .card { background: #fff; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: #4a4a6a; }
+    .schedule-item { display: flex; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #eee; }
+    .schedule-item:last-child { border-bottom: none; }
+    .time { font-size: 0.875rem; font-weight: 600; width: 80px; color: #6c63ff; }
+    .patient-name { font-weight: 600; }
+    .patient-detail { font-size: 0.8125rem; color: #666; margin-top: 0.25rem; }
+    .obt-badge { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; margin-left: 0.5rem; }
+    .obt-high { background: #fee2e2; color: #dc2626; }
+    .obt-medium { background: #fef3c7; color: #d97706; }
+    .obt-low { background: #d1fae5; color: #059669; }
+    .one-big-thing { background: linear-gradient(135deg, #6c63ff 0%, #4a4a6a 100%); color: #fff; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
+    .one-big-thing h2 { color: #fff; font-size: 1.125rem; margin-bottom: 0.5rem; }
+    .one-big-thing p { opacity: 0.9; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Ambient Patient Companion</h1>
+    <div class="provider">Dr. Rahul Patel — Patel Family Medicine</div>
+  </div>
+
+  <div class="container">
+    <div class="one-big-thing">
+      <h2>One Big Thing</h2>
+      <p>Maria Chen (9:00 AM) — HbA1c trending up to 7.8%. Consider SGLT2 inhibitor addition given eGFR 62 and albuminuria. ADA 2026 Grade A recommendation.</p>
+    </div>
+
+    <div class="card">
+      <h2>Today's Schedule — April 5, 2026</h2>
+      <div class="schedule-item">
+        <div class="time">9:00 AM</div>
+        <div>
+          <div class="patient-name">Maria Chen <span class="obt-badge obt-medium">Risk: Mod</span></div>
+          <div class="patient-detail">54F — T2DM, HTN, Hyperlipidemia | HbA1c 7.8% | 3 care gaps open</div>
+        </div>
+      </div>
+      <div class="schedule-item">
+        <div class="time">9:30 AM</div>
+        <div>
+          <div class="patient-name">James Wilson <span class="obt-badge obt-low">Risk: Low</span></div>
+          <div class="patient-detail">67M — Annual wellness visit | Labs current</div>
+        </div>
+      </div>
+      <div class="schedule-item">
+        <div class="time">10:00 AM</div>
+        <div>
+          <div class="patient-name">Sarah Johnson <span class="obt-badge obt-high">Risk: High</span></div>
+          <div class="patient-detail">48F — Uncontrolled HTN, missed last 2 appointments | BP 168/98</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Panel Alerts</h2>
+      <p style="color: #666; font-size: 0.875rem;">3 patients overdue for colorectal screening • 2 patients with A1c &gt; 9% • 1 critical lab pending review</p>
+    </div>
+  </div>
+
+  <script src="../shared/claude-client.js"></script>
+  <script>console.log('Ambient clinical layer ready — Phase 1');</script>
+</body>
+</html>

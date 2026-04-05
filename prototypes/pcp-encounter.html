@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PCP Encounter — In-Session Workspace</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; color: #1a1a2e; }
+    .header { background: #1a1a2e; color: #fff; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }
+    .header h1 { font-size: 1.25rem; font-weight: 600; }
+    .patient-banner { background: #e8e7ff; padding: 0.75rem 2rem; display: flex; justify-content: space-between; align-items: center; font-size: 0.875rem; }
+    .patient-banner strong { color: #4a4a6a; }
+    .workspace { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; max-width: 1400px; margin: 1.5rem auto; padding: 0 2rem; }
+    .panel { background: #fff; border-radius: 12px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .panel h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: #4a4a6a; border-bottom: 2px solid #6c63ff; padding-bottom: 0.5rem; }
+    .recommendation { background: #f0f0ff; border-left: 4px solid #6c63ff; padding: 1rem; margin-bottom: 1rem; border-radius: 0 8px 8px 0; }
+    .recommendation .grade { display: inline-block; background: #6c63ff; color: #fff; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; margin-right: 0.5rem; }
+    .recommendation .source { font-size: 0.75rem; color: #888; }
+    .recommendation p { margin-top: 0.5rem; font-size: 0.875rem; line-height: 1.5; }
+    .vitals-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; }
+    .vital-item { text-align: center; padding: 0.75rem; background: #f9f9fb; border-radius: 8px; }
+    .vital-item .value { font-size: 1.25rem; font-weight: 700; color: #1a1a2e; }
+    .vital-item .label { font-size: 0.75rem; color: #888; margin-top: 0.25rem; }
+    .vital-item.alert .value { color: #dc2626; }
+    .action-list { list-style: none; }
+    .action-list li { padding: 0.5rem 0; border-bottom: 1px solid #f0f0f0; font-size: 0.875rem; }
+    .action-list li::before { content: '→'; color: #6c63ff; margin-right: 0.5rem; font-weight: 700; }
+    .caveat { font-size: 0.8125rem; color: #888; font-style: italic; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Encounter Workspace</h1>
+    <span style="color: #aaa; font-size: 0.875rem;">Dr. Rahul Patel — Patel Family Medicine</span>
+  </div>
+
+  <div class="patient-banner">
+    <span><strong>Maria Chen</strong> — 54F — MRN 4829341 — T2DM, HTN, Hyperlipidemia, Obesity</span>
+    <span>Encounter: April 5, 2026 • 9:00 AM</span>
+  </div>
+
+  <div class="workspace">
+    <div class="panel">
+      <h2>Clinical Decision Support</h2>
+      <div class="recommendation">
+        <span class="grade">Grade A</span>
+        <span class="source">ADA 2026, Section 9.4</span>
+        <p>Given eGFR 62 and UACR 45 mg/g, consider adding an SGLT2 inhibitor (empagliflozin or dapagliflozin) to reduce CKD progression and cardiovascular events. Verify dosing with pharmacist.</p>
+      </div>
+      <div class="recommendation">
+        <span class="grade">Grade A</span>
+        <span class="source">ADA 2026, Section 11.2b</span>
+        <p>With albuminuria (UACR 45), current lisinopril is appropriate. Ensure maximally tolerated dose of ACE inhibitor before considering additional agents.</p>
+      </div>
+      <div class="recommendation">
+        <span class="grade">Grade B</span>
+        <span class="source">ADA 2026, Section 10.2b</span>
+        <p>BP 142/88 exceeds target &lt;130/80 for diabetes with hypertension. Consider uptitrating lisinopril or adding amlodipine. Verify dosing with pharmacist.</p>
+      </div>
+
+      <h2 style="margin-top: 1.5rem;">Action Items</h2>
+      <ul class="action-list">
+        <li>Add SGLT2 inhibitor — discuss empagliflozin vs dapagliflozin</li>
+        <li>Uptitrate BP management — target &lt;130/80</li>
+        <li>Order colonoscopy referral — overdue since 2015</li>
+      </ul>
+      <p class="caveat">Verify dosing with pharmacist. Clinician judgment required for final treatment decisions.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Current Vitals</h2>
+      <div class="vitals-grid">
+        <div class="vital-item alert">
+          <div class="value">142/88</div>
+          <div class="label">BP (mmHg)</div>
+        </div>
+        <div class="vital-item">
+          <div class="value">78</div>
+          <div class="label">HR (bpm)</div>
+        </div>
+        <div class="vital-item alert">
+          <div class="value">33.2</div>
+          <div class="label">BMI</div>
+        </div>
+        <div class="vital-item alert">
+          <div class="value">7.8%</div>
+          <div class="label">HbA1c</div>
+        </div>
+        <div class="vital-item alert">
+          <div class="value">62</div>
+          <div class="label">eGFR</div>
+        </div>
+        <div class="vital-item alert">
+          <div class="value">128</div>
+          <div class="label">LDL (mg/dL)</div>
+        </div>
+      </div>
+
+      <h2 style="margin-top: 1.5rem;">Active Medications</h2>
+      <ul class="action-list">
+        <li>Metformin 1000 mg — twice daily</li>
+        <li>Lisinopril 20 mg — once daily</li>
+        <li>Atorvastatin 40 mg — once daily at bedtime</li>
+      </ul>
+
+      <h2 style="margin-top: 1.5rem;">Care Gaps</h2>
+      <ul class="action-list">
+        <li>Colorectal cancer screening overdue (USPSTF Grade A)</li>
+        <li>Depression screening (PHQ-9) not completed in 12 months</li>
+        <li>Diabetic retinopathy exam overdue</li>
+        <li>Diabetic foot exam — podiatry referral needed</li>
+      </ul>
+    </div>
+  </div>
+
+  <script src="../shared/claude-client.js"></script>
+  <script>console.log('Ambient clinical layer ready — Phase 1');</script>
+</body>
+</html>

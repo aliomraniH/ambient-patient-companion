@@ -21,6 +21,10 @@ args = "Start application"
 task = "workflow.run"
 args = "Config Dashboard"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Clinical MCP Server"
+
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
@@ -45,9 +49,25 @@ waitForPort = 8080
 [workflows.workflow.metadata]
 outputType = "console"
 
+[[workflows.workflow]]
+name = "Clinical MCP Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "MCP_TRANSPORT=streamable-http MCP_PORT=8000 python -m server.mcp_server"
+waitForPort = 8000
+
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
 
 [[ports]]
 localPort = 8080
