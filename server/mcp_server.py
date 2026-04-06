@@ -1426,9 +1426,9 @@ async def ingest_from_healthex(
                     "status": "ok",
                     "patient_id": patient_id,
                     "resource_type": resource_type,
-                    "records_written": {},
+                    "records_written": 0,
                     "total_written": 0,
-                    "note": "raw text payload cached in raw_fhir_cache; normalization skipped",
+                    "note": "raw text cached, normalization skipped",
                 }, indent=2)
 
             if resource_type == "summary":
