@@ -1030,6 +1030,241 @@ async def register_healthex_patient(
         return f"Error: {e}"
 
 
+# ---------------------------------------------------------------------------
+# HealthEx ingestion helpers
+# ---------------------------------------------------------------------------
+
+def _explode_fhir_bundle(data: Any) -> list[dict]:
+    """Convert any HealthEx payload shape into a flat list of dicts.
+
+    Handles:
+      - FHIR Bundle  → extract entry[*].resource
+      - list          → use as-is
+      - single dict   → wrap in list
+    """
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        if data.get("resourceType") == "Bundle":
+            return [
+                e["resource"]
+                for e in data.get("entry", [])
+                if isinstance(e.get("resource"), dict)
+            ]
+        return [data]
+    return []
+
+
+def _healthex_native_to_fhir_conditions(items: list[dict]) -> list[dict]:
+    """HealthEx native condition → FHIR Condition resource."""
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        code    = item.get("icd10") or item.get("code") or ""
+        display = (item.get("name") or item.get("display")
+                   or item.get("description") or "")
+        status  = item.get("status") or "active"
+        onset   = (item.get("onset_date") or item.get("onsetDate")
+                   or item.get("diagnosed_date") or "")
+        out.append({
+            "resourceType": "Condition",
+            "code": {"coding": [{"code": code, "display": display,
+                                  "system": "http://snomed.info/sct"}]},
+            "clinicalStatus": {"coding": [{"code": status}]},
+            "onsetDateTime": onset,
+        })
+    return out
+
+
+def _healthex_native_to_fhir_medications(items: list[dict]) -> list[dict]:
+    """HealthEx native medication → FHIR MedicationRequest resource."""
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        code    = item.get("rxnorm") or item.get("code") or ""
+        display = (item.get("name") or item.get("display")
+                   or item.get("drug_name") or "")
+        status  = item.get("status") or "active"
+        authored = (item.get("start_date") or item.get("authoredOn")
+                    or item.get("prescribed_date") or "")
+        out.append({
+            "resourceType": "MedicationRequest",
+            "medicationCodeableConcept": {
+                "coding": [{"code": code, "display": display}]
+            },
+            "status": status,
+            "authoredOn": authored,
+        })
+    return out
+
+
+def _healthex_native_to_fhir_observations(items: list[dict]) -> list[dict]:
+    """HealthEx native lab result → FHIR Observation resource."""
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        code    = item.get("loinc") or item.get("code") or ""
+        display = (item.get("name") or item.get("display")
+                   or item.get("test_name") or "")
+        unit    = item.get("unit") or item.get("units") or ""
+        date    = (item.get("date") or item.get("effectiveDateTime")
+                   or item.get("collected_date") or item.get("resulted_date") or "")
+        raw_val = item.get("value") or item.get("result") or item.get("numeric_value")
+        if raw_val is None:
+            continue
+        try:
+            numeric = float(str(raw_val).split()[0])
+        except (ValueError, TypeError):
+            continue
+        out.append({
+            "resourceType": "Observation",
+            "code": {"coding": [{"code": code, "display": display}]},
+            "valueQuantity": {"value": numeric, "unit": unit},
+            "effectiveDateTime": date,
+        })
+    return out
+
+
+def _healthex_native_to_fhir_encounters(items: list[dict]) -> list[dict]:
+    """HealthEx native encounter → FHIR Encounter resource."""
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        enc_type = (item.get("type") or item.get("encounter_type")
+                    or item.get("visit_type") or "encounter")
+        date = (item.get("date") or item.get("start_date")
+                or item.get("encounter_date") or item.get("visit_date") or "")
+        out.append({
+            "resourceType": "Encounter",
+            "type": [{"coding": [{"display": enc_type}]}],
+            "period": {"start": date},
+        })
+    return out
+
+
+def _is_fhir_resource_type(res: dict, fhir_type: str) -> bool:
+    return res.get("resourceType", "") == fhir_type
+
+
+def _normalize_to_fhir(resource_type: str, raw_resources: list[dict]) -> list[dict]:
+    """Ensure every item in raw_resources is a proper FHIR resource dict.
+
+    If the items already carry the expected FHIR resourceType they're used
+    as-is.  If they look like HealthEx native objects (no resourceType),
+    they're converted via the _healthex_native_to_fhir_* helpers.
+    """
+    if not raw_resources:
+        return []
+
+    fhir_type_map = {
+        "conditions":  "Condition",
+        "medications": "MedicationRequest",
+        "labs":        "Observation",
+        "encounters":  "Encounter",
+    }
+    expected_fhir = fhir_type_map.get(resource_type, "")
+
+    # Check if these already look like correct FHIR resources
+    sample = raw_resources[0]
+    if expected_fhir and _is_fhir_resource_type(sample, expected_fhir):
+        return raw_resources  # Already FHIR — pass through
+
+    # Convert from HealthEx native format
+    converters = {
+        "conditions":  _healthex_native_to_fhir_conditions,
+        "medications": _healthex_native_to_fhir_medications,
+        "labs":        _healthex_native_to_fhir_observations,
+        "encounters":  _healthex_native_to_fhir_encounters,
+    }
+    fn = converters.get(resource_type)
+    return fn(raw_resources) if fn else raw_resources
+
+
+async def _write_condition_rows(conn, records: list[dict]) -> int:
+    n = 0
+    for rec in records:
+        await conn.execute(
+            """INSERT INTO patient_conditions
+                   (id, patient_id, code, display, onset_date,
+                    clinical_status, data_source)
+               VALUES ($1,$2,$3,$4,$5,$6,$7)
+               ON CONFLICT DO NOTHING""",
+            rec.get("id", str(_uuid_mod.uuid4())),
+            rec["patient_id"], rec.get("code", ""),
+            rec.get("display", ""), rec.get("onset_date"),
+            rec.get("clinical_status", "active"), "healthex",
+        )
+        n += 1
+    return n
+
+
+async def _write_medication_rows(conn, records: list[dict]) -> int:
+    n = 0
+    for rec in records:
+        await conn.execute(
+            """INSERT INTO patient_medications
+                   (id, patient_id, code, display, status,
+                    authored_on, data_source)
+               VALUES ($1,$2,$3,$4,$5,$6,$7)
+               ON CONFLICT DO NOTHING""",
+            rec.get("id", str(_uuid_mod.uuid4())),
+            rec["patient_id"], rec.get("code", ""),
+            rec.get("display", ""), rec.get("status", "active"),
+            rec.get("authored_on") or _dt.utcnow(), "healthex",
+        )
+        n += 1
+    return n
+
+
+async def _write_lab_rows(conn, records: list[dict]) -> int:
+    n = 0
+    for rec in records:
+        await conn.execute(
+            """INSERT INTO biometric_readings
+                   (id, patient_id, metric_type, value, unit,
+                    measured_at, data_source)
+               VALUES ($1,$2,$3,$4,$5,$6,$7)
+               ON CONFLICT DO NOTHING""",
+            rec.get("id", str(_uuid_mod.uuid4())),
+            rec["patient_id"], rec.get("metric_type", ""),
+            rec.get("value"), rec.get("unit", ""),
+            rec.get("measured_at") or _dt.utcnow(), "healthex",
+        )
+        n += 1
+    return n
+
+
+async def _write_encounter_rows(conn, records: list[dict]) -> int:
+    n = 0
+    for rec in records:
+        await conn.execute(
+            """INSERT INTO clinical_events
+                   (id, patient_id, event_type, event_date,
+                    description, data_source)
+               VALUES ($1,$2,$3,$4,$5,$6)
+               ON CONFLICT DO NOTHING""",
+            rec.get("id", str(_uuid_mod.uuid4())),
+            rec["patient_id"],
+            rec.get("event_type", "encounter"),
+            rec.get("event_date") or _dt.utcnow(),
+            rec.get("description", ""), "healthex",
+        )
+        n += 1
+    return n
+
+
+_WRITER_MAP = {
+    "conditions":  _write_condition_rows,
+    "medications": _write_medication_rows,
+    "labs":        _write_lab_rows,
+    "encounters":  _write_encounter_rows,
+}
+
+
 @mcp.tool()
 async def ingest_from_healthex(
     patient_id: str,
@@ -1038,19 +1273,22 @@ async def ingest_from_healthex(
 ) -> str:
     """Accept a HealthEx MCP tool response and write it to the warehouse.
 
-    Claude calls the HealthEx tools (Get Lab Results, Get Medications,
-    Get Conditions, Get Encounters, General Health Summary) in the
-    session where HealthEx is authenticated, then passes each response
-    here. This tool runs pipeline stages 4-8 only — raw cache,
-    normalize, conflict resolve, warehouse write, freshness update.
+    Handles three input shapes automatically:
+      - FHIR Bundle (resourceType=Bundle, entry=[...]) → explodes entries
+      - List of FHIR resources → used directly
+      - HealthEx native JSON (flat dict or list with non-FHIR fields) → converted
+
+    For resource_type="summary", all embedded clinical arrays
+    (conditions, medications, labs, encounters) are written to their
+    respective tables in a single call.
 
     Args:
-        patient_id:    UUID of the patient in the database (from register_healthex_patient)
+        patient_id:    UUID from register_healthex_patient
         resource_type: "labs" | "medications" | "conditions" | "encounters" | "summary"
         fhir_json:     raw JSON string from the HealthEx tool response
 
     Returns:
-        JSON string with records_written, resource_type, duration_ms.
+        JSON string with records_written per table, resource_type, duration_ms.
     """
     import time as _time
     pool = await _get_db_pool()
@@ -1058,127 +1296,107 @@ async def ingest_from_healthex(
         start = _time.time()
         valid_types = {"labs", "medications", "conditions", "encounters", "summary"}
         if resource_type not in valid_types:
-            return (
-                f"Error: resource_type must be one of {sorted(valid_types)}. "
-                f"Got: '{resource_type}'"
-            )
+            return json.dumps({
+                "status": "error",
+                "error": f"resource_type must be one of {sorted(valid_types)}, got '{resource_type}'"
+            })
 
         fhir_data = json.loads(fhir_json)
-        resources = fhir_data if isinstance(fhir_data, list) else [fhir_data]
 
-        # Stage 4: cache raw FHIR before any transformation
-        async with pool.acquire() as conn:
-            for resource in resources:
-                fhir_id = resource.get("id", str(_uuid_mod.uuid4()))
-                await conn.execute(
-                    """
-                    INSERT INTO raw_fhir_cache
-                        (patient_id, source_name, resource_type, raw_json,
-                         fhir_resource_id, retrieved_at, processed)
-                    VALUES ($1,$2,$3,$4,$5,NOW(),false)
-                    ON CONFLICT (patient_id, source_name, fhir_resource_id)
-                    DO UPDATE SET raw_json=EXCLUDED.raw_json, retrieved_at=NOW(),
-                                  processed=false
-                    """,
-                    patient_id, "healthex", resource_type,
-                    json.dumps(resource), fhir_id,
-                )
-
-        # Stage 5: normalize
-        from transforms.fhir_to_schema import transform_by_type  # type: ignore
-        records = transform_by_type(
-            resource_type, resources, patient_id, source="healthex"
+        # ── Load FHIR transforms ───────────────────────────────────────────────
+        from transforms.fhir_to_schema import (          # type: ignore
+            transform_conditions,
+            transform_medications,
+            transform_clinical_observations,
+            transform_encounters,
         )
 
-        # Stage 6: conflict resolution
-        _ingestion_path = Path(__file__).resolve().parent.parent / "ingestion"
-        if str(_ingestion_path.parent) not in sys.path:
-            sys.path.insert(0, str(_ingestion_path.parent))
-        from ingestion.conflict_resolver import ConflictResolver  # type: ignore
-        resolver = ConflictResolver(policy="patient_first")
-        resolved = resolver.resolve(records)
+        written_by_table: dict[str, int] = {}
 
-        # Stage 7: warehouse write
-        records_written = 0
         async with pool.acquire() as conn:
-            for rec in resolved:
-                rec.pop("_table", None)
-                rec.pop("_conflict_key", None)
 
-                if resource_type == "labs":
-                    await conn.execute(
-                        """
-                        INSERT INTO biometric_readings
-                            (id, patient_id, metric_type, value, unit,
-                             measured_at, data_source)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        rec.get("id", str(_uuid_mod.uuid4())),
-                        rec["patient_id"], rec.get("metric_type", ""),
-                        rec.get("value"), rec.get("unit", ""),
-                        rec.get("measured_at") or _dt.utcnow(), "healthex",
-                    )
-                    records_written += 1
+            if resource_type == "summary":
+                # ── Fan-out: extract every clinical array from the summary ──
+                # Supports both HealthEx native summary and FHIR Patient bundles.
+                summary = fhir_data if isinstance(fhir_data, dict) else {}
 
-                elif resource_type == "medications":
-                    await conn.execute(
-                        """
-                        INSERT INTO patient_medications
-                            (id, patient_id, code, display, status,
-                             authored_on, data_source)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        rec.get("id", str(_uuid_mod.uuid4())),
-                        rec["patient_id"], rec.get("code", ""),
-                        rec.get("display", ""), rec.get("status", "active"),
-                        rec.get("authored_on") or _dt.utcnow(), "healthex",
-                    )
-                    records_written += 1
+                # Possible key names HealthEx uses for each clinical domain
+                cond_items  = (summary.get("conditions") or
+                               summary.get("Conditions") or [])
+                med_items   = (summary.get("medications") or
+                               summary.get("Medications") or [])
+                lab_items   = (summary.get("labs") or summary.get("labResults") or
+                               summary.get("observations") or
+                               summary.get("Labs") or [])
+                enc_items   = (summary.get("encounters") or
+                               summary.get("Encounters") or [])
 
-                elif resource_type == "conditions":
-                    await conn.execute(
-                        """
-                        INSERT INTO patient_conditions
-                            (id, patient_id, code, display, onset_date,
-                             clinical_status, data_source)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        rec.get("id", str(_uuid_mod.uuid4())),
-                        rec["patient_id"], rec.get("code", ""),
-                        rec.get("display", ""), rec.get("onset_date"),
-                        rec.get("clinical_status", "active"), "healthex",
-                    )
-                    records_written += 1
+                # Conditions
+                if cond_items:
+                    fhir_conds = _normalize_to_fhir("conditions", cond_items)
+                    recs = transform_conditions(fhir_conds, patient_id)
+                    written_by_table["conditions"] = await _write_condition_rows(conn, recs)
 
-                elif resource_type == "encounters":
+                # Medications
+                if med_items:
+                    fhir_meds = _normalize_to_fhir("medications", med_items)
+                    recs = transform_medications(fhir_meds, patient_id)
+                    written_by_table["medications"] = await _write_medication_rows(conn, recs)
+
+                # Labs / biometrics
+                if lab_items:
+                    fhir_labs = _normalize_to_fhir("labs", lab_items)
+                    recs = transform_clinical_observations(fhir_labs, patient_id)
+                    written_by_table["labs"] = await _write_lab_rows(conn, recs)
+
+                # Encounters
+                if enc_items:
+                    fhir_encs = _normalize_to_fhir("encounters", enc_items)
+                    recs = transform_encounters(fhir_encs, patient_id)
+                    written_by_table["encounters"] = await _write_encounter_rows(conn, recs)
+
+            else:
+                # ── Single resource type: explode bundle → normalize → write ──
+                raw_list = _explode_fhir_bundle(fhir_data)
+
+                # Cache raw blobs before transform
+                for resource in raw_list:
+                    fhir_id = resource.get("id", str(_uuid_mod.uuid4()))
                     await conn.execute(
-                        """
-                        INSERT INTO clinical_events
-                            (id, patient_id, event_type, event_date,
-                             description, data_source)
-                        VALUES ($1,$2,$3,$4,$5,$6)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        rec.get("id", str(_uuid_mod.uuid4())),
-                        rec["patient_id"],
-                        rec.get("event_type", "encounter"),
-                        rec.get("event_date") or _dt.utcnow(),
-                        rec.get("description", ""), "healthex",
+                        """INSERT INTO raw_fhir_cache
+                               (patient_id, source_name, resource_type, raw_json,
+                                fhir_resource_id, retrieved_at, processed)
+                           VALUES ($1,$2,$3,$4,$5,NOW(),false)
+                           ON CONFLICT (patient_id, source_name, fhir_resource_id)
+                           DO UPDATE SET raw_json=EXCLUDED.raw_json,
+                                         retrieved_at=NOW(), processed=false""",
+                        patient_id, "healthex", resource_type,
+                        json.dumps(resource), fhir_id,
                     )
-                    records_written += 1
+
+                # Normalize to FHIR if needed
+                fhir_resources = _normalize_to_fhir(resource_type, raw_list)
+
+                # Transform to DB records
+                transform_fn_map = {
+                    "conditions":  lambda r: transform_conditions(r, patient_id),
+                    "medications": lambda r: transform_medications(r, patient_id),
+                    "labs":        lambda r: transform_clinical_observations(r, patient_id),
+                    "encounters":  lambda r: transform_encounters(r, patient_id),
+                }
+                records = transform_fn_map[resource_type](fhir_resources)
+
+                writer = _WRITER_MAP[resource_type]
+                written_by_table[resource_type] = await writer(conn, records)
 
             # Stage 8: update source freshness
+            total_written = sum(written_by_table.values())
             await conn.execute(
-                """
-                UPDATE source_freshness
-                SET last_ingested_at = NOW(),
-                    records_count    = records_count + $1
-                WHERE patient_id = $2 AND source_name = 'healthex'
-                """,
-                records_written, patient_id,
+                """UPDATE source_freshness
+                   SET last_ingested_at = NOW(),
+                       records_count    = records_count + $1
+                   WHERE patient_id = $2 AND source_name = 'healthex'""",
+                total_written, patient_id,
             )
 
         duration_ms = int((_time.time() - start) * 1000)
@@ -1186,16 +1404,16 @@ async def ingest_from_healthex(
             "status": "ok",
             "patient_id": patient_id,
             "resource_type": resource_type,
-            "resources_received": len(resources),
-            "records_written": records_written,
+            "records_written": written_by_table,
+            "total_written": sum(written_by_table.values()),
             "duration_ms": duration_ms,
         }, indent=2)
 
     except json.JSONDecodeError as e:
-        return f"Error: fhir_json is not valid JSON — {e}"
+        return json.dumps({"status": "error", "error": f"fhir_json is not valid JSON: {e}"})
     except Exception as e:
-        logger.error("ingest_from_healthex failed: %s", e)
-        return f"Error: {e}"
+        logger.error("ingest_from_healthex failed: %s", e, exc_info=True)
+        return json.dumps({"status": "error", "error": type(e).__name__, "detail": str(e)})
 
 
 # ---------------------------------------------------------------------------
