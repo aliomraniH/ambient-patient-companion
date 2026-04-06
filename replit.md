@@ -45,28 +45,57 @@ ambient-patient-companion/
 └── requirements.txt     ← Root Python dependencies (pytest-asyncio==0.21.2)
 ```
 
-## Workflows (3 active)
+## Workflows (5 active)
 
 | Workflow | Command | Port |
 |---------|---------|------|
 | Start application | `cd replit-app && npm run dev` | 5000 |
 | Config Dashboard | `cd replit_dashboard && python server.py` | 8080 |
 | Clinical MCP Server | `MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server` | 8001 |
+| Skills MCP Server | `cd mcp-server && MCP_TRANSPORT=streamable-http MCP_PORT=8002 python server.py` | 8002 |
+| Ingestion MCP Server | `MCP_TRANSPORT=streamable-http MCP_PORT=8003 python -m ingestion.server` | 8003 |
 
-## Phase 1 Clinical Intelligence (server/)
+## Three MCP Servers (all public via Next.js proxy)
 
-Five tools live at `http://localhost:8001`:
+| Server | Port | Public Path | Tools | Claude Web Name |
+|--------|------|-------------|-------|-----------------|
+| ClinicalIntelligence | 8001 | `/mcp` | 9 | `ambient-clinical-intelligence` |
+| PatientCompanion (Skills) | 8002 | `/mcp-skills` | 17 | `ambient-skills-companion` |
+| PatientIngestion | 8003 | `/mcp-ingestion` | 1 | `ambient-ingestion` |
 
-| Endpoint | Tool | Description |
-|---------|------|-------------|
-| `GET /health` | — | Liveness check |
-| `POST /tools/clinical_query` | `clinical_query` | 3-layer guardrail pipeline → Claude |
-| `GET /tools/get_guideline` | `get_guideline` | Fetch USPSTF/ADA guideline by ID |
-| `POST /tools/check_screening_due` | `check_screening_due` | Overdue screenings for patient |
-| `POST /tools/flag_drug_interaction` | `flag_drug_interaction` | Known drug interactions |
-| `GET /tools/get_synthetic_patient` | `get_synthetic_patient` | Maria Chen demo patient (MRN 4829341) |
+All three are proxied through Next.js (port 5000) — no port number in public URLs.
 
-Also accessible via MCP protocol at `http://localhost:8001/mcp` (streamable-http transport).
+### Server 1 — ClinicalIntelligence (`server/mcp_server.py`)
+
+Nine tools at `https://[domain]/mcp`:
+
+| Tool | Description |
+|------|-------------|
+| `clinical_query` | 3-layer guardrail pipeline → Claude |
+| `get_guideline` | Fetch USPSTF/ADA guideline by ID |
+| `check_screening_due` | Overdue screenings for patient profile |
+| `flag_drug_interaction` | Known drug interactions |
+| `get_synthetic_patient` | Maria Chen demo patient (MRN 4829341) |
+| `use_healthex` | Switch data track to HealthEx real records |
+| `use_demo_data` | Switch data track to Synthea demo data |
+| `switch_data_track` | Switch to named track (synthea/healthex/auto) |
+| `get_data_source_status` | Report active track + available sources |
+
+Also has REST wrappers at `/tools/<name>` and liveness check at `/health`.
+
+### Server 2 — PatientCompanion (`mcp-server/server.py`)
+
+Seventeen tools at `https://[domain]/mcp-skills` (auto-discovered from `mcp-server/skills/`):
+`compute_obt_score`, `compute_provider_risk`, `run_crisis_escalation`, `run_food_access_nudge`,
+`generate_daily_checkins`, `generate_patient`, `generate_daily_vitals`, `generate_previsit_brief`,
+`run_sdoh_assessment`, `use_healthex`, `use_demo_data`, `switch_data_track`,
+`get_data_source_status`, `check_data_freshness`, `run_ingestion`, `get_source_conflicts`,
+`ingest_from_healthex`
+
+### Server 3 — PatientIngestion (`ingestion/server.py`)
+
+One tool at `https://[domain]/mcp-ingestion`:
+`trigger_ingestion` — runs the full ETL pipeline for a patient from a named source adapter.
 
 **Claude web MCP config** — download from Config Dashboard (port 8080):
 - Dev (always available): `GET /api/generate/mcp-config?env=dev`
@@ -168,7 +197,7 @@ cd replit_dashboard && python -m pytest tests/ -v
 - **pytest-asyncio**: Pinned to 0.21.2 — 1.x breaks session-scoped event_loop
 - **Replit Secrets**: Take priority over local `.env` in dashboard and connectivity tests
 - **Dashboard tests**: `clean_env` fixture pops ALL_KEYS from os.environ — isolates from Replit Secrets
-- **Port config**: Next.js=5000, Config Dashboard=8080, Clinical MCP Server=8001
+- **Port config**: Next.js=5000, Config Dashboard=8080, Clinical MCP=8001, Skills MCP=8002, Ingestion MCP=8003
 
 ## Key Bug Fixes Applied
 
