@@ -1,0 +1,72 @@
+{
+  "patient_id": "4829341",
+  "patient_name": "Maria Chen",
+  "age": 54,
+  "sex": "F",
+  "mrn": "4829341",
+  "primary_provider": "Dr. Rahul Patel",
+  "practice": "Patel Family Medicine",
+  "active_conditions": [
+    {"code": "E11.9", "display": "Type 2 diabetes mellitus without complications",
+     "onset_date": "2019-03-12"},
+    {"code": "F41.1", "display": "Generalized anxiety disorder",
+     "onset_date": "2020-08-05"},
+    {"code": "I10", "display": "Essential hypertension", "onset_date": "2018-11-22"}
+  ],
+  "current_medications": [
+    {"name": "Metformin", "dose": "1000mg", "frequency": "twice daily",
+     "start_date": "2019-03-15"},
+    {"name": "Lisinopril", "dose": "10mg", "frequency": "once daily",
+     "start_date": "2018-12-01"},
+    {"name": "Sertraline", "dose": "50mg", "frequency": "once daily",
+     "start_date": "2020-09-01"}
+  ],
+  "recent_labs": [
+    {"name": "HbA1c", "value": 7.9, "unit": "%",
+     "date": "2026-01-15", "in_range": false},
+    {"name": "LDL", "value": 142, "unit": "mg/dL",
+     "date": "2024-10-01", "in_range": false},
+    {"name": "eGFR", "value": 68, "unit": "mL/min/1.73m2",
+     "date": "2026-01-15", "in_range": true},
+    {"name": "Creatinine", "value": 0.9, "unit": "mg/dL",
+     "date": "2026-01-15", "in_range": true}
+  ],
+  "vital_trends": [
+    {"name": "systolic_bp", "readings": [
+      {"value": 132, "date": "2026-01-15"},
+      {"value": 136, "date": "2026-02-18"},
+      {"value": 141, "date": "2026-03-20"}
+    ]},
+    {"name": "weight_lbs", "readings": [
+      {"value": 168, "date": "2026-01-15"},
+      {"value": 170, "date": "2026-03-20"}
+    ]}
+  ],
+  "care_gaps": [
+    {"gap_type": "diabetic_retinopathy_screening",
+     "last_completed": "2024-09-01", "due_date": "2025-09-01"},
+    {"gap_type": "lipid_panel",
+     "last_completed": "2024-10-01", "due_date": "2025-10-01"},
+    {"gap_type": "diabetes_education_referral",
+     "last_completed": null, "due_date": null}
+  ],
+  "sdoh_flags": ["recent_job_change"],
+  "prior_patient_knowledge": [],
+  "applicable_guidelines": [
+    {"source": "ADA", "version": "2026",
+     "recommendation_id": "9.3a",
+     "text": "Metformin is the preferred initial pharmacologic agent for type 2 diabetes",
+     "evidence_grade": "A"},
+    {"source": "ADA", "version": "2026",
+     "recommendation_id": "10.1a",
+     "text": "For patients with T2D and high cardiovascular risk, SGLT2 inhibitors or GLP-1 RAs are recommended",
+     "evidence_grade": "A"}
+  ],
+  "upcoming_appointments": [
+    {"appointment_type": "primary_care_follow_up",
+     "scheduled_at": "2026-04-10T09:00:00Z",
+     "provider_name": "Dr. Rahul Patel"}
+  ],
+  "days_since_last_encounter": 45,
+  "deliberation_trigger": "scheduled_pre_encounter"
+}

@@ -32,6 +32,8 @@ from starlette.responses import JSONResponse
 from server.guardrails.input_validator import validate_input
 from server.guardrails.output_validator import validate_output
 from server.guardrails.clinical_rules import check_escalation
+from server.deliberation.engine import DeliberationEngine
+from server.deliberation.schemas import DeliberationRequest
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
@@ -891,6 +893,259 @@ async def rest_switch_data_track(request: Request) -> JSONResponse:
 @mcp.custom_route("/tools/get_data_source_status", methods=["GET"])
 async def rest_get_data_source_status(request: Request) -> JSONResponse:
     result = await get_data_source_status()
+    return JSONResponse(result)
+
+
+# ---------------------------------------------------------------------------
+# Deliberation Engine (Dual-LLM)
+# ---------------------------------------------------------------------------
+
+_deliberation_engine: DeliberationEngine | None = None
+
+
+class _VectorStorePlaceholder:
+    """Placeholder vector store until pgvector/pinecone is configured."""
+
+    async def similarity_search(self, query: str, k: int = 10, **kwargs) -> list[dict]:
+        return []
+
+
+async def get_deliberation_engine() -> DeliberationEngine:
+    """Lazy-init the deliberation engine singleton."""
+    global _deliberation_engine
+    if _deliberation_engine is None:
+        pool = await _get_db_pool()
+        _deliberation_engine = DeliberationEngine(
+            db_pool=pool,
+            vector_store=_VectorStorePlaceholder()
+        )
+    return _deliberation_engine
+
+
+@mcp.tool()
+async def run_deliberation(
+    patient_id: str,
+    trigger_type: str = "manual",
+    max_rounds: int = 3
+) -> dict:
+    """
+    Trigger a full Dual-LLM deliberation session for a patient.
+
+    Runs all 5 phases: context compilation, parallel analysis (Claude + GPT-4),
+    cross-critique, synthesis, and knowledge commit.
+
+    Args:
+        patient_id: Patient MRN or internal ID
+        trigger_type: One of: scheduled_pre_encounter, lab_result_received,
+                      medication_change, missed_appointment, temporal_threshold, manual
+        max_rounds: Maximum critique rounds (1-5, default 3)
+
+    Returns:
+        deliberation_id, status, summary of five output categories,
+        convergence_score, total_tokens, latency_ms
+    """
+    engine = await get_deliberation_engine()
+    result = await engine.run(
+        DeliberationRequest(
+            patient_id=patient_id,
+            trigger_type=trigger_type,
+            max_rounds=max_rounds
+        )
+    )
+    return {
+        "deliberation_id": result.deliberation_id,
+        "status": "complete",
+        "patient_id": result.patient_id,
+        "convergence_score": result.convergence_score,
+        "summary": {
+            "anticipatory_scenarios": len(result.anticipatory_scenarios),
+            "predicted_questions": len(result.predicted_patient_questions),
+            "missing_data_flags": len(result.missing_data_flags),
+            "nudges_generated": len(result.nudge_content),
+            "knowledge_updates": len(result.knowledge_updates)
+        },
+        "top_scenario": (
+            result.anticipatory_scenarios[0].title
+            if result.anticipatory_scenarios else None
+        ),
+        "critical_flags": [
+            f.description for f in result.missing_data_flags
+            if f.priority in ("critical", "high")
+        ]
+    }
+
+
+@mcp.tool()
+async def get_deliberation_results(
+    patient_id: str,
+    output_type: str = "all",
+    limit: int = 1
+) -> dict:
+    """
+    Retrieve outputs from the most recent deliberation(s) for a patient.
+
+    Args:
+        patient_id: Patient MRN or internal ID
+        output_type: Filter by: all | anticipatory_scenario |
+                     predicted_patient_question | missing_data_flag |
+                     patient_nudge | care_team_nudge
+        limit: Number of most recent deliberations to return (default 1)
+
+    Returns:
+        Structured outputs from deliberation(s), with metadata.
+    """
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        deliberations = await conn.fetch(
+            """SELECT id, triggered_at, convergence_score, rounds_completed
+               FROM deliberations
+               WHERE patient_id = $1 AND status = 'complete'
+               ORDER BY triggered_at DESC
+               LIMIT $2""",
+            patient_id, limit
+        )
+        if not deliberations:
+            return {"status": "no_deliberations_found", "patient_id": patient_id}
+
+        results = []
+        for dlb in deliberations:
+            query = """SELECT output_type, output_data, confidence, priority
+                       FROM deliberation_outputs
+                       WHERE deliberation_id = $1"""
+            params = [dlb["id"]]
+            if output_type != "all":
+                query += " AND output_type = $2"
+                params.append(output_type)
+            outputs = await conn.fetch(query, *params)
+
+            results.append({
+                "deliberation_id": str(dlb["id"]),
+                "triggered_at": dlb["triggered_at"].isoformat(),
+                "convergence_score": dlb["convergence_score"],
+                "rounds_completed": dlb["rounds_completed"],
+                "outputs": [dict(o) for o in outputs]
+            })
+
+        return {"patient_id": patient_id, "deliberations": results}
+
+
+@mcp.tool()
+async def get_patient_knowledge(
+    patient_id: str,
+    knowledge_type: str = "all"
+) -> dict:
+    """
+    Retrieve current accumulated patient-specific knowledge.
+
+    Args:
+        patient_id: Patient MRN or internal ID
+        knowledge_type: Filter by type or 'all'
+
+    Returns:
+        Current knowledge entries with confidence scores and provenance.
+    """
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        query = """SELECT knowledge_type, entry_text, confidence,
+                          valid_from, evidence_refs, contributing_models
+                   FROM patient_knowledge
+                   WHERE patient_id = $1
+                     AND is_current = true
+                     AND (valid_until IS NULL OR valid_until > NOW())"""
+        params = [patient_id]
+        if knowledge_type != "all":
+            query += " AND knowledge_type = $2"
+            params.append(knowledge_type)
+        query += " ORDER BY confidence DESC, created_at DESC"
+
+        rows = await conn.fetch(query, *params)
+        return {
+            "patient_id": patient_id,
+            "knowledge_count": len(rows),
+            "entries": [dict(r) for r in rows]
+        }
+
+
+@mcp.tool()
+async def get_pending_nudges(
+    patient_id: str,
+    target: str = "patient"
+) -> dict:
+    """
+    Retrieve nudges queued for delivery but not yet sent.
+    Used by notification scheduler and care manager dashboard.
+
+    Args:
+        patient_id: Patient MRN or internal ID
+        target: 'patient' | 'care_team'
+
+    Returns:
+        Pending nudges with trigger conditions and channel content.
+    """
+    nudge_type = f"{target}_nudge"
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT do.id, do.output_data, do.trigger_condition,
+                      d.triggered_at as deliberation_date
+               FROM deliberation_outputs do
+               JOIN deliberations d ON do.deliberation_id = d.id
+               WHERE d.patient_id = $1
+                 AND do.output_type = $2
+                 AND do.delivered_at IS NULL
+               ORDER BY d.triggered_at DESC""",
+            patient_id, nudge_type
+        )
+        return {
+            "patient_id": patient_id,
+            "target": target,
+            "pending_count": len(rows),
+            "nudges": [dict(r) for r in rows]
+        }
+
+
+# ── REST wrappers for deliberation tools ──────────────────────────────────────
+
+
+@mcp.custom_route("/tools/run_deliberation", methods=["POST"])
+async def rest_run_deliberation(request: Request) -> JSONResponse:
+    body = await request.json()
+    result = await run_deliberation(
+        patient_id=body.get("patient_id", ""),
+        trigger_type=body.get("trigger_type", "manual"),
+        max_rounds=body.get("max_rounds", 3),
+    )
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/tools/get_deliberation_results", methods=["POST"])
+async def rest_get_deliberation_results(request: Request) -> JSONResponse:
+    body = await request.json()
+    result = await get_deliberation_results(
+        patient_id=body.get("patient_id", ""),
+        output_type=body.get("output_type", "all"),
+        limit=body.get("limit", 1),
+    )
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/tools/get_patient_knowledge", methods=["POST"])
+async def rest_get_patient_knowledge(request: Request) -> JSONResponse:
+    body = await request.json()
+    result = await get_patient_knowledge(
+        patient_id=body.get("patient_id", ""),
+        knowledge_type=body.get("knowledge_type", "all"),
+    )
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/tools/get_pending_nudges", methods=["POST"])
+async def rest_get_pending_nudges(request: Request) -> JSONResponse:
+    body = await request.json()
+    result = await get_pending_nudges(
+        patient_id=body.get("patient_id", ""),
+        target=body.get("target", "patient"),
+    )
     return JSONResponse(result)
 
 
