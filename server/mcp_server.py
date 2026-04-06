@@ -1109,13 +1109,23 @@ async def get_pending_nudges(
 
 @mcp.custom_route("/tools/run_deliberation", methods=["POST"])
 async def rest_run_deliberation(request: Request) -> JSONResponse:
-    body = await request.json()
-    result = await run_deliberation(
-        patient_id=body.get("patient_id", ""),
-        trigger_type=body.get("trigger_type", "manual"),
-        max_rounds=body.get("max_rounds", 3),
-    )
-    return JSONResponse(result)
+    try:
+        body = await request.json()
+        result = await run_deliberation(
+            patient_id=body.get("patient_id", ""),
+            trigger_type=body.get("trigger_type", "manual"),
+            max_rounds=body.get("max_rounds", 3),
+        )
+        return JSONResponse(result)
+    except ValueError as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=404)
+    except Exception as e:
+        import sys as _sys
+        print(f"[run_deliberation] error: {e}", file=_sys.stderr)
+        return JSONResponse(
+            {"status": "error", "error": type(e).__name__, "detail": str(e)},
+            status_code=422,
+        )
 
 
 @mcp.custom_route("/tools/get_deliberation_results", methods=["POST"])
