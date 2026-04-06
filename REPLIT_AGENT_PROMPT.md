@@ -1,258 +1,264 @@
-Read CLAUDE.md and replit.md before doing anything. They are the source of
-truth for this project.
+# Replit Agent Prompt — Execute & Test Dual-LLM Deliberation Engine
 
-You are deploying and testing the Phase 1 clinical intelligence layer that
-was implemented on the branch `claude/ambient-patient-companion-phase1-TQwII`.
-This branch adds a new FastMCP server (`server/mcp_server.py`) with guardrails,
-clinical guidelines, system prompts, a JS client, HTML prototypes, and
-integration tests.
+> **Copy this entire file into Replit Agent.**
+> It will set up the environment, run the database migration, start the
+> server, and execute all tests for the newly added Deliberation Engine.
 
-Your job is to:
+---
 
-────────────────────────────────────────────────────────────────────────────
-1. ENVIRONMENT SETUP
-────────────────────────────────────────────────────────────────────────────
+## Context
 
-a. Install Python dependencies from the root requirements.txt:
-     pip install -r requirements.txt
-   This adds `anthropic` and `fastmcp` (plus existing deps).
+Read CLAUDE.md before doing anything. It is the source of truth for this
+project.
 
-b. Verify the ANTHROPIC_API_KEY is set in Replit Secrets
-   (Settings > Secrets). The clinical_query tool needs it to call
-   Claude API. If it is missing, warn the user but proceed with
-   testing the 4 tools that don't require an API key.
+The Ambient Patient Companion project now has a **Dual-LLM Deliberation
+Engine** on branch `claude/dual-llm-deliberation-B3owM`. This is an async
+pipeline where Claude (Anthropic) and GPT-4 (OpenAI) independently analyze
+a patient's clinical context, cross-critique each other, and synthesize
+their combined reasoning into 5 structured output categories:
 
-c. Ensure the replit_dashboard KEY_META includes the new clinical
-   intelligence server URL. Add this entry to `replit_dashboard/server.py`
-   in the KEY_META dict:
+1. **Anticipatory Scenarios** — clinical scenarios likely in next 30/90/180 days
+2. **Predicted Patient Questions** — questions the patient may ask
+3. **Missing Data Flags** — data gaps both models identified
+4. **Patient/Care Team Nudges** — BCT-formatted behavioral nudges
+5. **Knowledge Updates** — accumulated patient-specific knowledge
 
-     "MCP_CLINICAL_INTELLIGENCE_URL": {
-         "category":    "AUTO",
-         "label":       "MCP · Clinical Intelligence",
-         "description": "FastMCP clinical decision support server (Phase 1).",
-         "secret":      False,
-         "default":     "http://localhost:8001/mcp",
-         "help_url":    None,
-     },
+The feature adds:
+- 8 new Python modules in `server/deliberation/`
+- 4 new PostgreSQL tables (migration in `server/deliberation/migrations/`)
+- 4 new MCP tools + REST endpoints appended to `server/mcp_server.py`
+- A new UI panel in `prototypes/components/deliberation-panel.js`
+- 32 passing unit/integration tests in `server/deliberation/tests/`
 
-────────────────────────────────────────────────────────────────────────────
-2. RUN THE PHASE 1 INTEGRATION TESTS
-────────────────────────────────────────────────────────────────────────────
+Your job: get everything running, run the database migration, execute
+all tests, and verify the MCP server starts with the new tools.
 
-From the repository root, run:
+---
 
-    python -m pytest tests/phase1/ -v
+## Step 1 — Install Dependencies
 
-All 100 tests must pass. These cover:
-  - Input validation (PHI detection, jailbreak blocking, scope checks)
-  - Output validation (citation enforcement, diagnostic language flagging)
-  - Clinical escalation rules (life-threatening, controlled substances,
-    pediatric, pregnancy — 5 scenario types)
-  - get_guideline (ADA + USPSTF lookups by recommendation ID)
-  - check_screening_due (age/sex/condition-based USPSTF eligibility)
-  - flag_drug_interaction (12 hardcoded interaction pairs)
-  - get_synthetic_patient (Maria Chen, MRN 4829341)
-  - clinical_query (mocked Claude API — jailbreak blocking, PHI blocking,
-    escalation, happy path generation, output validation)
+```bash
+pip install -r requirements.txt
+```
 
-If any test fails, diagnose the root cause and fix it. Do not skip tests.
+Verify the critical new packages are installed:
+```bash
+python -c "import pydantic; print(f'pydantic {pydantic.__version__}')"
+python -c "import openai; print(f'openai {openai.__version__}')"
+python -c "import anthropic; print(f'anthropic {anthropic.__version__}')"
+```
 
-────────────────────────────────────────────────────────────────────────────
-3. RUN THE EXISTING TEST SUITES (regression check)
-────────────────────────────────────────────────────────────────────────────
+---
 
-Verify that the existing tests still pass after Phase 1 additions:
+## Step 2 — Set Required Environment Variables (Replit Secrets)
 
-  a. Backend (MCP server skills):
-       cd mcp-server && python -m pytest tests/ -v
+These must be set in the Replit Secrets panel:
 
-  b. Frontend (Next.js components):
-       cd replit-app && npm test
+| Secret Name | Required | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key (`sk-ant-...`) |
+| `OPENAI_API_KEY` | Yes | OpenAI API key (`sk-...`) for GPT-4 deliberation |
+| `DATABASE_URL` | Yes | PostgreSQL connection string (Replit provides this if PostgreSQL module is enabled) |
 
-  c. Config dashboard:
-       cd replit_dashboard && python -m pytest tests/ -v
+Optional (defaults are fine for testing):
+| Secret Name | Default | Description |
+|---|---|---|
+| `DELIBERATION_ENABLED` | `true` | Enable deliberation engine |
+| `DELIBERATION_MAX_ROUNDS` | `3` | Max cross-critique rounds |
+| `DELIBERATION_CONVERGENCE_THRESHOLD` | `0.90` | Early-stop threshold |
+| `MCP_TRANSPORT` | `streamable-http` | MCP transport mode |
+| `MCP_PORT` | `8001` | MCP server port |
 
-Report pass/fail counts for each suite. If any existing test broke,
-investigate whether Phase 1 changes caused the regression.
+---
 
-────────────────────────────────────────────────────────────────────────────
-4. DEPLOY THE CLINICAL INTELLIGENCE SERVER
-────────────────────────────────────────────────────────────────────────────
+## Step 3 — Run Database Migration
 
-The clinical intelligence server needs to run alongside the existing
-Next.js frontend. There are two deployment paths — choose the HTTP one:
+Run the base schema first if tables don't exist yet:
+```bash
+psql $DATABASE_URL -f mcp-server/db/schema.sql
+```
 
-a. Add an HTTP entry point to server/mcp_server.py. The server currently
-   runs via stdio transport. Add a second mode:
+Then run the deliberation engine migration (4 new tables):
+```bash
+psql $DATABASE_URL -f server/deliberation/migrations/001_deliberation_tables.sql
+```
 
-     if __name__ == "__main__":
-         import sys
-         transport = sys.argv[1] if len(sys.argv) > 1 else "streamable-http"
-         if transport == "stdio":
-             mcp.run(transport="stdio")
-         else:
-             mcp.run(transport="streamable-http", host="0.0.0.0", port=8001)
+Verify the tables were created:
+```bash
+psql $DATABASE_URL -c "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename IN ('deliberations','deliberation_outputs','patient_knowledge','core_knowledge_updates') ORDER BY tablename;"
+```
 
-b. Update .replit to start both servers. Add a new workflow task that
-   runs the clinical server in parallel with the Next.js frontend:
+Expected: all 4 table names should appear.
 
-     [[workflows.workflow]]
-     name = "Start clinical server"
-     author = "agent"
+---
 
-     [[workflows.workflow.tasks]]
-     task = "shell.exec"
-     args = "cd /home/runner/ambient-patient-companion && python -m server.mcp_server streamable-http"
-     waitForPort = 8001
+## Step 4 — Verify Python Imports
 
-   Then add this task to the "Project" parallel workflow:
+```bash
+python -c "from server.deliberation.schemas import DeliberationResult; print('schemas OK')"
+python -c "from server.deliberation.engine import DeliberationEngine; print('engine OK')"
+python -c "from server.deliberation.analyst import run_parallel_analysis; print('analyst OK')"
+python -c "from server.deliberation.critic import run_critique_rounds; print('critic OK')"
+python -c "from server.deliberation.synthesizer import synthesize; print('synthesizer OK')"
+python -c "from server.deliberation.behavioral_adapter import adapt_nudges; print('adapter OK')"
+python -c "from server.deliberation.knowledge_store import commit_deliberation; print('store OK')"
+```
 
-     [[workflows.workflow]]
-     name = "Project"
-     mode = "parallel"
-     author = "agent"
+All 7 should print "OK".
 
-     [[workflows.workflow.tasks]]
-     task = "workflow.run"
-     args = "Start application"
+---
 
-     [[workflows.workflow.tasks]]
-     task = "workflow.run"
-     args = "Start clinical server"
+## Step 5 — Run the Deliberation Test Suite (Mocked — No API Keys Needed)
 
-c. Add port 8001 mapping (internal only — not exposed externally):
+```bash
+python -m pytest server/deliberation/tests/ -v --tb=short
+```
 
-     [[ports]]
-     localPort = 8001
-     externalPort = 8001
+Expected output: **32 passed, 1 skipped**. The skipped test is the live
+API integration test, which requires `RUN_LIVE_TESTS=true`.
 
-d. Verify the server starts without errors:
-     python -m server.mcp_server streamable-http
-   It should listen on 0.0.0.0:8001. Kill it after verifying.
+The tests cover:
+- Pydantic schema validation and fixture loading (Maria Chen, MRN 4829341)
+- Convergence detection (Jaccard similarity — identical, partial, empty)
+- Behavioral adapter (SMS truncation at 160 chars, reading level estimation,
+  provider disclaimers automatically appended to patient nudges)
+- Knowledge store (DB write with mocked asyncpg pool and transaction)
+- Prompt template loading and placeholder substitution
+- Analysis round-trip serialization (JSON serialize/deserialize)
+- Analysis-from-revision conversion (claude gets diagnostic_reasoning emphasis,
+  gpt4 gets treatment_optimization emphasis)
 
-────────────────────────────────────────────────────────────────────────────
-5. WIRE THE PROTOTYPES TO THE RUNNING SERVER
-────────────────────────────────────────────────────────────────────────────
+---
 
-The shared/claude-client.js uses FASTMCP_BASE_URL defaulting to
-http://localhost:8000. Update this to match the deployed port:
+## Step 6 — Run Phase 1 Regression Tests
 
-  const FASTMCP_BASE_URL = (typeof window !== 'undefined' && window.FASTMCP_BASE_URL)
-    || 'http://localhost:8001';
+Make sure the deliberation changes didn't break existing functionality:
 
-Verify each prototype loads without JS console errors by opening them
-in a browser or running a simple HTTP server:
-    python -m http.server 8080 --directory prototypes/
+```bash
+python -m pytest tests/phase1/ -v --tb=short
+```
 
-────────────────────────────────────────────────────────────────────────────
-6. LIVE TOOL VERIFICATION (smoke tests)
-────────────────────────────────────────────────────────────────────────────
+Expected: all Phase 1 guardrail tests should still pass (jailbreak blocking,
+PHI detection, escalation triggers, drug interactions, screening checks).
 
-With the clinical server running on port 8001, verify each tool
-responds correctly. Use curl or Python httpx:
+---
 
-a. get_synthetic_patient — should return Maria Chen's full record:
-     curl -X POST http://localhost:8001/mcp \
-       -H "Content-Type: application/json" \
-       -d '{"method": "tools/call", "params": {"name": "get_synthetic_patient", "arguments": {"mrn": "4829341"}}}'
+## Step 7 — Start the MCP Server and Verify New Tools
 
-b. get_guideline — should return metformin recommendation:
-     curl -X POST http://localhost:8001/mcp \
-       -H "Content-Type: application/json" \
-       -d '{"method": "tools/call", "params": {"name": "get_guideline", "arguments": {"recommendation_id": "9.1a"}}}'
+Start the server:
+```bash
+MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server &
+sleep 3
+```
 
-c. check_screening_due — Maria Chen's profile (54F, T2DM, obesity):
-     curl -X POST http://localhost:8001/mcp \
-       -H "Content-Type: application/json" \
-       -d '{"method": "tools/call", "params": {"name": "check_screening_due", "arguments": {"patient_age": 54, "sex": "female", "conditions": ["type_2_diabetes", "obesity"]}}}'
+Test each of the 4 new REST endpoints:
 
-d. flag_drug_interaction — test ACE + ARB dual blockade:
-     curl -X POST http://localhost:8001/mcp \
-       -H "Content-Type: application/json" \
-       -d '{"method": "tools/call", "params": {"name": "flag_drug_interaction", "arguments": {"medications": ["lisinopril", "losartan"]}}}'
+```bash
+# 1. Get deliberation results (should return "no_deliberations_found")
+curl -s -X POST http://localhost:8001/tools/get_deliberation_results \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id": "4829341", "output_type": "all", "limit": 1}'
 
-e. clinical_query (only if ANTHROPIC_API_KEY is set):
-     curl -X POST http://localhost:8001/mcp \
-       -H "Content-Type: application/json" \
-       -d '{"method": "tools/call", "params": {"name": "clinical_query", "arguments": {"query": "What are the ADA recommendations for SGLT2 inhibitors in a patient with type 2 diabetes and CKD?", "role": "pcp", "patient_context": {"conditions": ["type_2_diabetes", "ckd"], "medications": ["metformin", "lisinopril"]}}}}'
+# 2. Get patient knowledge (should return empty entries)
+curl -s -X POST http://localhost:8001/tools/get_patient_knowledge \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id": "4829341", "knowledge_type": "all"}'
 
-   Verify the response includes: citations, evidence grades, and the
-   "Verify dosing with pharmacist" caveat. It must NOT contain
-   definitive diagnostic language.
+# 3. Get pending nudges (should return 0 pending)
+curl -s -X POST http://localhost:8001/tools/get_pending_nudges \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id": "4829341", "target": "patient"}'
 
-NOTE: The exact HTTP endpoint format depends on how FastMCP exposes
-tools over streamable-http transport. Check FastMCP docs if the /mcp
-JSON-RPC format doesn't work — it may use /tools/<name> REST-style
-endpoints or /sse for SSE transport instead. Adjust the curl commands
-accordingly. The key requirement is that all 5 tools are callable and
-return correct response shapes.
+# 4. Verify existing tools still work
+curl -s http://localhost:8001/tools/get_synthetic_patient?mrn=4829341
+```
 
-────────────────────────────────────────────────────────────────────────────
-7. UPDATE replit.md
-────────────────────────────────────────────────────────────────────────────
+All endpoints should return valid JSON (no 500 errors).
 
-Add a new section to replit.md documenting the clinical intelligence layer:
+Stop the background server when done:
+```bash
+kill %1 2>/dev/null
+```
 
-  ## Clinical Intelligence Layer (Phase 1)
+---
 
-  The clinical intelligence server provides AI-assisted clinical decision
-  support through a three-layer guardrail pipeline.
+## Step 8 — (Optional) Run Full Live Deliberation
 
-  ### Running
-  - Auto-started via Replit workflow on port 8001
-  - Manual: `python -m server.mcp_server streamable-http`
+Only run this if both API keys are set and you want a real end-to-end test.
+This costs ~$0.15-0.30 per run and takes ~60 seconds:
 
-  ### Tools (5)
-  | Tool | Purpose |
-  |------|---------|
-  | clinical_query | Guardrailed Claude API for clinical questions |
-  | get_guideline | Lookup ADA/USPSTF guidelines by ID |
-  | check_screening_due | USPSTF screening eligibility check |
-  | flag_drug_interaction | Drug interaction detection |
-  | get_synthetic_patient | Demo patient data (Maria Chen) |
+```bash
+# Start the MCP server
+MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server &
+sleep 3
 
-  ### Testing
-  ```bash
-  python -m pytest tests/phase1/ -v   # 100 integration tests
-  ```
+# Trigger a deliberation via REST API
+curl -s -X POST http://localhost:8001/tools/run_deliberation \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id": "4829341", "trigger_type": "manual", "max_rounds": 2}'
 
-  ### Environment
-  - Requires `ANTHROPIC_API_KEY` in Replit Secrets for clinical_query tool
-  - Other 4 tools work without API key (guideline lookups, screenings, etc.)
+# Then retrieve results
+curl -s -X POST http://localhost:8001/tools/get_deliberation_results \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id": "4829341", "output_type": "all", "limit": 1}'
 
-────────────────────────────────────────────────────────────────────────────
-8. FINAL VERIFICATION CHECKLIST
-────────────────────────────────────────────────────────────────────────────
+kill %1 2>/dev/null
+```
 
-Report pass/fail for each item:
+---
 
-  [ ] Phase 1 integration tests: 100/100 passing
-  [ ] Existing backend tests: passing (report count)
-  [ ] Existing frontend tests: passing (report count)
-  [ ] Existing dashboard tests: passing (report count)
-  [ ] Clinical server starts on port 8001 without errors
-  [ ] get_synthetic_patient returns Maria Chen data
-  [ ] get_guideline returns ADA recommendation 9.1a
-  [ ] check_screening_due returns ≥5 screenings for 54F with diabetes
-  [ ] flag_drug_interaction detects ACE+ARB interaction
-  [ ] clinical_query returns guardrailed response (if API key present)
-  [ ] HTML prototypes load shared/claude-client.js without errors
-  [ ] .replit workflow starts both servers in parallel
-  [ ] replit.md updated with clinical intelligence documentation
+## Step 9 — Verify UI Integration
 
-────────────────────────────────────────────────────────────────────────────
-CONSTRAINTS — do not violate these
-────────────────────────────────────────────────────────────────────────────
+Open the prototype in the Replit webview or browser:
+```
+prototypes/pcp-encounter.html
+```
 
-- Do NOT use HealthEx MCP — it is incompatible with this environment
-- Do NOT use claude-opus-* models — the clinical server uses
-  claude-sonnet-4-20250514 only
-- Do NOT modify existing prototype HTML UI or styles — only touch the
-  script import and FASTMCP_BASE_URL
-- Do NOT allow direct Claude API calls from HTML prototypes
-- Do NOT store real patient data — all data is synthetic
-  (Maria Chen MRN 4829341 is the canonical demo patient)
-- Do NOT skip the output validation layer — it is mandatory
-- If ANTHROPIC_API_KEY is not set, do NOT block deployment.
-  The 4 non-AI tools must still work. clinical_query will return
-  an error status, which is the expected behavior.
+Check:
+1. Two tabs appear: **"Clinical Workspace"** and **"AI Deliberation"**
+2. Click "AI Deliberation" tab
+3. Panel loads (shows "No deliberation results yet" or results)
+4. "Run Deliberation Now" button is visible
+5. No JavaScript console errors
+6. Tab switching works correctly (clinical content hides, deliberation shows)
+
+---
+
+## Step 10 — Security Verification
+
+```bash
+# No hardcoded API keys
+grep -r "sk-ant-\|sk-proj-" server/ --include="*.py"
+
+# No PHI in log statements
+grep -r "print.*patient_name\|logging.*mrn\|print.*mrn" server/ --include="*.py"
+
+# OPENAI_API_KEY only from env, never hardcoded
+grep -r "OPENAI_API_KEY" server/ --include="*.py" | grep -v "os.environ" | grep -v "# "
+```
+
+All three should return empty (no matches).
+
+---
+
+## Project Services (for reference)
+
+| Service | Port | Start Command |
+|---|---|---|
+| Clinical MCP Server | 8001 | `MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server` |
+| Config Dashboard | 8080 | `cd replit_dashboard && python server.py` |
+| Next.js Frontend | 5000 | `cd replit-app && npm run dev` |
+| All together | — | `bash start.sh` |
+
+---
+
+## Troubleshooting
+
+| Issue | Fix |
+|---|---|
+| `ModuleNotFoundError: No module named 'pydantic'` | `pip install pydantic openai anthropic` |
+| `openai.OpenAIError: api_key must be set` | Set `OPENAI_API_KEY` in Replit Secrets |
+| `psql: command not found` | PostgreSQL module not enabled — check `.replit` has `postgresql-16` |
+| `relation "deliberations" does not exist` | Run migration: `psql $DATABASE_URL -f server/deliberation/migrations/001_deliberation_tables.sql` |
+| `connection refused` on port 8001 | Server not started, or port conflict — `lsof -i :8001` |
+| Tests show `31 passed, 1 failed` | Check traceback — likely an async mock issue |
