@@ -85,21 +85,6 @@ def _healthex_summary(mrn: str = "HX-7777") -> dict:
     }
 
 
-# ── Stub FastMCP ─────────────────────────────────────────────────────
-
-class _StubFastMCP:
-    """Minimal FastMCP stub that captures decorated tool functions."""
-
-    def __init__(self, *a, **kw):
-        self._tools: dict[str, callable] = {}
-
-    def tool(self, fn=None):
-        if fn is None:
-            return self.tool
-        self._tools[fn.__name__] = fn
-        return fn
-
-
 # ── Pre-mock heavy dependencies in sys.modules before any imports ───
 
 _mock_asyncpg = MagicMock()
@@ -107,17 +92,10 @@ _mock_db = MagicMock()
 _mock_db_connection = MagicMock()
 _mock_db_connection.get_pool = AsyncMock()
 _mock_fastmcp = MagicMock()
-_mock_fastmcp.FastMCP = _StubFastMCP
 
 
-def _load_ingestion_tools(pool):
-    """Import skills.ingestion_tools with all external deps mocked.
-
-    Injects mocks into sys.modules for asyncpg, fastmcp, db.connection
-    so that the top-level imports in ingestion_tools.py succeed without
-    those packages being installed.
-    """
-    # Save and mock
+async def _call_register(pool, input_data: dict, mrn_override: str = ""):
+    """Import the module-level register_healthex_patient and call it."""
     saved = {}
     mocks = {
         "asyncpg": _mock_asyncpg,
@@ -140,32 +118,23 @@ def _load_ingestion_tools(pool):
         # Patch module-level helpers after import
         mod.get_pool = AsyncMock(return_value=pool)
         mod.log_skill_execution = AsyncMock()
-        mod._set_data_track = AsyncMock(return_value="healthex")
 
-        stub_mcp = _StubFastMCP()
-        mod.register(stub_mcp)
+        result_str = await mod.register_healthex_patient(
+            health_summary_json=json.dumps(input_data),
+            mrn_override=mrn_override,
+        )
 
-        return stub_mcp, mod
+        # Module-level function may return plain string on error or JSON
+        try:
+            return json.loads(result_str), mod
+        except (json.JSONDecodeError, TypeError):
+            return {"status": "error", "message": result_str}, mod
     finally:
         for name, original in saved.items():
             if original is None:
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = original
-
-
-async def _call_register(pool, input_data: dict, mrn_override: str | None = None):
-    """Load ingestion_tools, find register_healthex_patient, and call it."""
-    stub_mcp, mod = _load_ingestion_tools(pool)
-
-    tool_fn = stub_mcp._tools.get("register_healthex_patient")
-    assert tool_fn is not None, "register_healthex_patient not registered"
-
-    result_str = await tool_fn(
-        health_summary_json=json.dumps(input_data),
-        mrn_override=mrn_override,
-    )
-    return json.loads(result_str), mod
 
 
 # ── Tests ────────────────────────────────────────────────────────────
@@ -176,7 +145,7 @@ async def test_hr1_bare_fhir_patient():
     pool, conn = _make_mock_pool()
     result, _ = await _call_register(pool, _bare_fhir_patient("HX-9999"))
 
-    assert result["status"] == "ok"
+    assert result["status"] == "registered"
     assert result["patient_id"] == FAKE_UUID
     assert result["mrn"] == "HX-9999"
     assert result["is_synthetic"] is False
@@ -193,7 +162,7 @@ async def test_hr2_fhir_bundle():
     pool, conn = _make_mock_pool()
     result, _ = await _call_register(pool, _fhir_bundle("HX-8888"))
 
-    assert result["status"] == "ok"
+    assert result["status"] == "registered"
     assert result["mrn"] == "HX-8888"
     assert result["patient_id"] == FAKE_UUID
 
@@ -204,7 +173,7 @@ async def test_hr3_healthex_summary():
     pool, conn = _make_mock_pool()
     result, _ = await _call_register(pool, _healthex_summary("HX-7777"))
 
-    assert result["status"] == "ok"
+    assert result["status"] == "registered"
     assert result["mrn"] == "HX-7777"
     assert result["name"] == "Maria Chen"
     assert result["is_synthetic"] is False
@@ -231,7 +200,7 @@ async def test_hr5_mrn_override():
         mrn_override="HX-OVERRIDE",
     )
 
-    assert result["status"] == "ok"
+    assert result["status"] == "registered"
     assert result["mrn"] == "HX-OVERRIDE"
 
 
@@ -239,10 +208,18 @@ async def test_hr5_mrn_override():
 async def test_hr6_data_track_set():
     """HR-6: DATA_TRACK = 'healthex' written to system_config."""
     pool, conn = _make_mock_pool()
-    result, mod = await _call_register(pool, _healthex_summary("HX-TRACK"))
+    result, _ = await _call_register(pool, _healthex_summary("HX-TRACK"))
 
-    assert result["status"] == "ok"
-    mod._set_data_track.assert_called_with("healthex", "register_healthex_patient")
+    assert result["status"] == "registered"
+    assert result["data_track"] == "healthex"
+
+    # Verify system_config was written via one of the conn.execute calls
+    calls = conn.execute.call_args_list
+    data_track_written = any(
+        "system_config" in str(call) and "DATA_TRACK" in str(call)
+        for call in calls
+    )
+    assert data_track_written, "DATA_TRACK should be written to system_config"
 
 
 @pytest.mark.asyncio
@@ -256,7 +233,7 @@ async def test_hr7_context_compiler_lookup():
 
     # Register the patient
     result, _ = await _call_register(pool, _healthex_summary("HX-COMPILE"))
-    assert result["status"] == "ok"
+    assert result["status"] == "registered"
 
     patient_id = result["patient_id"]
     mrn = result["mrn"]
