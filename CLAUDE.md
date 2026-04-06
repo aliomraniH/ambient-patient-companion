@@ -44,6 +44,7 @@ The Ambient Patient Companion transforms static patient dashboards into a contin
 │  Claude 4.6 + Extended Thinking · LangSmith tracing     │
 │  Constitutional AI guardrails · MemPrompt corrections    │
 │  Proactive suggestion engine (separate API call)         │
+│  ★ Dual-LLM Deliberation Engine (Claude + GPT-4)        │
 └────────────────────┬────────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────────┐
@@ -652,6 +653,62 @@ After deploying FastMCP servers to Replit, add these to your Claude settings (`~
 
 > **Generate this config automatically**: Use the Replit Dashboard at `/replit_dashboard/index.html`
 > to enter your Replit URLs → it generates the exact JSON to paste into Claude settings.
+
+---
+
+## 8b. Dual-LLM Deliberation Engine
+
+> **Implemented**: April 2026
+> **Status**: In Progress
+> **Location**: `server/deliberation/`
+
+The Deliberation Engine is an async pre-computation layer where Claude (Anthropic) and GPT-4 (OpenAI) independently analyze a patient's clinical context, cross-critique each other's findings through structured debate rounds, then synthesize their combined reasoning into five structured output categories.
+
+### Five Output Categories
+
+| Output | Description | Surfaces In |
+|---|---|---|
+| **Anticipatory Scenarios** | Clinical scenarios likely in next 30/90/180 days with probability | Provider dashboard (Deliberation tab) |
+| **Predicted Patient Questions** | Questions patient likely to ask at next encounter | Pre-encounter brief |
+| **Missing Data Flags** | Data gaps identified (marked if both models agreed) | Provider dashboard, care manager alert |
+| **Patient Nudges** | BCT-formatted behavioral nudges (SMS, push, portal) | Notification scheduler (pending review) |
+| **Knowledge Updates** | Patient-specific and core clinical knowledge | Feeds back into future deliberations |
+
+### Pipeline Phases
+
+```
+Phase 0: Context Compilation → PatientContextPackage
+Phase 1: Parallel Independent Analysis (Claude + GPT-4)
+Phase 2: Cross-Critique Rounds (up to 3, early stop on convergence)
+Phase 3: Unified Synthesis → DeliberationResult
+Phase 4: Behavioral Adaptation (SMS truncation, reading level)
+Phase 5: Knowledge Commit (atomic write to 4 DB tables)
+```
+
+### Database Tables (4 new)
+
+- `deliberations` — session record with convergence score and transcript
+- `deliberation_outputs` — five output categories per deliberation
+- `patient_knowledge` — accumulated patient-specific knowledge with temporal validity
+- `core_knowledge_updates` — shared clinical knowledge reinforcements
+
+### MCP Tools (4 new)
+
+- `run_deliberation` — trigger full 5-phase pipeline
+- `get_deliberation_results` — retrieve structured outputs per patient
+- `get_patient_knowledge` — query accumulated patient knowledge
+- `get_pending_nudges` — fetch undelivered nudges for scheduling
+
+### Cost Estimate
+
+~15,000-30,000 tokens per deliberation run (both models combined across all phases). At current pricing, approximately $0.15-0.30 per full deliberation session.
+
+### Known Limitations
+
+- Convergence detection uses Jaccard similarity (word overlap), not semantic similarity
+- Next improvement: replace `_compute_convergence` with MedCPT sentence embeddings
+- Vector store for guideline retrieval is currently a placeholder
+- Nudges queue for delivery but auto-send is disabled by default
 
 ---
 
