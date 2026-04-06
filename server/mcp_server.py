@@ -1141,7 +1141,7 @@ def _healthex_native_to_fhir_conditions(items: list[dict]) -> list[dict]:
                    or item.get("description") or "")
         status  = item.get("status") or "active"
         onset   = (item.get("onset_date") or item.get("onsetDate")
-                   or item.get("diagnosed_date") or "")
+                   or item.get("diagnosed_date") or item.get("onset") or "")
         out.append({
             "resourceType": "Condition",
             "code": {"coding": [{"code": code, "display": display,
@@ -1389,6 +1389,47 @@ async def ingest_from_healthex(
         written_by_table: dict[str, int] = {}
 
         async with pool.acquire() as conn:
+
+            # ── Patient existence guard ────────────────────────────────────────
+            exists = await conn.fetchval(
+                "SELECT id FROM patients WHERE id = $1::uuid",
+                patient_id,
+            )
+            if exists is None:
+                return json.dumps({
+                    "status": "error",
+                    "error": (
+                        f"patient_id '{patient_id}' not found in patients table. "
+                        "Call register_healthex_patient first."
+                    ),
+                })
+
+            # ── Raw text payload: cache and short-circuit ──────────────────────
+            # When fhir_data is a plain string (JSON-encoded HealthEx compressed
+            # text like '"#Conditions 5y|Total:39\n..."'), store it verbatim in
+            # raw_fhir_cache and return without attempting normalization.
+            if not isinstance(fhir_data, (dict, list)):
+                raw_text = str(fhir_data)
+                raw_id = str(_uuid_mod.uuid4())
+                await conn.execute(
+                    """INSERT INTO raw_fhir_cache
+                           (patient_id, source_name, resource_type, raw_json,
+                            fhir_resource_id, retrieved_at, processed)
+                       VALUES ($1,$2,$3,$4,$5,NOW(),false)
+                       ON CONFLICT (patient_id, source_name, fhir_resource_id)
+                       DO UPDATE SET raw_json=EXCLUDED.raw_json,
+                                     retrieved_at=NOW(), processed=false""",
+                    patient_id, "healthex", resource_type,
+                    json.dumps(raw_text), raw_id,
+                )
+                return json.dumps({
+                    "status": "ok",
+                    "patient_id": patient_id,
+                    "resource_type": resource_type,
+                    "records_written": {},
+                    "total_written": 0,
+                    "note": "raw text payload cached in raw_fhir_cache; normalization skipped",
+                }, indent=2)
 
             if resource_type == "summary":
                 # ── Fan-out: extract every clinical array from the summary ──

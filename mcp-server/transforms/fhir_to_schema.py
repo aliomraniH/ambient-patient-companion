@@ -99,11 +99,13 @@ def transform_conditions(
     for r in condition_resources:
         code_obj = r.get("code", {})
         coding = code_obj.get("coding", [{}])[0] if code_obj.get("coding") else {}
+        # Prefer coding.display; fall back to code.text when coding block is absent
+        display = coding.get("display", "") or code_obj.get("text", "")
         records.append({
             "id": str(uuid.uuid4()),
             "patient_id": patient_id,
             "code": coding.get("code", ""),
-            "display": coding.get("display", ""),
+            "display": display,
             "system": coding.get("system", ""),
             "onset_date": _parse_date(r.get("onsetDateTime")),
             "clinical_status": (
@@ -162,13 +164,16 @@ def transform_clinical_observations(
         if value is None:
             # Try component-based observations (e.g., BP)
             for comp in r.get("component", []):
-                comp_coding = comp.get("code", {}).get("coding", [{}])[0]
+                comp_code_obj = comp.get("code", {})
+                comp_coding = comp_code_obj.get("coding", [{}])[0] if comp_code_obj.get("coding") else {}
+                # Prefer coding.display; fall back to code.text
+                comp_display = comp_coding.get("display", "") or comp_code_obj.get("text", "")
                 comp_value = comp.get("valueQuantity", {})
                 if comp_value.get("value") is not None:
                     records.append({
                         "id": str(uuid.uuid4()),
                         "patient_id": patient_id,
-                        "metric_type": comp_coding.get("display", "").lower().replace(" ", "_"),
+                        "metric_type": comp_display.lower().replace(" ", "_"),
                         "value": float(comp_value["value"]),
                         "unit": comp_value.get("unit", ""),
                         "measured_at": _parse_date(r.get("effectiveDateTime")),
@@ -176,10 +181,12 @@ def transform_clinical_observations(
                     })
             continue
 
+        # Prefer coding.display; fall back to code.text when coding block is absent
+        metric_display = coding.get("display", "") or code_obj.get("text", "")
         records.append({
             "id": str(uuid.uuid4()),
             "patient_id": patient_id,
-            "metric_type": coding.get("display", "").lower().replace(" ", "_"),
+            "metric_type": metric_display.lower().replace(" ", "_"),
             "value": float(value),
             "unit": unit,
             "measured_at": _parse_date(r.get("effectiveDateTime")),
