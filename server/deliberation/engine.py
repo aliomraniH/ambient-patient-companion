@@ -19,8 +19,22 @@ from .behavioral_adapter import adapt_nudges
 from .knowledge_store import commit_deliberation
 
 
-_anthropic_client = anthropic.AsyncAnthropic()
-_openai_client = openai.AsyncOpenAI()
+_anthropic_client: anthropic.AsyncAnthropic | None = None
+_openai_client: openai.AsyncOpenAI | None = None
+
+
+def _get_anthropic_client() -> anthropic.AsyncAnthropic:
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.AsyncAnthropic()
+    return _anthropic_client
+
+
+def _get_openai_client() -> openai.AsyncOpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = openai.AsyncOpenAI()
+    return _openai_client
 
 
 def _load_prompt(filename: str, substitutions: dict) -> str:
@@ -33,7 +47,7 @@ def _load_prompt(filename: str, substitutions: dict) -> str:
 
 async def _call_claude(model: str, system: str, user: str,
                        max_tokens: int = 2048) -> str:
-    resp = await _anthropic_client.messages.create(
+    resp = await _get_anthropic_client().messages.create(
         model=model, max_tokens=max_tokens, system=system,
         messages=[{"role": "user", "content": user}]
     )
@@ -42,7 +56,7 @@ async def _call_claude(model: str, system: str, user: str,
 
 async def _call_gpt4(model: str, system: str, user: str,
                      max_tokens: int = 2048) -> str:
-    resp = await _openai_client.chat.completions.create(
+    resp = await _get_openai_client().chat.completions.create(
         model=model, max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": system},

@@ -14,8 +14,22 @@ from .schemas import IndependentAnalysis, PatientContextPackage
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
 GPT4_MODEL = "gpt-4o"
 
-_anthropic_client = anthropic.AsyncAnthropic()
-_openai_client = openai.AsyncOpenAI()
+_anthropic_client: anthropic.AsyncAnthropic | None = None
+_openai_client: openai.AsyncOpenAI | None = None
+
+
+def _get_anthropic_client() -> anthropic.AsyncAnthropic:
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.AsyncAnthropic()
+    return _anthropic_client
+
+
+def _get_openai_client() -> openai.AsyncOpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = openai.AsyncOpenAI()
+    return _openai_client
 
 
 def _load_prompt(filename: str, substitutions: dict) -> str:
@@ -39,7 +53,7 @@ async def _analyze_with_claude(
         "PRIOR_KNOWLEDGE_JSON": prior_knowledge_json
     })
 
-    response = await _anthropic_client.messages.create(
+    response = await _get_anthropic_client().messages.create(
         model=CLAUDE_MODEL,
         max_tokens=2048,
         system=system_prompt,
@@ -64,7 +78,7 @@ async def _analyze_with_gpt4(
         "PRIOR_KNOWLEDGE_JSON": prior_knowledge_json
     })
 
-    response = await _openai_client.chat.completions.create(
+    response = await _get_openai_client().chat.completions.create(
         model=GPT4_MODEL,
         max_tokens=2048,
         messages=[

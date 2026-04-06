@@ -48,13 +48,21 @@ async def test_commit_writes_to_deliberations_table():
     from server.deliberation.knowledge_store import commit_deliberation
 
     mock_conn = AsyncMock()
-    mock_transaction = AsyncMock()
-    mock_conn.transaction.return_value.__aenter__ = AsyncMock(return_value=mock_transaction)
-    mock_conn.transaction.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    # transaction() must return an async context manager directly (not a coroutine).
+    # AsyncMock makes transaction() a coroutine, so override with MagicMock.
+    mock_tx_cm = MagicMock()
+    mock_tx_cm.__aenter__ = AsyncMock(return_value=None)
+    mock_tx_cm.__aexit__ = AsyncMock(return_value=None)
+    mock_conn.transaction = MagicMock(return_value=mock_tx_cm)
+
+    # pool.acquire() must return an async context manager
+    mock_acquire_cm = MagicMock()
+    mock_acquire_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_acquire_cm.__aexit__ = AsyncMock(return_value=None)
 
     mock_pool = MagicMock()
-    mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-    mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+    mock_pool.acquire.return_value = mock_acquire_cm
 
     result = _make_minimal_result()
     dlb_id = await commit_deliberation(
