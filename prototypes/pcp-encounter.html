@@ -27,6 +27,53 @@
     .action-list li { padding: 0.5rem 0; border-bottom: 1px solid #f0f0f0; font-size: 0.875rem; }
     .action-list li::before { content: '→'; color: #6c63ff; margin-right: 0.5rem; font-weight: 700; }
     .caveat { font-size: 0.8125rem; color: #888; font-style: italic; margin-top: 0.5rem; }
+
+    /* ── Tab navigation ──────────────────────────────────────────────── */
+    .tab-bar { display: flex; gap: 0; background: #fff; border-bottom: 2px solid #e0e0e0; padding: 0 2rem; max-width: 1400px; margin: 0 auto; }
+    .tab-btn { padding: 0.75rem 1.25rem; border: none; background: transparent; cursor: pointer; font-size: 0.875rem; font-weight: 600; color: #888; border-bottom: 3px solid transparent; transition: all 0.2s; }
+    .tab-btn:hover { color: #4a4a6a; }
+    .tab-btn.active { color: #6c63ff; border-bottom-color: #6c63ff; }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    /* ── Deliberation panel styles ───────────────────────────────────── */
+    .deliberation-panel { max-width: 1400px; margin: 1.5rem auto; padding: 0 2rem; }
+    .deliberation-header { display: flex; gap: 1.5rem; align-items: center; padding: 1rem; background: #f0f0ff; border-radius: 8px; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .dlb-meta, .dlb-convergence, .dlb-rounds { font-size: 0.875rem; color: #4a4a6a; }
+    .dlb-convergence { font-weight: 700; color: #6c63ff; }
+    .btn-trigger-small, .btn-trigger-deliberation { background: #6c63ff; color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.8125rem; font-weight: 600; }
+    .btn-trigger-small:hover, .btn-trigger-deliberation:hover { background: #5548d4; }
+    .dlb-section { background: #fff; border-radius: 12px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 1.25rem; }
+    .dlb-section h4 { font-size: 1rem; font-weight: 600; color: #4a4a6a; margin-bottom: 0.75rem; border-bottom: 2px solid #6c63ff; padding-bottom: 0.5rem; }
+    .deliberation-scenario { background: #f9f9fb; border-left: 4px solid #6c63ff; padding: 1rem; margin-bottom: 0.75rem; border-radius: 0 8px 8px 0; }
+    .deliberation-scenario.high-prob { border-left-color: #dc2626; }
+    .scenario-header { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 0.5rem; }
+    .scenario-badge { background: #6c63ff; color: #fff; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
+    .scenario-title { font-weight: 600; font-size: 0.9375rem; }
+    .scenario-prob { margin-left: auto; font-weight: 700; color: #4a4a6a; }
+    .scenario-desc { font-size: 0.875rem; line-height: 1.5; color: #333; }
+    .scenario-footer { display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.8125rem; color: #888; }
+    .dissent-flag { background: #fff3cd; padding: 0.5rem; border-radius: 4px; font-size: 0.8125rem; margin-top: 0.5rem; }
+    .data-flag { display: flex; gap: 0.75rem; padding: 0.75rem; margin-bottom: 0.5rem; background: #f9f9fb; border-radius: 8px; }
+    .data-flag.critical { border-left: 4px solid #dc2626; }
+    .data-flag.high { border-left: 4px solid #f97316; }
+    .data-flag.medium { border-left: 4px solid #eab308; }
+    .data-flag.low { border-left: 4px solid #3b82f6; }
+    .flag-body strong { text-transform: capitalize; }
+    .flag-body p { font-size: 0.875rem; margin: 0.25rem 0; }
+    .flag-body em { font-size: 0.8125rem; color: #6c63ff; }
+    .consensus-badge { display: inline-block; background: #d1fae5; color: #065f46; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.6875rem; font-weight: 600; margin-left: 0.5rem; }
+    .predicted-question { padding: 0.75rem; margin-bottom: 0.5rem; background: #f9f9fb; border-radius: 8px; }
+    .q-text { font-weight: 600; font-size: 0.9375rem; }
+    .q-likelihood { font-size: 0.75rem; color: #888; font-weight: 400; }
+    .q-response { font-size: 0.875rem; margin-top: 0.5rem; line-height: 1.5; }
+    .nudge-card { padding: 0.75rem; margin-bottom: 0.5rem; background: #f0f0ff; border-radius: 8px; }
+    .nudge-trigger { font-weight: 600; font-size: 0.875rem; margin-bottom: 0.25rem; }
+    .nudge-sms { font-size: 0.875rem; color: #333; }
+    .nudge-technique { font-size: 0.75rem; color: #888; margin-top: 0.25rem; }
+    .deliberation-empty, .deliberation-loading, .deliberation-error { text-align: center; padding: 3rem 2rem; color: #4a4a6a; }
+    .deliberation-loading { color: #6c63ff; font-weight: 600; }
+    .deliberation-error { color: #dc2626; }
   </style>
 </head>
 <body>
@@ -40,6 +87,12 @@
     <span>Encounter: April 5, 2026 • 9:00 AM</span>
   </div>
 
+  <div class="tab-bar">
+    <button class="tab-btn active" data-tab="clinical">Clinical Workspace</button>
+    <button class="tab-btn" data-tab="deliberation">AI Deliberation</button>
+  </div>
+
+  <div class="tab-pane active" id="tab-clinical">
   <div class="workspace">
     <div class="panel">
       <h2>Clinical Decision Support</h2>
@@ -114,7 +167,32 @@
     </div>
   </div>
 
+  </div><!-- /tab-clinical -->
+
+  <div class="tab-pane" id="tab-deliberation">
+    <div id="deliberation-panel-container"></div>
+  </div>
+
   <script src="../shared/claude-client.js"></script>
-  <script>console.log('Ambient clinical layer ready — Phase 1');</script>
+  <script src="components/deliberation-panel.js"></script>
+  <script>
+    console.log('Ambient clinical layer ready — Phase 1 + Deliberation');
+
+    // Tab switching
+    document.querySelectorAll('.tab-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+        document.querySelectorAll('.tab-pane').forEach(function(p) { p.classList.remove('active'); });
+        btn.classList.add('active');
+        var tabId = 'tab-' + btn.getAttribute('data-tab');
+        document.getElementById(tabId).classList.add('active');
+
+        // Load deliberation panel on first click
+        if (btn.getAttribute('data-tab') === 'deliberation') {
+          DeliberationPanel.load('4829341', 'deliberation-panel-container');
+        }
+      });
+    });
+  </script>
 </body>
 </html>

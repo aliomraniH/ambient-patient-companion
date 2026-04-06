@@ -1,0 +1,165 @@
+"""
+schemas.py — Pydantic models for the Dual-LLM Deliberation Engine.
+Every inter-phase data transfer uses these models.
+"""
+from __future__ import annotations
+from datetime import datetime
+from typing import Optional
+from uuid import UUID
+from pydantic import BaseModel, Field, field_validator
+
+
+# ── INPUT ─────────────────────────────────────────────────────────────────────
+
+class PatientContextPackage(BaseModel):
+    """Phase 0 output / Phase 1 input. Complete patient context."""
+    patient_id: str
+    patient_name: str
+    age: int
+    sex: str
+    mrn: str
+    primary_provider: str
+    practice: str
+    # Clinical state
+    active_conditions: list[dict]       # [{code, display, onset_date}]
+    current_medications: list[dict]     # [{name, dose, frequency, start_date}]
+    recent_labs: list[dict]             # [{name, value, unit, date, in_range}]
+    vital_trends: list[dict]            # [{name, readings: [{value, date}]}]
+    care_gaps: list[dict]               # [{gap_type, last_done, due_date}]
+    sdoh_flags: list[str]               # ["food_insecurity", "transportation_barrier"]
+    # Prior deliberation knowledge
+    prior_patient_knowledge: list[dict] # from patient_knowledge table (is_current=true)
+    # Relevant guidelines (pre-fetched from vector store)
+    applicable_guidelines: list[dict]
+    # Temporal context
+    upcoming_appointments: list[dict]
+    days_since_last_encounter: int
+    deliberation_trigger: str
+
+
+class DeliberationRequest(BaseModel):
+    """Input to engine.run()"""
+    patient_id: str
+    trigger_type: str
+    max_rounds: int = Field(default=3, ge=1, le=5)
+    force_round_count: Optional[int] = None   # override convergence detection
+
+
+# ── PHASE 1 OUTPUTS ───────────────────────────────────────────────────────────
+
+class ClaimWithConfidence(BaseModel):
+    claim: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+class IndependentAnalysis(BaseModel):
+    """Output of Phase 1 from each model."""
+    model_id: str                        # 'claude-sonnet-4' or 'gpt-4o'
+    role_emphasis: str                   # 'diagnostic_reasoning' or 'treatment_optimization'
+    key_findings: list[ClaimWithConfidence]
+    risk_flags: list[ClaimWithConfidence]
+    recommended_actions: list[ClaimWithConfidence]
+    anticipated_trajectory: str          # narrative 3-6 month outlook
+    missing_data_identified: list[str]
+    raw_reasoning: str                   # full CoT, stored for audit
+
+
+# ── PHASE 2 OUTPUTS ───────────────────────────────────────────────────────────
+
+class CritiqueItem(BaseModel):
+    target_claim: str
+    critique_type: str  # 'factual_error'|'logical_gap'|'missed_consideration'|'overconfidence'
+    critique_text: str
+    suggested_revision: Optional[str] = None
+    severity: str  # 'blocking'|'moderate'|'minor'
+
+class CrossCritique(BaseModel):
+    critic_model: str
+    target_model: str
+    round_number: int
+    critique_items: list[CritiqueItem]
+    areas_of_agreement: list[str]
+    raw_critique: str
+
+class RevisedAnalysis(BaseModel):
+    model_id: str
+    round_number: int
+    revised_findings: list[ClaimWithConfidence]
+    revisions_made: list[str]       # what changed and why
+    maintained_positions: list[str] # what was defended and why
+    raw_revision: str
+
+
+# ── PHASE 3 OUTPUTS (Final Synthesis) ─────────────────────────────────────────
+
+class AnticipatoryScenario(BaseModel):
+    scenario_id: str
+    timeframe: str              # 'next_30_days'|'next_90_days'|'next_6_months'
+    title: str
+    description: str
+    probability: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    clinical_implications: str
+    evidence_basis: list[str]
+    dissenting_view: Optional[str] = None  # preserved if models did not converge
+
+class PredictedPatientQuestion(BaseModel):
+    question: str
+    likelihood: float = Field(ge=0.0, le=1.0)
+    category: str   # 'medication_understanding'|'risk_awareness'|'lifestyle'|'logistics'
+    suggested_response: str  # plain language, 6th grade reading level
+    reading_level: str
+    behavioral_framing: str  # 'facilitator'|'spark'|'sustainer'
+
+class MissingDataFlag(BaseModel):
+    flag_id: str
+    priority: str   # 'critical'|'high'|'medium'|'low'
+    data_type: str  # 'lab_result'|'social_determinant'|'screening'|'medication_history'
+    description: str
+    clinical_relevance: str
+    recommended_action: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    both_models_agreed: bool = False
+
+class NudgeContent(BaseModel):
+    nudge_id: str
+    target: str         # 'patient'|'care_team'
+    trigger_condition: str
+    behavioral_technique: str   # BCT taxonomy code, e.g. 'BCT_1.4_action_planning'
+    com_b_target: str           # COM-B model component targeted
+    channels: dict              # {'sms': str, 'push_notification': dict, 'portal': str}
+    reading_level: str
+    personalization_factors: list[str]
+    decay_schedule: Optional[str] = None
+
+class KnowledgeUpdate(BaseModel):
+    update_type: str        # 'reinforcement'|'revision'|'new_inference'
+    scope: str              # 'core'|'patient_specific'
+    entry_text: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    valid_from: datetime
+    valid_until: Optional[datetime] = None
+    supersedes: Optional[str] = None
+    evidence: list[str] = Field(default_factory=list)
+
+class DeliberationResult(BaseModel):
+    """Complete output of the engine. Maps directly to DB tables."""
+    deliberation_id: str
+    patient_id: str
+    timestamp: datetime
+    trigger: str
+    models: dict
+    rounds_completed: int
+    convergence_score: float
+    total_tokens: int
+    total_latency_ms: int
+    # Five output categories
+    anticipatory_scenarios: list[AnticipatoryScenario]
+    predicted_patient_questions: list[PredictedPatientQuestion]
+    missing_data_flags: list[MissingDataFlag]
+    nudge_content: list[NudgeContent]
+    knowledge_updates: list[KnowledgeUpdate]
+    # Preserved disagreements requiring clinician attention
+    unresolved_disagreements: list[dict]
+    # Full audit trail
+    transcript: dict  # stored to deliberations.transcript (JSONB)
