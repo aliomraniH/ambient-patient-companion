@@ -97,9 +97,33 @@ KEY_META = {
     "MCP_CLINICAL_INTELLIGENCE_URL": {
         "category":    "AUTO",
         "label":       "MCP · Clinical Intelligence",
-        "description": "FastMCP clinical decision support server (Phase 1) — guardrails, guidelines, drug interactions.",
+        "description": "FastMCP clinical decision support server (Phase 1 + Deliberation) — guardrails, guidelines, drug interactions, dual-LLM deliberation.",
         "secret":      False,
         "default":     "http://localhost:8001/mcp",
+        "help_url":    None,
+    },
+    "DELIBERATION_ENABLED": {
+        "category":    "AUTO",
+        "label":       "Deliberation Engine Enabled",
+        "description": "Enable the Dual-LLM Deliberation Engine (Claude + GPT-4). Requires OPENAI_API_KEY.",
+        "secret":      False,
+        "default":     "true",
+        "help_url":    None,
+    },
+    "DELIBERATION_MAX_ROUNDS": {
+        "category":    "AUTO",
+        "label":       "Deliberation Max Critique Rounds",
+        "description": "Maximum cross-critique rounds before forced synthesis. Default 3.",
+        "secret":      False,
+        "default":     "3",
+        "help_url":    None,
+    },
+    "DELIBERATION_CONVERGENCE_THRESHOLD": {
+        "category":    "AUTO",
+        "label":       "Deliberation Convergence Threshold",
+        "description": "Similarity score (0.0–1.0) at which Claude + GPT-4 are considered converged. Default 0.90.",
+        "secret":      False,
+        "default":     "0.90",
         "help_url":    None,
     },
 
@@ -173,6 +197,18 @@ KEY_META = {
     },
 
     # ── Third-party tokens ─────────────────────────────────────────────────
+    "OPENAI_API_KEY": {
+        "category":    "THIRD_PARTY",
+        "label":       "OpenAI API Key",
+        "description": "Required for GPT-4 in the Dual-LLM Deliberation Engine. Claude and GPT-4 cross-critique each other's clinical analysis.",
+        "secret":      True,
+        "default":     "",
+        "provider":    "OpenAI",
+        "get_url":     "https://platform.openai.com/api-keys",
+        "get_steps":   "Sign up → API Keys → Create new secret key",
+        "free_tier":   False,
+        "help_url":    "https://platform.openai.com/api-keys",
+    },
     "ANTHROPIC_API_KEY": {
         "category":    "THIRD_PARTY",
         "label":       "Anthropic API Key",
