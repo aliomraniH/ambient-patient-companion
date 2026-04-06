@@ -1,0 +1,413 @@
+# Replit Agent — Fix Two HealthEx Ingest Bugs
+
+## Context
+
+This is the ambient-patient-companion project. The MCP server at `/mcp-skills` exposes
+`ingest_from_healthex` and `register_healthex_patient`. We ran a full live test session
+against a real HealthEx patient (UUID `ce1600a3-8760-4928-87fd-2f8628851979`,
+MRN `ALI_OMRANI_HEALTHEX`) and found two bugs that prevent data from reaching the
+warehouse correctly. Fix both.
+
+---
+
+## Bug 1 — `ingest_from_healthex(resource_type="summary")` ignores the `patient_id` argument
+
+### Observed behavior
+
+```
+register_healthex_patient(mrn_override="ALI_OMRANI_HEALTHEX")
+→ { "patient_id": "ce1600a3-8760-4928-87fd-2f8628851979", "status": "registered" }
+
+ingest_from_healthex(patient_id="ce1600a3-...", resource_type="summary", fhir_json={...})
+→ { "patient_id": "4cf9df2c-cfb9-4fde-8a88-3176663bcdfb", "records_written": 1 }
+```
+
+Every call to ingest summary returns a **different UUID** from the one passed in —
+`5731b6fb` the first time, `4cf9df2c` the second. `register_healthex_patient` was
+fixed and now correctly returns `ce1600a3` on re-registration, but the fix did not
+propagate to the ingest normalizer.
+
+### Root cause
+
+The summary normalizer has its own patient-lookup / patient-creation path. It extracts
+identity fields from the `fhir_json` payload (`patient_name`, `dob`, `mrn`, or FHIR
+`Patient.identifier`) and does its own `SELECT` / `INSERT` into the `patients` table,
+completely ignoring the `patient_id` UUID argument passed to the tool. Each time the
+payload contains slightly different fields the conflict resolver creates or finds a
+different row.
+
+### Fix required
+
+In the file that handles `resource_type == "summary"` inside `ingest_from_healthex`
+(likely `ingestion/normalizers/summary_normalizer.py` or similar):
+
+1. **The `patient_id` argument must be used as the authoritative key.** Do not perform
+   any patient lookup or insertion from the summary payload. Trust the UUID that was
+   passed in.
+
+2. Replace any code that looks like this:
+   ```python
+   patient = find_or_create_patient_from_payload(fhir_json)
+   patient_id = patient["id"]
+   ```
+   With:
+   ```python
+   # patient_id is provided by the caller — do not override it
+   # validate it exists in the patients table, raise if not found
+   patient = db.query("SELECT id FROM patients WHERE id = $1", patient_id)
+   if not patient:
+       raise ValueError(f"Patient {patient_id} not registered. Call register_healthex_patient first.")
+   ```
+
+3. Write the summary blob (or its extracted fields) using the caller-provided
+   `patient_id`, not one derived from the payload.
+
+4. The same guard must apply to **all** resource types (`labs`, `conditions`,
+   `medications`, `encounters`) — verify they all use `patient_id` from the argument,
+   not from payload extraction.
+
+### Verification
+
+After the fix, this sequence must produce consistent UUIDs:
+```
+register_healthex_patient(mrn_override="ALI_OMRANI_HEALTHEX")
+→ patient_id: "ce1600a3-..."
+
+ingest_from_healthex(patient_id="ce1600a3-...", resource_type="summary", ...)
+→ patient_id: "ce1600a3-..."   ← must match
+
+ingest_from_healthex(patient_id="ce1600a3-...", resource_type="labs", ...)
+→ patient_id: "ce1600a3-..."   ← must match
+```
+
+---
+
+## Bug 2 — `ingest_from_healthex` writes 1 blob per call instead of N normalized rows
+
+### Observed behavior
+
+```python
+# Labs — FHIR Bundle with 10 Observation resources
+ingest_from_healthex(patient_id="ce1600a3-...", resource_type="labs",
+                     fhir_json='{"resourceType":"Bundle","entry":[...10 observations...]}')
+→ { "records_written": 0 }   # nothing written despite valid FHIR
+
+# Conditions — JSON dict with array
+ingest_from_healthex(patient_id="ce1600a3-...", resource_type="conditions",
+                     fhir_json='{"conditions":[...15 items...]}')
+→ { "records_written": 1 }   # entire array stored as 1 blob
+
+# Raw HealthEx compressed table format (from get_conditions tool)
+ingest_from_healthex(patient_id="ce1600a3-...", resource_type="conditions",
+                     fhir_json='"#Conditions 5y|Total:39\nDate|Condition|..."')
+→ Error: 'str' object has no attribute 'get'
+```
+
+`check_data_freshness` confirms `records_count: 3` total — one blob per resource type,
+not individual rows. The deliberation engine's context compiler queries individual table
+rows and finds nothing, producing generic "data-sparse patient" outputs instead of
+clinically specific analysis.
+
+### Root cause — three sub-problems
+
+**2a — FHIR Bundle → `records_written: 0`**
+
+The labs normalizer receives the Bundle but writes nothing. Likely causes:
+- It iterates `entry[]` but then calls `.get("resource", {})` and the inner Observation
+  fields aren't mapped to the expected column names
+- The FHIR field path for the test name is `code.text` or `code.coding[0].display`,
+  but the normalizer looks for a flat `name` key
+- The normalizer may silently skip rows when required fields are missing rather than
+  raising, producing `records_written: 0`
+
+**2b — JSON dict → 1 blob instead of N rows**
+
+The normalizer receives `{"conditions": [...array...]}` and writes the entire dict as
+a single JSON column value rather than iterating the array. The
+`INSERT INTO conditions (...) VALUES (...)` is called once with the whole payload
+instead of once per array element.
+
+**2c — Raw HealthEx text format → `'str' object has no attribute 'get'`**
+
+The normalizer does `payload.get("conditions")` without first checking
+`isinstance(payload, dict)`. When HealthEx returns its compressed table format
+(a plain string starting with `#Conditions 5y|Total:...`), `json.loads()` of a
+JSON string literal produces a Python `str`, and `.get()` on a `str` raises
+`AttributeError`.
+
+### Fix required
+
+**Step 1 — Fix the JSON parsing entry point**
+
+In the `ingest_from_healthex` tool handler, before dispatching to any normalizer:
+
+```python
+import json
+
+raw = fhir_json  # the string argument
+
+# Parse outer JSON
+try:
+    payload = json.loads(raw)
+except json.JSONDecodeError:
+    # HealthEx raw text format (compressed table, plain text summary)
+    # Store as-is in raw_cache only; do not attempt normalization
+    write_raw_cache(patient_id, resource_type, raw)
+    return {"status": "ok", "records_written": 0, "note": "raw text stored, normalization skipped"}
+
+# Guard: payload must be a dict, not a string (handles JSON-encoded strings)
+if not isinstance(payload, dict):
+    write_raw_cache(patient_id, resource_type, raw)
+    return {"status": "ok", "records_written": 0, "note": "non-dict payload stored in raw cache"}
+```
+
+**Step 2 — Fix the labs normalizer (FHIR Bundle → individual rows)**
+
+```python
+def normalize_labs(payload: dict, patient_id: str) -> list[dict]:
+    rows = []
+
+    # Handle FHIR Bundle
+    entries = payload.get("entry", [])
+    for entry in entries:
+        resource = entry.get("resource", {})
+        if resource.get("resourceType") != "Observation":
+            continue
+
+        # Extract test name — try multiple FHIR field paths
+        code = resource.get("code", {})
+        name = (
+            code.get("text")
+            or (code.get("coding") or [{}])[0].get("display")
+            or (code.get("coding") or [{}])[0].get("code")
+            or "Unknown"
+        )
+
+        # Extract value
+        vq = resource.get("valueQuantity", {})
+        value = vq.get("value")
+        unit = vq.get("unit", "")
+
+        # Extract reference range
+        ref_ranges = resource.get("referenceRange", [{}])
+        ref = ref_ranges[0].get("text", "") if ref_ranges else ""
+
+        # Extract date
+        date = (
+            resource.get("effectiveDateTime")
+            or resource.get("effectivePeriod", {}).get("start")
+        )
+
+        # Extract interpretation flag
+        interps = resource.get("interpretation", [{}])
+        interp_code = ""
+        if interps:
+            codings = interps[0].get("coding", [{}])
+            interp_code = codings[0].get("code", "") if codings else ""
+
+        if name and value is not None:
+            rows.append({
+                "patient_id": patient_id,
+                "test_name": name,
+                "value": str(value),
+                "unit": unit,
+                "ref_range": ref,
+                "status": "out_of_range" if interp_code in ("H", "L", "A") else "normal",
+                "date": date,
+                "source": "healthex",
+            })
+
+    # Also handle flat HealthEx summary dict format: {"labs": [...]}
+    for item in payload.get("labs", []):
+        if isinstance(item, dict) and item.get("name") and item.get("value") is not None:
+            rows.append({
+                "patient_id": patient_id,
+                "test_name": item["name"],
+                "value": str(item["value"]),
+                "unit": item.get("unit", ""),
+                "ref_range": item.get("ref", ""),
+                "status": item.get("status", "unknown"),
+                "date": item.get("date"),
+                "source": "healthex",
+            })
+
+    return rows
+```
+
+Then write each row individually:
+```python
+records_written = 0
+for row in normalize_labs(payload, patient_id):
+    db.insert("lab_results", row)   # upsert on (patient_id, test_name, date)
+    records_written += 1
+return {"status": "ok", "records_written": records_written, "patient_id": patient_id}
+```
+
+**Step 3 — Fix the conditions normalizer (1 blob → N rows)**
+
+```python
+def normalize_conditions(payload: dict, patient_id: str) -> list[dict]:
+    rows = []
+    items = payload.get("conditions", [])
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        rows.append({
+            "patient_id": patient_id,
+            "name": item.get("name", ""),
+            "icd10": item.get("icd10", ""),
+            "snomed": item.get("snomed", ""),
+            "status": item.get("status", "unknown"),
+            "onset_date": item.get("onset"),
+            "abatement_date": item.get("resolved") or item.get("abatement_date"),
+            "source": "healthex",
+        })
+
+    # Also handle FHIR Bundle of Condition resources
+    for entry in payload.get("entry", []):
+        resource = entry.get("resource", {})
+        if resource.get("resourceType") != "Condition":
+            continue
+        code = resource.get("code", {})
+        name = code.get("text", "")
+        icd = next((c.get("code","") for c in code.get("coding",[])
+                    if "icd-10" in c.get("system","")), "")
+        status_obj = resource.get("clinicalStatus", {})
+        status_code = (status_obj.get("coding") or [{}])[0].get("code", "unknown")
+        onset = resource.get("onsetDateTime") or resource.get("onsetPeriod",{}).get("start")
+        abatement = resource.get("abatementDateTime")
+        rows.append({
+            "patient_id": patient_id,
+            "name": name,
+            "icd10": icd,
+            "status": status_code,
+            "onset_date": onset,
+            "abatement_date": abatement,
+            "source": "healthex",
+        })
+
+    return rows
+```
+
+**Step 4 — Fix the encounters normalizer (extract last_visit_date)**
+
+The context compiler calculates care gap as `NOW() - MAX(encounter_date)`. This only
+works if each encounter is a separate row with a queryable `date` column. Fix:
+
+```python
+def normalize_encounters(payload: dict, patient_id: str) -> list[dict]:
+    rows = []
+    visits = payload.get("visits", payload.get("encounters", []))
+
+    for visit in visits:
+        if not isinstance(visit, dict):
+            continue
+        rows.append({
+            "patient_id": patient_id,
+            "encounter_date": visit.get("date") or visit.get("start"),
+            "encounter_type": visit.get("type", ""),
+            "department": visit.get("dept", ""),
+            "diagnoses": visit.get("diagnoses", ""),
+            "notes": visit.get("notes", ""),
+            "source": "healthex",
+        })
+
+    return rows
+```
+
+This is what fixes the "999 days since last visit" error in deliberation — once
+`2025-06-26` exists as an actual `encounter_date` column value, `MAX(encounter_date)`
+returns it correctly.
+
+**Step 5 — Fix the medications normalizer**
+
+Same pattern as conditions — iterate `payload.get("medications", [])` and write one
+row per item, not one blob.
+
+---
+
+## Verification checklist
+
+After implementing all fixes, run this exact sequence and confirm all assertions:
+
+```python
+# 1. Register
+result = register_healthex_patient(
+    health_summary_json='{"patient_name":"Test","dob":"1987-03-25","mrn":"TEST_001"}',
+    mrn_override="TEST_001"
+)
+patient_id = result["patient_id"]
+assert result["status"] == "registered"
+
+# 2. Re-register same MRN — must return same UUID (already fixed)
+result2 = register_healthex_patient(
+    health_summary_json='{"patient_name":"Test","dob":"1987-03-25","mrn":"TEST_001"}',
+    mrn_override="TEST_001"
+)
+assert result2["patient_id"] == patient_id  # Bug 1 verify for register
+
+# 3. Ingest summary — must return same UUID
+r = ingest_from_healthex(patient_id=patient_id, resource_type="summary",
+    fhir_json='{"patient_name":"Test","last_visit":"2025-06-26"}')
+assert r["patient_id"] == patient_id        # Bug 1 verify for ingest
+assert r["records_written"] >= 1
+
+# 4. Ingest labs FHIR Bundle — must write > 0 rows
+r = ingest_from_healthex(patient_id=patient_id, resource_type="labs",
+    fhir_json='{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Observation","code":{"text":"HbA1c"},"valueQuantity":{"value":4.8,"unit":"%"},"effectiveDateTime":"2025-07-11"}}]}')
+assert r["records_written"] >= 1            # Bug 2a verify
+
+# 5. Ingest conditions dict — must write N rows not 1 blob
+r = ingest_from_healthex(patient_id=patient_id, resource_type="conditions",
+    fhir_json='{"conditions":[{"name":"Prediabetes","status":"active","onset":"2017-04-25"},{"name":"Fatty liver","status":"active","onset":"2017-01-01"}]}')
+assert r["records_written"] == 2            # Bug 2b verify — 2 items → 2 rows
+
+# 6. Ingest encounters dict — must write N rows with queryable dates
+r = ingest_from_healthex(patient_id=patient_id, resource_type="encounters",
+    fhir_json='{"visits":[{"date":"2025-06-26","type":"Office Visit"},{"date":"2023-12-13","type":"Office Visit"}]}')
+assert r["records_written"] == 2            # Bug 2 verify for encounters
+
+# 7. Raw HealthEx text format — must NOT crash, must store in raw cache gracefully
+r = ingest_from_healthex(patient_id=patient_id, resource_type="conditions",
+    fhir_json='"#Conditions 5y|Total:39\\nDate|Condition|..."')
+assert r["status"] == "ok"                  # Bug 2c verify — no AttributeError
+
+# 8. check_data_freshness — records_count must reflect individual rows
+freshness = check_data_freshness(patient_id=patient_id)
+assert freshness["sources"][0]["records_count"] >= 5  # not just 3 blobs
+```
+
+---
+
+## Context compiler — one additional fix needed
+
+After the normalizers are fixed, verify the deliberation context compiler reads from the
+correct tables. Look for the query that calculates `days_since_last_encounter` or
+`last_visit`. It should be:
+
+```sql
+SELECT MAX(encounter_date) FROM encounters WHERE patient_id = $1
+```
+
+Not a JSON extraction from a blob column. If it's doing something like:
+```sql
+SELECT data->>'last_visit' FROM patient_summaries WHERE patient_id = $1
+```
+Update it to query the normalized `encounters` table instead.
+
+---
+
+## Files to look at first
+
+Search the codebase for these patterns to locate the relevant files:
+
+```bash
+grep -r "ingest_from_healthex\|normalize_labs\|normalize_conditions\|resource_type.*summary" . --include="*.py" -l
+grep -r "records_written\|patient_id.*fhir_json\|find_or_create_patient" . --include="*.py" -l
+grep -r "days_since_last\|last_encounter\|MAX(encounter" . --include="*.py" -l
+```
+
+The MCP tool definitions are likely in `mcp_skills/` or `server/skills/`. The normalizers
+are likely in `ingestion/adapters/healthex/` or `ingestion/normalizers/`. The context
+compiler is likely in `deliberation/context_compiler.py` or `agents/deliberation/`.
