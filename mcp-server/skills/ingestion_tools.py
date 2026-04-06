@@ -49,6 +49,251 @@ async def _set_data_track(track: str, tool_name: str) -> str:
     return track
 
 
+async def register_healthex_patient(
+    health_summary_json: str,
+    mrn_override: str = "",
+) -> str:
+    """Register a real HealthEx patient in the warehouse.
+
+    MUST be called before any ingest_from_healthex calls in a HealthEx
+    session. Takes the raw JSON from HealthEx get_health_summary, creates
+    or finds the patient row with is_synthetic=False, initialises
+    data_sources and source_freshness rows, and returns the canonical
+    patient_id UUID and MRN for all subsequent calls.
+
+    Also sets DATA_TRACK = "healthex" in system_config so all future
+    pipeline runs use the HealthEx adapter.
+
+    Args:
+        health_summary_json: Raw JSON string from HealthEx get_health_summary.
+                             May be a FHIR Patient resource, a FHIR Bundle,
+                             or a HealthEx summary dict — all are handled.
+        mrn_override:        If provided, use this MRN instead of extracting
+                             from the summary.
+
+    Returns:
+        JSON string with patient_id, mrn, and status.
+    """
+    import time
+    pool = await get_pool()
+    try:
+        start = time.time()
+        summary = json.loads(health_summary_json)
+
+        patient_resource: dict = {}
+
+        if summary.get("resourceType") == "Patient":
+            patient_resource = summary
+
+        elif summary.get("resourceType") == "Bundle":
+            for entry in summary.get("entry", []):
+                res = entry.get("resource", {})
+                if res.get("resourceType") == "Patient":
+                    patient_resource = res
+                    break
+            if not patient_resource:
+                return (
+                    "Error: FHIR Bundle contained no Patient resource. "
+                    "Pass the raw get_health_summary JSON directly."
+                )
+
+        else:
+            name_parts = summary.get("name", summary.get("full_name", ""))
+            if isinstance(name_parts, str):
+                parts = name_parts.strip().split()
+                given = parts[:-1] if len(parts) > 1 else parts
+                family = parts[-1] if len(parts) > 1 else ""
+            else:
+                given = [name_parts.get("first", "")]
+                family = name_parts.get("last", "")
+
+            patient_resource = {
+                "resourceType": "Patient",
+                "id": summary.get("id", ""),
+                "name": [{"given": given, "family": family}],
+                "birthDate": summary.get(
+                    "birth_date",
+                    summary.get("dob", summary.get("date_of_birth", "")),
+                ),
+                "gender": summary.get("gender", summary.get("sex", "")),
+                "identifier": [],
+                "address": [
+                    {
+                        "line": [summary.get("address", "")],
+                        "city": summary.get("city", ""),
+                        "state": summary.get("state", ""),
+                        "postalCode": summary.get("zip", summary.get("zip_code", "")),
+                    }
+                ],
+            }
+            raw_mrn = (
+                mrn_override
+                or summary.get("mrn")
+                or summary.get("patient_id")
+                or summary.get("id")
+                or ""
+            )
+            if raw_mrn:
+                patient_resource["identifier"] = [
+                    {"type": {"coding": [{"code": "MR"}]}, "value": str(raw_mrn)}
+                ]
+
+        from transforms.fhir_to_schema import transform_patient
+
+        demo = transform_patient(
+            patient_resource,
+            data_source="healthex",
+            is_synthetic=False,
+        )
+
+        if mrn_override:
+            demo["mrn"] = mrn_override
+
+        if not demo.get("mrn"):
+            demo["mrn"] = f"HX-{uuid.uuid4().hex[:8].upper()}"
+            logger.warning(
+                "register_healthex_patient: no MRN found, generated: %s",
+                demo["mrn"],
+            )
+
+        new_id = str(uuid.uuid4())
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO patients
+                    (id, mrn, first_name, last_name, birth_date, gender,
+                     race, ethnicity, address_line, city, state, zip_code,
+                     is_synthetic, created_at, data_source)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                ON CONFLICT (mrn) DO UPDATE SET
+                    first_name   = EXCLUDED.first_name,
+                    last_name    = EXCLUDED.last_name,
+                    birth_date   = EXCLUDED.birth_date,
+                    gender       = EXCLUDED.gender,
+                    race         = EXCLUDED.race,
+                    ethnicity    = EXCLUDED.ethnicity,
+                    address_line = EXCLUDED.address_line,
+                    city         = EXCLUDED.city,
+                    state        = EXCLUDED.state,
+                    zip_code     = EXCLUDED.zip_code,
+                    is_synthetic = false,
+                    data_source  = 'healthex'
+                """,
+                new_id,
+                demo["mrn"],
+                demo.get("first_name", ""),
+                demo.get("last_name", ""),
+                demo.get("birth_date"),
+                demo.get("gender", ""),
+                demo.get("race", ""),
+                demo.get("ethnicity", ""),
+                demo.get("address_line", ""),
+                demo.get("city", ""),
+                demo.get("state", ""),
+                demo.get("zip_code", ""),
+                False,
+                datetime.utcnow(),
+                "healthex",
+            )
+
+            row = await conn.fetchrow(
+                "SELECT id FROM patients WHERE mrn = $1", demo["mrn"]
+            )
+            patient_id = str(row["id"]) if row else new_id
+
+            await conn.execute(
+                """
+                INSERT INTO data_sources
+                    (id, patient_id, source_name, is_active,
+                     connected_at, data_source)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (patient_id, source_name) DO UPDATE SET
+                    is_active    = true,
+                    connected_at = NOW()
+                """,
+                str(uuid.uuid4()),
+                patient_id,
+                "healthex",
+                True,
+                datetime.utcnow(),
+                "healthex",
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO source_freshness
+                    (patient_id, source_name, last_ingested_at,
+                     records_count, ttl_hours)
+                VALUES ($1, $2, NOW(), 0, 24)
+                ON CONFLICT (patient_id, source_name) DO NOTHING
+                """,
+                patient_id,
+                "healthex",
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO system_config (key, value, updated_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()
+                """,
+                "DATA_TRACK",
+                "healthex",
+            )
+
+            await log_skill_execution(
+                conn,
+                "register_healthex_patient",
+                patient_id,
+                "completed",
+                output_data={
+                    "mrn": demo["mrn"],
+                    "patient_id": patient_id,
+                    "duration_ms": int((time.time() - start) * 1000),
+                },
+                data_source="healthex",
+            )
+
+        return json.dumps(
+            {
+                "status": "registered",
+                "patient_id": patient_id,
+                "mrn": demo["mrn"],
+                "name": f"{demo.get('first_name', '')} {demo.get('last_name', '')}".strip(),
+                "is_synthetic": False,
+                "data_track": "healthex",
+                "next_step": (
+                    f"Call ingest_from_healthex(patient_id='{patient_id}', "
+                    "resource_type='labs'|'medications'|'conditions'|'encounters', "
+                    "fhir_json=<HealthEx response>) for each resource type, "
+                    f"then run_deliberation(patient_id='{patient_id}')."
+                ),
+            },
+            indent=2,
+        )
+
+    except json.JSONDecodeError as e:
+        msg = f"Error: health_summary_json is not valid JSON — {e}"
+        logger.error("register_healthex_patient: %s", msg)
+        return msg
+    except Exception as e:
+        logger.error("register_healthex_patient failed: %s", e)
+        try:
+            async with pool.acquire() as conn:
+                await log_skill_execution(
+                    conn,
+                    "register_healthex_patient",
+                    None,
+                    "failed",
+                    error_message=str(e),
+                    data_source="healthex",
+                )
+        except Exception:
+            logger.error("Failed to log register_healthex_patient error")
+        return f"Error: {e}"
+
+
 def register(mcp: FastMCP):
     @mcp.tool
     async def check_data_freshness(patient_id: str) -> str:
@@ -271,6 +516,8 @@ def register(mcp: FastMCP):
         except Exception as e:
             logger.error("get_data_source_status failed: %s", e)
             return f"Error: {e}"
+
+    mcp.tool(register_healthex_patient)
 
     @mcp.tool
     async def register_healthex_patient(
@@ -642,6 +889,8 @@ def register(mcp: FastMCP):
                             rec.get("data_source", "healthex"),
                         )
                         # Retrieve the UUID that survived ON CONFLICT (mrn)
+                        # so callers that skipped register_healthex_patient
+                        # can recover the correct patient_id from the return value.
                         _summary_row = await conn.fetchrow(
                             "SELECT id FROM patients WHERE mrn = $1",
                             rec.get("mrn", ""),
