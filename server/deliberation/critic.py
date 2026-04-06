@@ -91,9 +91,22 @@ Instructions:
 - Address each critique item. If the critique is valid, revise your finding.
 - If you disagree with a critique, explain why and maintain your position.
 - Do not change findings that were not critiqued unless new insight warrants it.
-- Produce JSON matching the RevisedAnalysis schema.
 
-Respond ONLY with valid JSON. No preamble. No markdown fences."""
+Respond ONLY with valid JSON matching EXACTLY this structure.
+No preamble. No markdown fences. Pure JSON.
+
+{{
+  "revised_findings": [
+    {{"claim": "...", "confidence": 0.85, "evidence_refs": ["..."]}}
+  ],
+  "revisions_made": [
+    "Plain string: what changed and why"
+  ],
+  "maintained_positions": [
+    "Plain string: what you defended and why"
+  ],
+  "raw_revision": "Your full chain of thought as a plain string."
+}}"""
 
     raw = await call_model_fn(model, revision_prompt,
                               "Produce your revised analysis now.")

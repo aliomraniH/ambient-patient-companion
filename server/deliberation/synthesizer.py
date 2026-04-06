@@ -42,7 +42,13 @@ async def synthesize(
         "deliberation_id": deliberation_id,
         "patient_id": context.patient_id,
         "timestamp": datetime.utcnow().isoformat(),
-        "trigger": context.deliberation_trigger
+        "trigger": context.deliberation_trigger,
+        "transcript": transcript,
+        "models": {
+            "analyst_claude": "claude-sonnet-4-20250514",
+            "analyst_gpt4": "gpt-4o",
+            "synthesizer": "claude-sonnet-4-20250514"
+        }
     })
 
     return DeliberationResult.model_validate(result_data)

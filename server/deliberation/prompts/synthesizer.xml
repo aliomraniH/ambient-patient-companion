@@ -18,34 +18,114 @@ disagreement as a dissenting view — never silently pick one side.
 </patient_context_summary>
 
 <task>
-Produce the five outputs as a single JSON object:
+Produce the five outputs as a single JSON object.
 
 1. anticipatory_scenarios (up to 4): Clinical scenarios likely in next 30/90/180 days.
-   Include probability, confidence, clinical implications, and evidence basis.
-   If models disagreed, include dissenting_view.
+   "timeframe" must be one of: next_30_days | next_90_days | next_6_months
+   Include probability, confidence, clinical_implications, and evidence_basis.
+   If models disagreed, include dissenting_view (null if they agreed).
 
-2. predicted_patient_questions (up to 5): Questions this patient is likely to ask
-   at next encounter or via portal. Include plain-language suggested response
-   (6th grade reading level).
+2. predicted_patient_questions (up to 5): Questions this patient is likely to ask.
+   "category" must be one of: medication_understanding | risk_awareness | lifestyle | logistics
+   "behavioral_framing" must be one of: facilitator | spark | sustainer
+   "suggested_response": plain English, 6th grade reading level.
+   "reading_level": e.g. "Grade 6"
 
-3. missing_data_flags (up to 6): Prioritized data gaps. Mark both_models_agreed=true
-   when both independently identified the same gap.
+3. missing_data_flags (up to 6): Prioritized data gaps.
+   "priority" must be one of: critical | high | medium | low
+   "data_type" must be one of: lab_result | social_determinant | screening | medication_history
+   Set both_models_agreed to true when both independently flagged the same gap.
 
-4. nudge_content (patient nudges + 1 care team nudge):
-   Patient nudges: follow BCT taxonomy, specify COM-B target, include all channel
-   formats (SMS ≤160 chars, push notification title+body, portal long-form).
-   Care team nudge: concise pre-encounter brief for care manager.
+4. nudge_content: patient nudges + 1 care team nudge.
+   "target" must be one of: patient | care_team
+   "behavioral_technique": BCT taxonomy code, e.g. "BCT_1.4_action_planning"
+   "com_b_target": e.g. "Capability-Psychological"
+   "channels": dict with keys sms (string ≤160 chars), push_notification (dict with title+body), portal (long-form string)
+   Patient nudges follow BCT taxonomy. Care team nudge is a concise pre-encounter brief.
 
-5. knowledge_updates: Both patient-specific inferences and core clinical
-   knowledge reinforcements. Each must include provenance chain.
+5. knowledge_updates: patient-specific inferences + core clinical knowledge reinforcements.
+   "update_type" must be one of: reinforcement | revision | new_inference
+   "scope" must be one of: core | patient_specific
+   "valid_from": ISO 8601 datetime string (use current date)
+   "valid_until": ISO 8601 datetime string or null
 
 CLINICAL SAFETY RULES (non-negotiable):
-- Every recommendation must cite its evidence basis
-- Flag any item where confidence < 0.60 explicitly
-- Preserve ALL unresolved disagreements in unresolved_disagreements array
+- Every recommendation must cite its evidence_basis
+- Flag any item where confidence < 0.60 explicitly in the description
+- Preserve ALL unresolved disagreements in unresolved_disagreements array (empty list if none)
 - Never recommend a specific drug dose
 - Include "discuss with your healthcare provider" in all patient-facing content
-
-Respond ONLY with valid JSON matching DeliberationResult schema.
-No preamble. No markdown fences. Pure JSON.
 </task>
+
+<output_format>
+Respond ONLY with valid JSON matching EXACTLY this structure.
+No preamble. No markdown fences. Pure JSON.
+
+{
+  "anticipatory_scenarios": [
+    {
+      "scenario_id": "scen-001",
+      "timeframe": "next_90_days",
+      "title": "Brief title of the scenario",
+      "description": "Narrative description of the clinical scenario",
+      "probability": 0.65,
+      "confidence": 0.75,
+      "clinical_implications": "What clinicians should watch for or act on",
+      "evidence_basis": ["Finding 1 from deliberation", "Guideline reference"],
+      "dissenting_view": null
+    }
+  ],
+  "predicted_patient_questions": [
+    {
+      "question": "Why do I need to check my blood sugar so often?",
+      "likelihood": 0.80,
+      "category": "medication_understanding",
+      "suggested_response": "Plain English answer at 6th grade reading level. Always discuss with your healthcare provider.",
+      "reading_level": "Grade 6",
+      "behavioral_framing": "facilitator"
+    }
+  ],
+  "missing_data_flags": [
+    {
+      "flag_id": "flag-001",
+      "priority": "high",
+      "data_type": "lab_result",
+      "description": "What data is missing and why it matters",
+      "clinical_relevance": "How this gap affects the analysis",
+      "recommended_action": "What should be done to get this data",
+      "confidence": 0.85,
+      "both_models_agreed": true
+    }
+  ],
+  "nudge_content": [
+    {
+      "nudge_id": "nudge-001",
+      "target": "patient",
+      "trigger_condition": "When this nudge should be sent",
+      "behavioral_technique": "BCT_1.4_action_planning",
+      "com_b_target": "Capability-Psychological",
+      "channels": {
+        "sms": "Short SMS message under 160 characters. Discuss with your provider.",
+        "push_notification": {"title": "Short title", "body": "Brief push notification body."},
+        "portal": "Longer portal message with full context. Always discuss with your healthcare provider."
+      },
+      "reading_level": "Grade 6",
+      "personalization_factors": ["factor 1", "factor 2"],
+      "decay_schedule": null
+    }
+  ],
+  "knowledge_updates": [
+    {
+      "update_type": "new_inference",
+      "scope": "patient_specific",
+      "entry_text": "The specific clinical inference or knowledge to record",
+      "confidence": 0.80,
+      "valid_from": "2026-04-06T00:00:00",
+      "valid_until": null,
+      "supersedes": null,
+      "evidence": ["Evidence source 1", "Evidence source 2"]
+    }
+  ],
+  "unresolved_disagreements": []
+}
+</output_format>

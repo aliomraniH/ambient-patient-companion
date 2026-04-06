@@ -68,7 +68,7 @@ All three are proxied through Next.js (port 5000) — no port number in public U
 
 ### Server 1 — ClinicalIntelligence (`server/mcp_server.py`)
 
-Thirteen tools at `https://[domain]/mcp` (9 Phase 1 + 4 Deliberation):
+Fifteen tools at `https://[domain]/mcp` (9 Phase 1 + 6 HealthEx/Deliberation):
 
 | Tool | Description |
 |------|-------------|
@@ -81,12 +81,17 @@ Thirteen tools at `https://[domain]/mcp` (9 Phase 1 + 4 Deliberation):
 | `use_demo_data` | Switch data track to Synthea demo data |
 | `switch_data_track` | Switch to named track (synthea/healthex/auto) |
 | `get_data_source_status` | Report active track + available sources |
-| `run_deliberation` | Trigger async dual-LLM deliberation for a patient |
+| `register_healthex_patient` | Create/upsert a HealthEx patient row, return UUID |
+| `ingest_from_healthex` | Write HealthEx FHIR data into the warehouse |
+| `run_deliberation` | Trigger full dual-LLM deliberation for a patient |
 | `get_deliberation_results` | Retrieve stored deliberation outputs |
 | `get_patient_knowledge` | Fetch accumulated patient-specific knowledge |
 | `get_pending_nudges` | List undelivered nudges for patient or care team |
 
 Also has REST wrappers at `/tools/<name>` and liveness check at `/health`.
+
+**HealthEx pipeline** (all on `/mcp`, port 8001):
+`use_healthex` → `register_healthex_patient` → `ingest_from_healthex` → `run_deliberation` → `get_deliberation_results` → `get_pending_nudges`
 
 ### Server 2 — PatientCompanion (`mcp-server/server.py`)
 

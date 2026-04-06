@@ -197,5 +197,87 @@ async function getSyntheticPatient(mrn) {
   return _mcpGet(`/tools/get_synthetic_patient?mrn=${encodeURIComponent(mrn)}`);
 }
 
+/**
+ * Register a HealthEx patient and obtain their internal UUID.
+ *
+ * @param {Object|string} healthSummaryJson - Patient health summary (object or JSON string)
+ * @returns {Promise<Object>} Object containing patient_id (UUID), mrn, name, and status
+ */
+async function registerHealthexPatient(healthSummaryJson) {
+  const payload = typeof healthSummaryJson === 'string'
+    ? healthSummaryJson
+    : JSON.stringify(healthSummaryJson);
+  return _mcpPost('/tools/register_healthex_patient', {
+    health_summary_json: payload,
+  });
+}
+
+/**
+ * Ingest HealthEx FHIR data into the patient warehouse.
+ *
+ * Call this once per resource_type: labs | medications | conditions | encounters | summary
+ *
+ * @param {string} patientId - UUID from registerHealthexPatient
+ * @param {string} resourceType - One of: labs | medications | conditions | encounters | summary
+ * @param {Object|string} fhirJson - Raw JSON from the HealthEx tool response (object or JSON string)
+ * @returns {Promise<Object>} Ingest result with records_written, resource_type, duration_ms
+ */
+async function ingestFromHealthex(patientId, resourceType, fhirJson) {
+  const payload = typeof fhirJson === 'string' ? fhirJson : JSON.stringify(fhirJson);
+  return _mcpPost('/tools/ingest_from_healthex', {
+    patient_id: patientId,
+    resource_type: resourceType,
+    fhir_json: payload,
+  });
+}
+
+/**
+ * Trigger a full Dual-LLM deliberation session for a patient.
+ *
+ * @param {string} patientId - Patient UUID or MRN
+ * @param {string} [triggerType='manual'] - One of: manual | scheduled_pre_encounter |
+ *   lab_result_received | medication_change | missed_appointment | temporal_threshold
+ * @param {number} [maxRounds=3] - Maximum cross-critique rounds (1–5)
+ * @returns {Promise<Object>} Deliberation summary with convergence_score and output counts
+ */
+async function runDeliberation(patientId, triggerType = 'manual', maxRounds = 3) {
+  return _mcpPost('/tools/run_deliberation', {
+    patient_id: patientId,
+    trigger_type: triggerType,
+    max_rounds: maxRounds,
+  });
+}
+
+/**
+ * Retrieve outputs from the most recent deliberation(s) for a patient.
+ *
+ * @param {string} patientId - Patient UUID or MRN
+ * @param {string} [outputType='all'] - Filter by output type: all | anticipatory_scenario |
+ *   predicted_patient_question | missing_data_flag | patient_nudge | care_team_nudge
+ * @param {number} [limit=1] - Number of most recent deliberations to return
+ * @returns {Promise<Object>} Structured deliberation outputs
+ */
+async function getDeliberationResults(patientId, outputType = 'all', limit = 1) {
+  return _mcpPost('/tools/get_deliberation_results', {
+    patient_id: patientId,
+    output_type: outputType,
+    limit,
+  });
+}
+
+/**
+ * Retrieve pending (unsent) nudges for a patient.
+ *
+ * @param {string} patientId - Patient UUID or MRN
+ * @param {string} [target='patient'] - 'patient' or 'care_team'
+ * @returns {Promise<Object>} Pending nudges with channel content
+ */
+async function getPendingNudges(patientId, target = 'patient') {
+  return _mcpPost('/tools/get_pending_nudges', {
+    patient_id: patientId,
+    target,
+  });
+}
+
 // Log readiness on load
-console.log('Ambient clinical layer ready — Phase 1');
+console.log('Ambient clinical layer ready — Phase 1 + HealthEx pipeline + Deliberation Engine');

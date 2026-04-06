@@ -14,16 +14,40 @@ not stylistic differences.
 </original_patient_context>
 
 <task>
-Produce a structured critique. For each issue you find, classify it:
-- factual_error: The claim contradicts the patient data or guidelines
-- logical_gap: The reasoning is internally inconsistent
-- missed_consideration: An important factor was not considered
-- overconfidence: Confidence score is higher than evidence supports
+Produce a structured critique. For each issue you find, classify it using
+the "critique_type" field as one of:
+  factual_error | logical_gap | missed_consideration | overconfidence
 
-Also identify areas where you agree strongly — these signal convergence.
+Use "severity" as one of: blocking | moderate | minor
 
-If you find no genuine errors, say so explicitly. Do not manufacture
-disagreements for the sake of debate.
+Also identify areas where you agree strongly in "areas_of_agreement" —
+these are PLAIN STRINGS (not dicts).
 
-Respond ONLY with valid JSON matching CrossCritique schema.
+If you find no genuine errors, say so explicitly in "areas_of_agreement".
+Do not manufacture disagreements for the sake of debate.
+
+Set "critic_model" to "gpt4" and "target_model" to "claude".
 </task>
+
+<output_format>
+Respond ONLY with valid JSON matching EXACTLY this structure.
+No preamble. No markdown fences. Pure JSON.
+
+{
+  "critic_model": "gpt4",
+  "target_model": "claude",
+  "critique_items": [
+    {
+      "target_claim": "The exact claim from partner analysis being critiqued",
+      "critique_type": "missed_consideration",
+      "critique_text": "Why this claim is problematic and what the evidence shows",
+      "suggested_revision": "Optional revised claim if applicable",
+      "severity": "minor"
+    }
+  ],
+  "areas_of_agreement": [
+    "Plain string summary of finding both models agree on"
+  ],
+  "raw_critique": "Your full chain of thought as a plain string."
+}
+</output_format>

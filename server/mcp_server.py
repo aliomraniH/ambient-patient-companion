@@ -1,15 +1,25 @@
 """FastMCP server for clinical decision support — Phase 1.
 
-Provides 9 tools:
-1. clinical_query        — Three-layer guardrail pipeline with Claude API
-2. get_guideline         — Fetch specific guideline by recommendation ID
-3. check_screening_due   — Return overdue USPSTF screenings for a patient
-4. flag_drug_interaction — Return known drug interactions
-5. get_synthetic_patient — Return canonical demo patient (Maria Chen)
-6. use_healthex          — Switch data track to HealthEx real records
-7. use_demo_data         — Switch data track to Synthea demo data
-8. switch_data_track     — Switch data track to a named source
-9. get_data_source_status — Report active data track and available sources
+Provides 15 tools:
+1.  clinical_query              — Three-layer guardrail pipeline with Claude API
+2.  get_guideline               — Fetch specific guideline by recommendation ID
+3.  check_screening_due         — Return overdue USPSTF screenings for a patient
+4.  flag_drug_interaction       — Return known drug interactions
+5.  get_synthetic_patient       — Return canonical demo patient (Maria Chen)
+6.  use_healthex                — Switch data track to HealthEx real records
+7.  use_demo_data               — Switch data track to Synthea demo data
+8.  switch_data_track           — Switch data track to a named source
+9.  get_data_source_status      — Report active data track and available sources
+10. run_deliberation            — Trigger a full Dual-LLM deliberation session
+11. get_deliberation_results    — Retrieve outputs from the most recent deliberation
+12. get_pending_nudges          — Pull queued nudges for a patient
+13. register_healthex_patient   — Create/upsert a HealthEx patient row and return UUID
+14. ingest_from_healthex        — Write HealthEx FHIR data into the warehouse
+15. get_clinical_summary        — Summarise a patient's clinical state
+
+HealthEx pipeline (all on /mcp — the confirmed working Claude Web endpoint):
+  use_healthex → register_healthex_patient → ingest_from_healthex
+  → run_deliberation → get_deliberation_results → get_pending_nudges
 
 All AI calls route through the guardrail pipeline. HTML prototypes never
 call Claude API directly.
@@ -21,7 +31,14 @@ import json
 import logging
 import os
 import sys
+import uuid as _uuid_mod
+from datetime import datetime as _dt
 from pathlib import Path
+
+# Allow the clinical server to import FHIR transforms that live in mcp-server/
+_MCPSERVER_DIR = Path(__file__).resolve().parent.parent / "mcp-server"
+if str(_MCPSERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(_MCPSERVER_DIR))
 
 import anthropic
 import asyncpg
@@ -820,6 +837,368 @@ async def get_data_source_status() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# HealthEx patient registration + FHIR ingestion
+# (mirrors Skills MCP server tools — available here because /mcp is the
+# confirmed working endpoint in Claude Web sessions)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def register_healthex_patient(
+    health_summary_json: str,
+    mrn_override: str = "",
+) -> str:
+    """Register a real HealthEx patient in the warehouse.
+
+    MUST be called before any ingest_from_healthex calls in a HealthEx
+    session. Takes the raw JSON from HealthEx get_health_summary, creates
+    or finds the patient row with is_synthetic=False, initialises
+    data_sources and source_freshness rows, and returns the canonical
+    patient_id UUID and MRN for all subsequent calls.
+
+    Also sets DATA_TRACK = "healthex" in system_config so all future
+    pipeline runs use the HealthEx adapter.
+
+    Args:
+        health_summary_json: Raw JSON string from HealthEx get_health_summary.
+                             May be a FHIR Patient resource, a FHIR Bundle,
+                             or a HealthEx summary dict — all are handled.
+        mrn_override:        If provided, use this MRN instead of extracting
+                             from the summary.
+
+    Returns:
+        JSON string with patient_id, mrn, and status.
+    """
+    import time as _time
+    pool = await _get_db_pool()
+    try:
+        start = _time.time()
+        summary = json.loads(health_summary_json)
+        patient_resource: dict = {}
+
+        if summary.get("resourceType") == "Patient":
+            patient_resource = summary
+        elif summary.get("resourceType") == "Bundle":
+            for entry in summary.get("entry", []):
+                res = entry.get("resource", {})
+                if res.get("resourceType") == "Patient":
+                    patient_resource = res
+                    break
+            if not patient_resource:
+                return (
+                    "Error: FHIR Bundle contained no Patient resource. "
+                    "Pass the raw get_health_summary JSON directly."
+                )
+        else:
+            # HealthEx flat summary dict
+            name_raw = summary.get("name", summary.get("full_name", ""))
+            if isinstance(name_raw, str):
+                parts = name_raw.strip().split()
+                given = parts[:-1] if len(parts) > 1 else parts
+                family = parts[-1] if len(parts) > 1 else ""
+            else:
+                given = [name_raw.get("first", "")]
+                family = name_raw.get("last", "")
+
+            raw_mrn = (
+                mrn_override
+                or summary.get("mrn")
+                or summary.get("patient_id")
+                or summary.get("id")
+                or ""
+            )
+            patient_resource = {
+                "resourceType": "Patient",
+                "id": summary.get("id", ""),
+                "name": [{"given": given, "family": family}],
+                "birthDate": summary.get(
+                    "birth_date",
+                    summary.get("dob", summary.get("date_of_birth", "")),
+                ),
+                "gender": summary.get("gender", summary.get("sex", "")),
+                "identifier": (
+                    [{"type": {"coding": [{"code": "MR"}]}, "value": str(raw_mrn)}]
+                    if raw_mrn else []
+                ),
+                "address": [{
+                    "line": [summary.get("address", "")],
+                    "city": summary.get("city", ""),
+                    "state": summary.get("state", ""),
+                    "postalCode": summary.get("zip", summary.get("zip_code", "")),
+                }],
+            }
+
+        # Import FHIR transform (mcp-server is on sys.path via _MCPSERVER_DIR)
+        from transforms.fhir_to_schema import transform_patient  # type: ignore
+        demo = transform_patient(
+            patient_resource, data_source="healthex", is_synthetic=False
+        )
+
+        if mrn_override:
+            demo["mrn"] = mrn_override
+        if not demo.get("mrn"):
+            demo["mrn"] = f"HX-{_uuid_mod.uuid4().hex[:8].upper()}"
+            logger.warning(
+                "register_healthex_patient: no MRN found, generated %s", demo["mrn"]
+            )
+
+        new_id = str(_uuid_mod.uuid4())
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO patients
+                    (id, mrn, first_name, last_name, birth_date, gender,
+                     race, ethnicity, address_line, city, state, zip_code,
+                     is_synthetic, created_at, data_source)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                ON CONFLICT (mrn) DO UPDATE SET
+                    first_name   = EXCLUDED.first_name,
+                    last_name    = EXCLUDED.last_name,
+                    birth_date   = EXCLUDED.birth_date,
+                    gender       = EXCLUDED.gender,
+                    race         = EXCLUDED.race,
+                    ethnicity    = EXCLUDED.ethnicity,
+                    address_line = EXCLUDED.address_line,
+                    city         = EXCLUDED.city,
+                    state        = EXCLUDED.state,
+                    zip_code     = EXCLUDED.zip_code,
+                    is_synthetic = false,
+                    data_source  = 'healthex'
+                """,
+                new_id, demo["mrn"],
+                demo.get("first_name", ""), demo.get("last_name", ""),
+                demo.get("birth_date"), demo.get("gender", ""),
+                demo.get("race", ""), demo.get("ethnicity", ""),
+                demo.get("address_line", ""), demo.get("city", ""),
+                demo.get("state", ""), demo.get("zip_code", ""),
+                False, _dt.utcnow(), "healthex",
+            )
+            row = await conn.fetchrow(
+                "SELECT id FROM patients WHERE mrn = $1", demo["mrn"]
+            )
+            patient_id = str(row["id"]) if row else new_id
+
+            await conn.execute(
+                """
+                INSERT INTO data_sources
+                    (id, patient_id, source_name, is_active, connected_at, data_source)
+                VALUES ($1,$2,$3,$4,$5,$6)
+                ON CONFLICT (patient_id, source_name) DO UPDATE SET
+                    is_active = true, connected_at = NOW()
+                """,
+                str(_uuid_mod.uuid4()), patient_id, "healthex", True,
+                _dt.utcnow(), "healthex",
+            )
+            await conn.execute(
+                """
+                INSERT INTO source_freshness
+                    (patient_id, source_name, last_ingested_at, records_count, ttl_hours)
+                VALUES ($1,$2,NOW(),0,24)
+                ON CONFLICT (patient_id, source_name) DO NOTHING
+                """,
+                patient_id, "healthex",
+            )
+            await conn.execute(
+                """
+                INSERT INTO system_config (key, value, updated_at)
+                VALUES ($1,$2,NOW())
+                ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=NOW()
+                """,
+                "DATA_TRACK", "healthex",
+            )
+
+        duration_ms = int((_time.time() - start) * 1000)
+        return json.dumps({
+            "status": "registered",
+            "patient_id": patient_id,
+            "mrn": demo["mrn"],
+            "name": f"{demo.get('first_name','')} {demo.get('last_name','')}".strip(),
+            "is_synthetic": False,
+            "data_track": "healthex",
+            "duration_ms": duration_ms,
+            "next_step": (
+                f"Call ingest_from_healthex(patient_id='{patient_id}', "
+                "resource_type='labs'|'medications'|'conditions'|'encounters', "
+                "fhir_json=<HealthEx response>) for each resource type, "
+                f"then run_deliberation(patient_id='{patient_id}')."
+            ),
+        }, indent=2)
+
+    except json.JSONDecodeError as e:
+        return f"Error: health_summary_json is not valid JSON — {e}"
+    except Exception as e:
+        logger.error("register_healthex_patient failed: %s", e)
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def ingest_from_healthex(
+    patient_id: str,
+    resource_type: str,
+    fhir_json: str,
+) -> str:
+    """Accept a HealthEx MCP tool response and write it to the warehouse.
+
+    Claude calls the HealthEx tools (Get Lab Results, Get Medications,
+    Get Conditions, Get Encounters, General Health Summary) in the
+    session where HealthEx is authenticated, then passes each response
+    here. This tool runs pipeline stages 4-8 only — raw cache,
+    normalize, conflict resolve, warehouse write, freshness update.
+
+    Args:
+        patient_id:    UUID of the patient in the database (from register_healthex_patient)
+        resource_type: "labs" | "medications" | "conditions" | "encounters" | "summary"
+        fhir_json:     raw JSON string from the HealthEx tool response
+
+    Returns:
+        JSON string with records_written, resource_type, duration_ms.
+    """
+    import time as _time
+    pool = await _get_db_pool()
+    try:
+        start = _time.time()
+        valid_types = {"labs", "medications", "conditions", "encounters", "summary"}
+        if resource_type not in valid_types:
+            return (
+                f"Error: resource_type must be one of {sorted(valid_types)}. "
+                f"Got: '{resource_type}'"
+            )
+
+        fhir_data = json.loads(fhir_json)
+        resources = fhir_data if isinstance(fhir_data, list) else [fhir_data]
+
+        # Stage 4: cache raw FHIR before any transformation
+        async with pool.acquire() as conn:
+            for resource in resources:
+                fhir_id = resource.get("id", str(_uuid_mod.uuid4()))
+                await conn.execute(
+                    """
+                    INSERT INTO raw_fhir_cache
+                        (patient_id, source_name, resource_type, raw_json,
+                         fhir_resource_id, retrieved_at, processed)
+                    VALUES ($1,$2,$3,$4,$5,NOW(),false)
+                    ON CONFLICT (patient_id, source_name, fhir_resource_id)
+                    DO UPDATE SET raw_json=EXCLUDED.raw_json, retrieved_at=NOW(),
+                                  processed=false
+                    """,
+                    patient_id, "healthex", resource_type,
+                    json.dumps(resource), fhir_id,
+                )
+
+        # Stage 5: normalize
+        from transforms.fhir_to_schema import transform_by_type  # type: ignore
+        records = transform_by_type(
+            resource_type, resources, patient_id, source="healthex"
+        )
+
+        # Stage 6: conflict resolution
+        _ingestion_path = Path(__file__).resolve().parent.parent / "ingestion"
+        if str(_ingestion_path.parent) not in sys.path:
+            sys.path.insert(0, str(_ingestion_path.parent))
+        from ingestion.conflict_resolver import ConflictResolver  # type: ignore
+        resolver = ConflictResolver(policy="patient_first")
+        resolved = resolver.resolve(records)
+
+        # Stage 7: warehouse write
+        records_written = 0
+        async with pool.acquire() as conn:
+            for rec in resolved:
+                rec.pop("_table", None)
+                rec.pop("_conflict_key", None)
+
+                if resource_type == "labs":
+                    await conn.execute(
+                        """
+                        INSERT INTO biometric_readings
+                            (id, patient_id, metric_type, value, unit,
+                             measured_at, data_source)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        rec.get("id", str(_uuid_mod.uuid4())),
+                        rec["patient_id"], rec.get("metric_type", ""),
+                        rec.get("value"), rec.get("unit", ""),
+                        rec.get("measured_at") or _dt.utcnow(), "healthex",
+                    )
+                    records_written += 1
+
+                elif resource_type == "medications":
+                    await conn.execute(
+                        """
+                        INSERT INTO patient_medications
+                            (id, patient_id, code, display, status,
+                             authored_on, data_source)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        rec.get("id", str(_uuid_mod.uuid4())),
+                        rec["patient_id"], rec.get("code", ""),
+                        rec.get("display", ""), rec.get("status", "active"),
+                        rec.get("authored_on") or _dt.utcnow(), "healthex",
+                    )
+                    records_written += 1
+
+                elif resource_type == "conditions":
+                    await conn.execute(
+                        """
+                        INSERT INTO patient_conditions
+                            (id, patient_id, code, display, onset_date,
+                             clinical_status, data_source)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        rec.get("id", str(_uuid_mod.uuid4())),
+                        rec["patient_id"], rec.get("code", ""),
+                        rec.get("display", ""), rec.get("onset_date"),
+                        rec.get("clinical_status", "active"), "healthex",
+                    )
+                    records_written += 1
+
+                elif resource_type == "encounters":
+                    await conn.execute(
+                        """
+                        INSERT INTO clinical_events
+                            (id, patient_id, event_type, event_date,
+                             description, data_source)
+                        VALUES ($1,$2,$3,$4,$5,$6)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        rec.get("id", str(_uuid_mod.uuid4())),
+                        rec["patient_id"],
+                        rec.get("event_type", "encounter"),
+                        rec.get("event_date") or _dt.utcnow(),
+                        rec.get("description", ""), "healthex",
+                    )
+                    records_written += 1
+
+            # Stage 8: update source freshness
+            await conn.execute(
+                """
+                UPDATE source_freshness
+                SET last_ingested_at = NOW(),
+                    records_count    = records_count + $1
+                WHERE patient_id = $2 AND source_name = 'healthex'
+                """,
+                records_written, patient_id,
+            )
+
+        duration_ms = int((_time.time() - start) * 1000)
+        return json.dumps({
+            "status": "ok",
+            "patient_id": patient_id,
+            "resource_type": resource_type,
+            "resources_received": len(resources),
+            "records_written": records_written,
+            "duration_ms": duration_ms,
+        }, indent=2)
+
+    except json.JSONDecodeError as e:
+        return f"Error: fhir_json is not valid JSON — {e}"
+    except Exception as e:
+        logger.error("ingest_from_healthex failed: %s", e)
+        return f"Error: {e}"
+
+
+# ---------------------------------------------------------------------------
 # REST wrapper routes (for HTML prototypes via claude-client.js)
 # ---------------------------------------------------------------------------
 
@@ -1105,6 +1484,36 @@ async def get_pending_nudges(
 
 
 # ── REST wrappers for deliberation tools ──────────────────────────────────────
+
+
+@mcp.custom_route("/tools/register_healthex_patient", methods=["POST"])
+async def rest_register_healthex_patient(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await register_healthex_patient(
+            health_summary_json=body.get("health_summary_json", "{}")
+        )
+        return JSONResponse(json.loads(result) if isinstance(result, str) else result)
+    except Exception as e:
+        import sys as _sys
+        print(f"[register_healthex_patient] error: {e}", file=_sys.stderr)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
+@mcp.custom_route("/tools/ingest_from_healthex", methods=["POST"])
+async def rest_ingest_from_healthex(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await ingest_from_healthex(
+            patient_id=body.get("patient_id", ""),
+            resource_type=body.get("resource_type", "summary"),
+            fhir_json=body.get("fhir_json", "{}"),
+        )
+        return JSONResponse(json.loads(result) if isinstance(result, str) else result)
+    except Exception as e:
+        import sys as _sys
+        print(f"[ingest_from_healthex] error: {e}", file=_sys.stderr)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
 
 
 @mcp.custom_route("/tools/run_deliberation", methods=["POST"])

@@ -878,5 +878,22 @@ pytest mcp-server/tests/ -v                               # schema + skills + ge
 pytest tests/e2e/test_deliberation_tools.py -v            # UC-16→UC-20b
 ```
 
+### IMPORTANT — Routing Patch (April 2026)
+
+`register_healthex_patient` and `ingest_from_healthex` were **moved from port 8002 (`/mcp-skills`) to port 8001 (`/mcp`)** — the Clinical Intelligence server — because Claude Web's external connections cannot reach the `/mcp-skills` Next.js proxy (SSE streaming incompatibility). The "No approval received" error from Claude Web is its own HITL gate triggered when the server is unreachable, not a bug in FastMCP.
+
+**All 6 HealthEx pipeline steps now run on the single `/mcp` endpoint (port 8001):**
+
+| Tool | Canonical location |
+|---|---|
+| `use_healthex` | `server/mcp_server.py` (port 8001) |
+| `register_healthex_patient` | `server/mcp_server.py` (port 8001) — NOT `mcp-server/skills/ingestion_tools.py` |
+| `ingest_from_healthex` | `server/mcp_server.py` (port 8001) — NOT `mcp-server/skills/ingestion_tools.py` |
+| `run_deliberation` | `server/mcp_server.py` (port 8001) |
+| `get_deliberation_results` | `server/mcp_server.py` (port 8001) |
+| `get_pending_nudges` | `server/mcp_server.py` (port 8001) |
+
+All 6 tools also have REST wrappers at `http://localhost:8001/tools/<name>` for use by the JS client (`shared/claude-client.js`).
+
 *Last updated: April 2026 — Ambient Action Model v2.1*
 *Architecture source: "Healthcare AI Architecture: Six Technical Pillars" (2026)*

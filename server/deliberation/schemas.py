@@ -76,20 +76,24 @@ class CritiqueItem(BaseModel):
     severity: str  # 'blocking'|'moderate'|'minor'
 
 class CrossCritique(BaseModel):
-    critic_model: str
-    target_model: str
-    round_number: int
+    # critic_model, target_model set via prompt guidance; round_number set server-side.
+    # All default to "" / 0 so model_validate_json succeeds before caller assigns.
+    critic_model: str = ""
+    target_model: str = ""
+    round_number: int = 0
     critique_items: list[CritiqueItem]
     areas_of_agreement: list[str]
-    raw_critique: str
+    raw_critique: str = ""
 
 class RevisedAnalysis(BaseModel):
-    model_id: str
-    round_number: int
+    # model_id and round_number set server-side (critic.py lines 101-102).
+    # raw_revision defaults to "" if LLM omits it.
+    model_id: str = ""
+    round_number: int = 0
     revised_findings: list[ClaimWithConfidence]
     revisions_made: list[str]       # what changed and why
     maintained_positions: list[str] # what was defended and why
-    raw_revision: str
+    raw_revision: str = ""
 
 
 # ── PHASE 3 OUTPUTS (Final Synthesis) ─────────────────────────────────────────
@@ -150,18 +154,19 @@ class DeliberationResult(BaseModel):
     patient_id: str
     timestamp: datetime
     trigger: str
-    models: dict
-    rounds_completed: int
-    convergence_score: float
-    total_tokens: int
-    total_latency_ms: int
+    # Server-assigned after synthesis — defaults allow synthesizer to validate first
+    models: dict = Field(default_factory=dict)
+    rounds_completed: int = 0
+    convergence_score: float = 0.0
+    total_tokens: int = 0
+    total_latency_ms: int = 0
     # Five output categories
-    anticipatory_scenarios: list[AnticipatoryScenario]
-    predicted_patient_questions: list[PredictedPatientQuestion]
-    missing_data_flags: list[MissingDataFlag]
-    nudge_content: list[NudgeContent]
-    knowledge_updates: list[KnowledgeUpdate]
+    anticipatory_scenarios: list[AnticipatoryScenario] = Field(default_factory=list)
+    predicted_patient_questions: list[PredictedPatientQuestion] = Field(default_factory=list)
+    missing_data_flags: list[MissingDataFlag] = Field(default_factory=list)
+    nudge_content: list[NudgeContent] = Field(default_factory=list)
+    knowledge_updates: list[KnowledgeUpdate] = Field(default_factory=list)
     # Preserved disagreements requiring clinician attention
-    unresolved_disagreements: list[dict]
-    # Full audit trail
-    transcript: dict  # stored to deliberations.transcript (JSONB)
+    unresolved_disagreements: list[dict] = Field(default_factory=list)
+    # Full audit trail — set by engine after synthesis
+    transcript: dict = Field(default_factory=dict)

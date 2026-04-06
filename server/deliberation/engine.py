@@ -124,14 +124,21 @@ class DeliberationEngine:
         # ── Phase 4: Behavioral Adaptation ────────────────────────────────────
         result.nudge_content = adapt_nudges(result.nudge_content)
 
+        # Stamp engine-level metrics on result before commit and return
+        total_latency_ms = int((time.monotonic() - start_time) * 1000)
+        result.rounds_completed = critique_result["rounds_completed"]
+        result.convergence_score = critique_result["convergence_score"]
+        result.total_tokens = total_tokens
+        result.total_latency_ms = total_latency_ms
+
         # ── Phase 5: Knowledge Commit ──────────────────────────────────────────
         await commit_deliberation(
             result=result,
             db_pool=self.db_pool,
-            convergence_score=critique_result["convergence_score"],
-            rounds_completed=critique_result["rounds_completed"],
-            total_tokens=total_tokens,
-            total_latency_ms=int((time.monotonic() - start_time) * 1000),
+            convergence_score=result.convergence_score,
+            rounds_completed=result.rounds_completed,
+            total_tokens=result.total_tokens,
+            total_latency_ms=result.total_latency_ms,
             synthesizer_model="claude-sonnet-4-20250514"
         )
 
