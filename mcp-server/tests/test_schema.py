@@ -53,7 +53,7 @@ async def test_all_tables_exist(db_pool):
         assert len(existing) >= 22, f"Only {len(existing)} tables found: {existing}"
 
 
-# ── D2: system_config has DATA_TRACK=synthea seed row ──
+# ── D2: system_config has DATA_TRACK row with a valid track value ──
 @pytest.mark.asyncio
 async def test_system_config_data_track(db_pool):
     async with db_pool.acquire() as conn:
@@ -61,7 +61,11 @@ async def test_system_config_data_track(db_pool):
             "SELECT value FROM system_config WHERE key = $1",
             "DATA_TRACK",
         )
-        assert value == "synthea", f"DATA_TRACK = {value}"
+        valid = {"synthea", "healthex", "auto"}
+        assert value in valid, (
+            f"DATA_TRACK = {value!r} is not a recognised track "
+            f"(expected one of {sorted(valid)})"
+        )
 
 
 # ── D3: source_freshness UNIQUE on (patient_id, source_name) ──

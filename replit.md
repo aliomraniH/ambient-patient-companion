@@ -261,3 +261,11 @@ python -m pytest ingestion/tests/test_healthex_registration.py -v  # 7 passed (H
 6. **schema.sql**: Added FK constraints to 10 previously unlinked tables; added UNIQUE index on biometric_readings
 7. **dashboard completeness**: Uses `_explicitly_set()` — defaults don't count as user-configured
 8. **FHIR fixtures**: 10 minimal Synthea bundles in `/home/runner/synthea-output/fhir/`
+9. **context_compiler UUID lookup**: `run_deliberation(patient_id=<UUID>)` now works for HealthEx patients registered via `register_healthex_patient` — added UUID regex detection + `WHERE id = $1::uuid` fallback before the partial MRN LIKE match
+10. **IndependentAnalysis schema**: `model_id`, `role_emphasis`, `raw_reasoning` now default to `""` so `model_validate_json` succeeds before the caller sets them server-side (analyst.py lines 112-116)
+11. **Analyst prompts**: Updated `analyst_claude.xml` and `analyst_gpt4.xml` with explicit JSON skeleton showing `claim`/`confidence` field names, plain-string `anticipated_trajectory`, plain-string list for `missing_data_identified` — prevents LLM from using `finding`/`risk`/`action` aliases or wrapping values in dicts
+12. **test_system_config_data_track**: Fixed to accept any valid track value (`synthea`, `healthex`, `auto`) instead of hardcoding `synthea` — `DATA_TRACK` is a live mutable config that changes when `use_healthex()` is called
+
+## "No approval received" Note (Claude Web Behaviour)
+
+`use_healthex` and `register_healthex_patient` work correctly when called directly via MCP protocol (verified by curl smoke tests). The "No approval received" message is **Claude Web's own HITL safety gate** for state-modifying tool calls — it is not emitted by our servers. If Claude Web blocks those tools, the user must explicitly approve in the chat when prompted, or call the tools in a Claude session configured without HITL gating.

@@ -54,14 +54,16 @@ class ClaimWithConfidence(BaseModel):
 
 class IndependentAnalysis(BaseModel):
     """Output of Phase 1 from each model."""
-    model_id: str                        # 'claude-sonnet-4' or 'gpt-4o'
-    role_emphasis: str                   # 'diagnostic_reasoning' or 'treatment_optimization'
+    # Set server-side after model_validate_json — must be Optional so parsing
+    # succeeds before the caller assigns them (see analyst.py lines 112-116).
+    model_id: str = ""                   # 'claude-sonnet-4-20250514' or 'gpt-4o'
+    role_emphasis: str = ""             # 'diagnostic_reasoning' or 'treatment_optimization'
     key_findings: list[ClaimWithConfidence]
     risk_flags: list[ClaimWithConfidence]
     recommended_actions: list[ClaimWithConfidence]
     anticipated_trajectory: str          # narrative 3-6 month outlook
     missing_data_identified: list[str]
-    raw_reasoning: str                   # full CoT, stored for audit
+    raw_reasoning: str = ""              # full CoT, stored for audit
 
 
 # ── PHASE 2 OUTPUTS ───────────────────────────────────────────────────────────

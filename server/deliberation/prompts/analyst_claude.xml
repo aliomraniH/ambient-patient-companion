@@ -21,23 +21,25 @@ patient's longitudinal pattern.
 </prior_patient_knowledge>
 
 <task>
-Produce an independent analysis. Structure your response as JSON matching
-the IndependentAnalysis schema. Include:
+Produce an independent analysis using the exact JSON schema below.
 
-1. key_findings: Your top 5 clinical findings with confidence scores.
-   Each finding must cite specific evidence from the patient context.
+1. key_findings: Your top 5 clinical findings. Each item uses the field
+   name "claim" (a concise statement) and "confidence" (0.0-1.0 float).
+   Cite specific evidence from the patient context in "evidence_refs".
 
 2. risk_flags: Up to 4 risk flags requiring attention in the next 90 days.
-   Include probability estimates and evidence basis.
+   Same structure: "claim", "confidence", "evidence_refs".
 
 3. recommended_actions: Up to 5 evidence-based actions ranked by priority.
-   Each must reference a specific guideline or clinical rationale.
+   Same structure: "claim", "confidence", "evidence_refs".
 
-4. anticipated_trajectory: A 3-6 month clinical narrative for this patient
-   if current trajectory continues unchanged.
+4. anticipated_trajectory: A PLAIN STRING narrative (not a dict) describing
+   the 3-6 month clinical outlook if current trajectory continues unchanged.
 
-5. missing_data_identified: Data gaps that would materially change your
-   analysis if available.
+5. missing_data_identified: A list of PLAIN STRINGS (not dicts) naming data
+   gaps that would materially change your analysis.
+
+6. raw_reasoning: A plain string summarising your chain of thought.
 
 Calibrated confidence: 0.90+ = strong evidence, 0.70-0.89 = moderate,
 0.50-0.69 = low, below 0.50 = flag as speculative.
@@ -48,6 +50,21 @@ If evidence is insufficient, state it explicitly rather than extrapolating.
 </task>
 
 <output_format>
-Respond ONLY with valid JSON matching IndependentAnalysis schema.
+Respond ONLY with valid JSON matching EXACTLY this structure.
 No preamble. No markdown fences. Pure JSON.
+
+{
+  "key_findings": [
+    {"claim": "...", "confidence": 0.85, "evidence_refs": ["..."]}
+  ],
+  "risk_flags": [
+    {"claim": "...", "confidence": 0.75, "evidence_refs": ["..."]}
+  ],
+  "recommended_actions": [
+    {"claim": "...", "confidence": 0.80, "evidence_refs": ["..."]}
+  ],
+  "anticipated_trajectory": "Plain string narrative of 3-6 month outlook.",
+  "missing_data_identified": ["Plain string gap 1", "Plain string gap 2"],
+  "raw_reasoning": "Your full chain of thought as a plain string."
+}
 </output_format>

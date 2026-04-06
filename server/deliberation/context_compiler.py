@@ -16,10 +16,16 @@ Table mapping (actual Replit PostgreSQL schema):
 Note: patient_conditions/medications/biometrics/etc use internal UUID patient_id.
       patient_knowledge uses patient_id as TEXT (MRN).
 """
+import re
 import sys
 from datetime import datetime, timedelta, date
 from typing import Optional
 from .schemas import PatientContextPackage
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 async def compile_patient_context(
@@ -52,8 +58,18 @@ async def compile_patient_context(
                WHERE mrn = $1""",
             patient_id
         )
+        if patient is None and _UUID_RE.match(patient_id):
+            # Try internal UUID lookup (HealthEx patients registered via
+            # register_healthex_patient return a UUID, not an MRN)
+            patient = await conn.fetchrow(
+                """SELECT id, mrn, first_name, last_name, birth_date, gender,
+                          city, state, insurance_type
+                   FROM patients
+                   WHERE id = $1::uuid""",
+                patient_id
+            )
         if patient is None:
-            # Try partial match (e.g. numeric-only MRN)
+            # Try partial MRN match (e.g. numeric-only MRN)
             patient = await conn.fetchrow(
                 """SELECT id, mrn, first_name, last_name, birth_date, gender,
                           city, state, insurance_type
