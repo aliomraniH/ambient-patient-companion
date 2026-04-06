@@ -1086,13 +1086,13 @@ async def get_pending_nudges(
     pool = await _get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT do.id, do.output_data, do.trigger_condition,
+            """SELECT dout.id, dout.output_data, dout.trigger_condition,
                       d.triggered_at as deliberation_date
-               FROM deliberation_outputs do
-               JOIN deliberations d ON do.deliberation_id = d.id
+               FROM deliberation_outputs dout
+               JOIN deliberations d ON dout.deliberation_id = d.id
                WHERE d.patient_id = $1
-                 AND do.output_type = $2
-                 AND do.delivered_at IS NULL
+                 AND dout.output_type = $2
+                 AND dout.delivered_at IS NULL
                ORDER BY d.triggered_at DESC""",
             patient_id, nudge_type
         )
