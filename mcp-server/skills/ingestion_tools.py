@@ -17,6 +17,48 @@ from skills.base import log_skill_execution
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# HealthEx payload explosion helpers
+# ---------------------------------------------------------------------------
+
+_HX_CONTAINER_KEYS: dict[str, list[str]] = {
+    "conditions":  ["conditions", "Conditions", "problems", "diagnoses"],
+    "medications": ["medications", "Medications", "drugs", "prescriptions"],
+    "labs":        ["labs", "labResults", "lab_results", "observations",
+                    "Labs", "results"],
+    "encounters":  ["encounters", "visits", "Encounters", "Visits",
+                    "appointments"],
+}
+
+
+def _explode_fhir_bundle(data: object, resource_type: str = "") -> list[dict]:
+    """Flatten any HealthEx payload into a list of individual resource dicts.
+
+    Resolution order:
+      1. FHIR Bundle  → extract entry[*].resource
+      2. HealthEx container dict (e.g. {"labs": [...]})  → inner list
+      3. Generic container (any value that is a list of dicts)
+      4. Plain list   → use as-is
+      5. Single dict  → wrap in [data]
+    """
+    if isinstance(data, dict):
+        if data.get("resourceType") == "Bundle":
+            return [
+                e["resource"]
+                for e in data.get("entry", [])
+                if isinstance(e.get("resource"), dict)
+            ]
+        for key in _HX_CONTAINER_KEYS.get(resource_type, []):
+            if key in data and isinstance(data[key], list):
+                return data[key]
+        for val in data.values():
+            if isinstance(val, list) and val and isinstance(val[0], dict):
+                return val
+        return [data]
+    if isinstance(data, list):
+        return data
+    return []
+
 
 async def _set_data_track(track: str, tool_name: str) -> str:
     """Persist the active data track to system_config.
@@ -554,14 +596,58 @@ def register(mcp: FastMCP):
                 )
 
             fhir_data = json.loads(fhir_json)
-            resources = (
-                fhir_data if isinstance(fhir_data, list) else [fhir_data]
-            )
+
+            # ── Patient existence guard ────────────────────────────────────
+            async with pool.acquire() as _guard_conn:
+                _exists = await _guard_conn.fetchval(
+                    "SELECT id FROM patients WHERE id = $1::uuid", patient_id
+                )
+            if _exists is None:
+                return json.dumps({
+                    "status": "error",
+                    "error": (
+                        f"patient_id '{patient_id}' not found in patients table. "
+                        "Call register_healthex_patient first."
+                    ),
+                })
+
+            # ── Raw text payload: cache and short-circuit ──────────────────
+            # json.loads of a JSON-encoded string (e.g. '"#Conditions 5y|..."')
+            # produces a Python str, not a dict/list.
+            if not isinstance(fhir_data, (dict, list)):
+                _raw_id = str(uuid.uuid4())
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO raw_fhir_cache
+                            (patient_id, source_name, resource_type,
+                             raw_json, fhir_resource_id, retrieved_at, processed)
+                        VALUES ($1, $2, $3, $4, $5, NOW(), false)
+                        ON CONFLICT (patient_id, source_name, fhir_resource_id)
+                        DO UPDATE SET raw_json = EXCLUDED.raw_json,
+                                      retrieved_at = NOW(), processed = false
+                        """,
+                        patient_id, "healthex", resource_type,
+                        json.dumps(str(fhir_data)), _raw_id,
+                    )
+                return json.dumps({
+                    "status": "ok",
+                    "resource_type": resource_type,
+                    "records_written": 0,
+                    "total_written": 0,
+                    "patient_id": patient_id,
+                    "note": "raw text cached, normalization skipped",
+                })
+
+            # ── Explode FHIR Bundles / HealthEx container dicts ───────────
+            # Produces a flat list of individual FHIR resource dicts so the
+            # transform functions receive one resource per item (not a blob).
+            resources = _explode_fhir_bundle(fhir_data, resource_type)
 
             # Stage 4: cache raw FHIR before any transformation
             async with pool.acquire() as conn:
                 for resource in resources:
-                    fhir_id = resource.get("id", str(uuid.uuid4()))
+                    fhir_id = resource.get("id", str(uuid.uuid4())) if isinstance(resource, dict) else str(uuid.uuid4())
                     await conn.execute(
                         """
                         INSERT INTO raw_fhir_cache
@@ -667,47 +753,11 @@ def register(mcp: FastMCP):
                             rec.get("data_source", "healthex"),
                         )
                     elif resource_type == "summary":
-                        await conn.execute(
-                            """
-                            INSERT INTO patients
-                                (id, mrn, first_name, last_name, birth_date,
-                                 gender, race, ethnicity, address_line, city,
-                                 state, zip_code, is_synthetic, data_source)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                                    $11, $12, $13, $14)
-                            ON CONFLICT (mrn) DO UPDATE SET
-                                first_name = EXCLUDED.first_name,
-                                last_name = EXCLUDED.last_name,
-                                birth_date = EXCLUDED.birth_date,
-                                gender = EXCLUDED.gender,
-                                race = EXCLUDED.race,
-                                ethnicity = EXCLUDED.ethnicity,
-                                data_source = EXCLUDED.data_source
-                            """,
-                            rec.get("id", str(uuid.uuid4())),
-                            rec.get("mrn", ""),
-                            rec.get("first_name", ""),
-                            rec.get("last_name", ""),
-                            rec.get("birth_date"),
-                            rec.get("gender", ""),
-                            rec.get("race", ""),
-                            rec.get("ethnicity", ""),
-                            rec.get("address_line", ""),
-                            rec.get("city", ""),
-                            rec.get("state", ""),
-                            rec.get("zip_code", ""),
-                            rec.get("is_synthetic", False),
-                            rec.get("data_source", "healthex"),
-                        )
-                        # Retrieve the UUID that survived ON CONFLICT (mrn)
-                        # so callers that skipped register_healthex_patient
-                        # can recover the correct patient_id from the return value.
-                        _summary_row = await conn.fetchrow(
-                            "SELECT id FROM patients WHERE mrn = $1",
-                            rec.get("mrn", ""),
-                        )
-                        if _summary_row:
-                            patient_id = str(_summary_row["id"])
+                        # patient_id is authoritative — do NOT derive a new UUID
+                        # from the payload. Demographics are owned by
+                        # register_healthex_patient; summary ingest only
+                        # acknowledges receipt and increments records_written.
+                        pass
                     records_written += 1
 
                 # Stage 8: update source_freshness
