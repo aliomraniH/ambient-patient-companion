@@ -799,5 +799,84 @@ python agents/orchestrator.py
 
 ---
 
-*Last updated: April 2026 — Ambient Action Model v2.0*
+---
+
+## 13. HealthEx Session-Bridge Protocol
+
+Real-patient data enters the warehouse through an 8-step session-bridge because HealthEx keeps records in the authenticated Claude session, not the warehouse. All 8 steps are mandatory for `run_deliberation` to function.
+
+### Why it matters
+
+`run_deliberation` is a 5-phase dual-LLM critique loop. Phase 0 compiles patient context by querying the warehouse PostgreSQL tables (`patient_conditions`, `patient_medications`, `biometric_readings`, `clinical_events`). If no patient row exists in `patients`, the context compiler raises a 404 and the deliberation pipeline never fires.
+
+Synthetic patients (Maria Chen, `MC-2025-4829`) work end-to-end because they have fixed MRNs pre-seeded in the warehouse. Real patients connected via HealthEx do not — hence this protocol.
+
+### The 8-Step Workflow
+
+| Step | Tool | Purpose |
+|---|---|---|
+| 1 | `get_data_source_status` | Confirm `DATA_TRACK` and existing patients |
+| **2** | **`register_healthex_patient`** | **Mandatory bootstrapper — upserts `patients` row (`is_synthetic=False`), initialises `data_sources` + `source_freshness`, sets `DATA_TRACK=healthex`, returns canonical UUID** |
+| 3 | `use_healthex` | Switch session to HealthEx connector |
+| 4a | `get_health_summary` (HealthEx) | Pull patient demographics |
+| 4b | `get_lab_results` (HealthEx) | Pull labs as FHIR Observations |
+| 4c | `get_medications` (HealthEx) | Pull meds as FHIR MedicationRequests |
+| 4d | `get_conditions` (HealthEx) | Pull diagnoses as FHIR Conditions |
+| 5 | `ingest_from_healthex` (×4) | Write each resource type to warehouse (returns JSON with canonical `patient_id`) |
+| 6 | `check_data_freshness` | Verify records landed in warehouse |
+| 7 | `run_deliberation` | Fire 5-phase Claude + GPT-4 critique loop |
+| 8 | `get_deliberation_results` | Retrieve anticipatory scenarios + nudges |
+
+### Step 2 Detail: `register_healthex_patient`
+
+```
+Input:  health_summary_json  (raw JSON from HealthEx get_health_summary)
+        mrn_override         (optional — override MRN when summary omits it)
+
+Accepts:
+  • Bare FHIR Patient resource   {"resourceType": "Patient", ...}
+  • FHIR Bundle                  {"resourceType": "Bundle", "entry": [...]}
+  • HealthEx summary dict        {"name": "Ali Omrani", "mrn": "HX-...", ...}
+
+Output: {"status": "registered", "patient_id": "<UUID>", "mrn": "<MRN>",
+          "is_synthetic": false, "data_track": "healthex", "next_step": "..."}
+```
+
+The returned `patient_id` UUID must be passed to all subsequent `ingest_from_healthex` calls.
+
+### `ingest_from_healthex` return format (Patch 3)
+
+Previously returned a plain string. Now returns structured JSON:
+
+```json
+{
+  "status": "ok",
+  "resource_type": "labs",
+  "records_written": 12,
+  "duration_ms": 340,
+  "patient_id": "<canonical-UUID>"
+}
+```
+
+The `patient_id` in the response is the canonical UUID recovered from `ON CONFLICT (mrn)` — useful when `register_healthex_patient` was accidentally skipped.
+
+### Files Changed (Patches 1–4)
+
+| File | Change |
+|---|---|
+| `mcp-server/skills/ingestion_tools.py` | `register_healthex_patient` at module level + `mcp.tool()` registration; `ingest_from_healthex` captures canonical UUID + returns JSON |
+| `mcp-server/transforms/fhir_to_schema.py` | `transform_patient(is_synthetic=True)` — callers can pass `False` for real patients |
+| `ingestion/tests/test_healthex_registration.py` | HR-1→HR-7 tests (mock-only, no live DB required) |
+| `mcp-server/tests/fixtures/fhir/` | Minimal Synthea FHIR bundles for `generate_patient` skill tests |
+
+### Test Commands
+
+```bash
+pytest ingestion/tests/test_healthex_registration.py -v   # HR-1→HR-7
+pytest ingestion/tests/test_pipeline.py -v                # P1→P8
+pytest mcp-server/tests/ -v                               # schema + skills + generators
+pytest tests/e2e/test_deliberation_tools.py -v            # UC-16→UC-20b
+```
+
+*Last updated: April 2026 — Ambient Action Model v2.1*
 *Architecture source: "Healthcare AI Architecture: Six Technical Pillars" (2026)*

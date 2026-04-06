@@ -8,6 +8,14 @@ from datetime import date, timedelta
 
 pytest_plugins = ["pytest_asyncio"]
 
+# Point Synthea output at project-local fixtures when the real directory is absent
+# or has no FHIR files. We override (not just setdefault) so the env variable
+# set by the runner shell doesn't silently hide the fixture directory.
+_default_synthea = os.path.join(os.path.dirname(__file__), "fixtures")
+_env_synthea = os.environ.get("SYNTHEA_OUTPUT_DIR", "")
+if not _env_synthea or not os.path.isdir(os.path.join(_env_synthea, "fhir")):
+    os.environ["SYNTHEA_OUTPUT_DIR"] = _default_synthea
+
 _has_db = "DATABASE_URL" in os.environ
 
 

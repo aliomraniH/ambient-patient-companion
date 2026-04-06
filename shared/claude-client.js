@@ -12,11 +12,17 @@
 
 /**
  * Base URL for the FastMCP clinical intelligence server.
- * Override by setting window.FASTMCP_BASE_URL before loading this script.
+ *
+ * Resolution order:
+ *  1. window.FASTMCP_BASE_URL — set before loading this script to override
+ *  2. Browser context → relative proxy path (/api/mcp/8001) so the request
+ *     is forwarded by Next.js without exposing localhost to the browser
+ *  3. Node / server context → direct localhost URL (used in tests)
+ *
  * @type {string}
  */
 const FASTMCP_BASE_URL = (typeof window !== 'undefined' && window.FASTMCP_BASE_URL)
-  || 'http://localhost:8001';
+  || (typeof window !== 'undefined' ? '/api/mcp/8001' : 'http://localhost:8001');
 
 /**
  * @typedef {Object} ClinicalResponse

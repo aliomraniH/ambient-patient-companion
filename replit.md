@@ -16,10 +16,11 @@ Seven specialized agents communicate through a shared MCP tool registry. All age
 ambient-patient-companion/
 ├── replit-app/          ← Next.js 16 frontend (main web UI, port 5000)
 │   ├── app/             ← App Router pages + API routes
+│   │   └── api/mcp/[port]/[[...segments]]/route.ts  ← MCP proxy (→ localhost:8001/2/3)
 │   ├── components/      ← React UI components
 │   └── lib/db.ts        ← PostgreSQL pool (pg)
 ├── server/              ← Phase 1 Clinical Intelligence FastMCP server (port 8001)
-│   ├── mcp_server.py    ← FastMCP server: 5 tools + REST wrappers + guardrails
+│   ├── mcp_server.py    ← FastMCP server: 13 tools + REST wrappers + guardrails
 │   └── guardrails/      ← input_validator, output_validator, clinical_rules
 ├── mcp-server/          ← FastMCP Python agent server
 │   ├── db/schema.sql    ← 22-table PostgreSQL schema (source of truth)
@@ -199,7 +200,20 @@ cd replit-app && npm test
 cd replit_dashboard && python -m pytest tests/ -v
 ```
 
-**Total: 313 tests, all passing (100 phase1 + 82 deliberation + 15 e2e + 49 backend + 37 frontend + 30 dashboard).**
+### Ingestion & HealthEx Registration — 23 tests
+```bash
+python -m pytest ingestion/tests/ -v                        # 16 passed (adapters + pipeline)
+python -m pytest ingestion/tests/test_healthex_registration.py -v  # 7 passed (HR-1→HR-7)
+```
+
+**Total: 338 tests, all passing**
+- 100 Phase 1 clinical intelligence
+- 82 Phase 2 deliberation (32 unit + 50 feature)
+- 8 e2e deliberation tools (UC-16→UC-20b)
+- 48 mcp-server backend
+- 37 Next.js frontend
+- 30 config dashboard
+- 23 ingestion (16 pipeline/adapters + 7 HealthEx HR tests)
 
 ## Package Manager
 
@@ -233,6 +247,9 @@ cd replit_dashboard && python -m pytest tests/ -v
 - **Port config**: Next.js=5000, Config Dashboard=8080, Clinical MCP=8001, Skills MCP=8002, Ingestion MCP=8003
 - **FastMCP**: `FastMCP()` does NOT accept `description=` kwarg — causes startup crash
 - **Deliberation**: `run_deliberation` is async fire-and-forget — poll `get_deliberation_results` for output
+- **MCP Proxy**: Browser calls `/api/mcp/<port>/tools/<name>` → Next.js route proxies to `http://localhost:<port>/tools/<name>`; shared/claude-client.js uses relative `/api/mcp/8001` in browser context
+- **HealthEx Protocol**: `register_healthex_patient` MUST be called before `ingest_from_healthex` — it bootstraps the `patients` row that `run_deliberation` requires. See CLAUDE.md Section 13.
+- **Synthea fixtures**: `mcp-server/tests/fixtures/fhir/` holds 3 minimal FHIR bundles; conftest.py sets `SYNTHEA_OUTPUT_DIR` to fixtures when `/home/runner/synthea-output/fhir/` is absent
 
 ## Key Bug Fixes Applied
 

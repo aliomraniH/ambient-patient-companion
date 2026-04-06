@@ -1,0 +1,218 @@
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "00000000-0000-0000-0000-000000000002",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MR"
+                }
+              ]
+            },
+            "value": "MRN-SYNTH-0002"
+          }
+        ],
+        "name": [
+          {
+            "family": "Williams",
+            "given": [
+              "Carol"
+            ]
+          }
+        ],
+        "birthDate": "1969-12-27",
+        "gender": "female",
+        "address": [
+          {
+            "line": [
+              "102 Main St"
+            ],
+            "city": "Boston",
+            "state": "Massachusetts",
+            "postalCode": "02112"
+          }
+        ],
+        "extension": [
+          {
+            "url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-race",
+            "extension": [
+              {
+                "url": "text",
+                "valueString": "White"
+              }
+            ]
+          },
+          {
+            "url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-ethnicity",
+            "extension": [
+              {
+                "url": "text",
+                "valueString": "Not Hispanic or Latino"
+              }
+            ]
+          }
+        ]
+      },
+      "fullUrl": "urn:uuid:00000000-0000-0000-0000-000000000002"
+    },
+    {
+      "resource": {
+        "resourceType": "Condition",
+        "id": "46355320-afc5-4e92-8c3a-48abd721a19f",
+        "subject": {
+          "reference": "urn:uuid:00000000-0000-0000-0000-000000000002"
+        },
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "44054006",
+              "display": "Type 2 diabetes mellitus"
+            },
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "E11",
+              "display": "Type 2 diabetes mellitus"
+            }
+          ],
+          "text": "Type 2 diabetes mellitus"
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active"
+            }
+          ]
+        },
+        "onsetDateTime": "2020-03-15"
+      },
+      "fullUrl": "urn:uuid:51c3e258-3dee-415e-af22-5cc6c9b29b3a"
+    },
+    {
+      "resource": {
+        "resourceType": "MedicationRequest",
+        "id": "838c60b5-e7bb-41a0-bfdd-ecd731177ea3",
+        "subject": {
+          "reference": "urn:uuid:00000000-0000-0000-0000-000000000002"
+        },
+        "status": "active",
+        "intent": "order",
+        "medicationCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+              "code": "860975",
+              "display": "Metformin hydrochloride 500 MG Oral Tablet"
+            }
+          ],
+          "text": "Metformin hydrochloride 500 MG"
+        },
+        "authoredOn": "2020-03-15"
+      },
+      "fullUrl": "urn:uuid:56083d36-3634-4484-aeb3-eb8e09151967"
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "id": "c438880b-c75c-4af8-b719-9fe7c98d46b9",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "85354-9",
+              "display": "Blood pressure panel"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "urn:uuid:00000000-0000-0000-0000-000000000002"
+        },
+        "effectiveDateTime": "2024-01-15T08:00:00Z",
+        "component": [
+          {
+            "code": {
+              "coding": [
+                {
+                  "system": "http://loinc.org",
+                  "code": "8480-6",
+                  "display": "Systolic blood pressure"
+                }
+              ]
+            },
+            "valueQuantity": {
+              "value": 132,
+              "unit": "mmHg"
+            }
+          },
+          {
+            "code": {
+              "coding": [
+                {
+                  "system": "http://loinc.org",
+                  "code": "8462-4",
+                  "display": "Diastolic blood pressure"
+                }
+              ]
+            },
+            "valueQuantity": {
+              "value": 82,
+              "unit": "mmHg"
+            }
+          }
+        ]
+      },
+      "fullUrl": "urn:uuid:6a6f59c2-ffb3-478d-be41-bd9813cdc3e1"
+    },
+    {
+      "resource": {
+        "resourceType": "Encounter",
+        "id": "54859a5c-5af0-4e39-9acf-673199a89cb1",
+        "status": "finished",
+        "class": {
+          "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+          "code": "AMB",
+          "display": "ambulatory"
+        },
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "http://snomed.info/sct",
+                "code": "185347001",
+                "display": "Encounter for problem"
+              }
+            ],
+            "text": "Encounter for problem"
+          }
+        ],
+        "subject": {
+          "reference": "urn:uuid:00000000-0000-0000-0000-000000000002"
+        },
+        "period": {
+          "start": "2024-01-15T08:00:00Z",
+          "end": "2024-01-15T08:30:00Z"
+        }
+      },
+      "fullUrl": "urn:uuid:b7fa1d9e-939a-4cb3-a092-6f69d1eea915"
+    }
+  ]
+}
