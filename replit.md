@@ -45,28 +45,61 @@ ambient-patient-companion/
 └── requirements.txt     ← Root Python dependencies (pytest-asyncio==0.21.2)
 ```
 
-## Workflows (3 active)
+## Workflows (5 active)
 
 | Workflow | Command | Port |
 |---------|---------|------|
 | Start application | `cd replit-app && npm run dev` | 5000 |
 | Config Dashboard | `cd replit_dashboard && python server.py` | 8080 |
 | Clinical MCP Server | `MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server` | 8001 |
+| Skills MCP Server | `cd mcp-server && MCP_TRANSPORT=streamable-http MCP_PORT=8002 python server.py` | 8002 |
+| Ingestion MCP Server | `MCP_TRANSPORT=streamable-http MCP_PORT=8003 python -m ingestion.server` | 8003 |
 
-## Phase 1 Clinical Intelligence (server/)
+## Three MCP Servers (all public via Next.js proxy)
 
-Five tools live at `http://localhost:8001`:
+| Server | Port | Public Path | Tools | Claude Web Name |
+|--------|------|-------------|-------|-----------------|
+| ClinicalIntelligence | 8001 | `/mcp` | 9 | `ambient-clinical-intelligence` |
+| PatientCompanion (Skills) | 8002 | `/mcp-skills` | 17 | `ambient-skills-companion` |
+| PatientIngestion | 8003 | `/mcp-ingestion` | 1 | `ambient-ingestion` |
 
-| Endpoint | Tool | Description |
-|---------|------|-------------|
-| `GET /health` | — | Liveness check |
-| `POST /tools/clinical_query` | `clinical_query` | 3-layer guardrail pipeline → Claude |
-| `GET /tools/get_guideline` | `get_guideline` | Fetch USPSTF/ADA guideline by ID |
-| `POST /tools/check_screening_due` | `check_screening_due` | Overdue screenings for patient |
-| `POST /tools/flag_drug_interaction` | `flag_drug_interaction` | Known drug interactions |
-| `GET /tools/get_synthetic_patient` | `get_synthetic_patient` | Maria Chen demo patient (MRN 4829341) |
+All three are proxied through Next.js (port 5000) — no port number in public URLs.
 
-Also accessible via MCP protocol at `http://localhost:8001/mcp` (streamable-http transport).
+### Server 1 — ClinicalIntelligence (`server/mcp_server.py`)
+
+Thirteen tools at `https://[domain]/mcp` (9 Phase 1 + 4 Deliberation):
+
+| Tool | Description |
+|------|-------------|
+| `clinical_query` | 3-layer guardrail pipeline → Claude |
+| `get_guideline` | Fetch USPSTF/ADA guideline by ID |
+| `check_screening_due` | Overdue screenings for patient profile |
+| `flag_drug_interaction` | Known drug interactions |
+| `get_synthetic_patient` | Maria Chen demo patient (MRN 4829341) |
+| `use_healthex` | Switch data track to HealthEx real records |
+| `use_demo_data` | Switch data track to Synthea demo data |
+| `switch_data_track` | Switch to named track (synthea/healthex/auto) |
+| `get_data_source_status` | Report active track + available sources |
+| `run_deliberation` | Trigger async dual-LLM deliberation for a patient |
+| `get_deliberation_results` | Retrieve stored deliberation outputs |
+| `get_patient_knowledge` | Fetch accumulated patient-specific knowledge |
+| `get_pending_nudges` | List undelivered nudges for patient or care team |
+
+Also has REST wrappers at `/tools/<name>` and liveness check at `/health`.
+
+### Server 2 — PatientCompanion (`mcp-server/server.py`)
+
+Seventeen tools at `https://[domain]/mcp-skills` (auto-discovered from `mcp-server/skills/`):
+`compute_obt_score`, `compute_provider_risk`, `run_crisis_escalation`, `run_food_access_nudge`,
+`generate_daily_checkins`, `generate_patient`, `generate_daily_vitals`, `generate_previsit_brief`,
+`run_sdoh_assessment`, `use_healthex`, `use_demo_data`, `switch_data_track`,
+`get_data_source_status`, `check_data_freshness`, `run_ingestion`, `get_source_conflicts`,
+`ingest_from_healthex`
+
+### Server 3 — PatientIngestion (`ingestion/server.py`)
+
+One tool at `https://[domain]/mcp-ingestion`:
+`trigger_ingestion` — runs the full ETL pipeline for a patient from a named source adapter.
 
 **Claude web MCP config** — download from Config Dashboard (port 8080):
 - Dev (always available): `GET /api/generate/mcp-config?env=dev`
@@ -78,10 +111,32 @@ Guardrails pipeline:
 2. **Escalation rules**: life-threatening, controlled substances, pediatric, pregnancy
 3. **Output**: citation check, PHI leakage scan, diagnostic language flags, drug grounding
 
+## Phase 2 — Dual-LLM Deliberation Engine (`server/deliberation/`)
+
+An async pre-computation layer where Claude (Anthropic) and GPT-4 (OpenAI) independently analyze a patient's clinical context, cross-critique each other, then synthesize into 5 structured output categories:
+
+```
+server/deliberation/
+├── schemas.py          ← 20 Pydantic models for all data flow
+├── engine.py           ← 5-phase pipeline orchestrator
+├── context_compiler.py ← Phase 0: assemble patient EHR context
+├── analyst.py          ← Phase 1: parallel Claude + GPT-4 analysis
+├── critic.py           ← Phase 2: cross-critique with convergence
+├── synthesizer.py      ← Phase 3: unified synthesis
+├── behavioral_adapter.py ← Phase 4: SMS/nudge formatting
+├── knowledge_store.py  ← Phase 5: atomic DB commit
+├── prompts/            ← 5 XML prompt templates
+└── migrations/001_deliberation_tables.sql  ← 4 new tables
+```
+
+4 new DB tables: `deliberations`, `deliberation_outputs`, `patient_knowledge`, `core_knowledge_updates`
+
+UI: `prototypes/pcp-encounter.html` has 2 tabs — **Clinical Workspace** and **AI Deliberation** — with `prototypes/components/deliberation-panel.js` handling the deliberation panel.
+
 ## Database
 
 - **Provider**: Replit built-in PostgreSQL
-- **Schema**: `mcp-server/db/schema.sql` (22 tables, fully FK-constrained)
+- **Schema**: `mcp-server/db/schema.sql` (22 core tables) + `server/deliberation/migrations/001_deliberation_tables.sql` (4 deliberation tables = 26 total)
 - **Connection**: `DATABASE_URL` environment variable (auto-set by Replit)
 - **Key constraints**:
   - `is_stale` in `source_freshness` is a regular boolean (not generated — PostgreSQL requires immutable expressions for generated columns)
@@ -118,6 +173,12 @@ python mcp-server/scripts/create_minimal_fixtures.py
 python -m pytest tests/phase1/ -v
 ```
 
+### Phase 2 Deliberation Engine — 32 unit tests + 50 feature tests
+```bash
+python -m pytest server/deliberation/tests/ -v          # 32 passed, 1 skipped
+python -m pytest tests/phase2/test_deliberation_features.py -v  # 50 passed
+```
+
 ### End-to-end MCP use-case suite — 15 tests
 ```bash
 python -m pytest tests/e2e/ -v
@@ -138,7 +199,7 @@ cd replit-app && npm test
 cd replit_dashboard && python -m pytest tests/ -v
 ```
 
-**Total: 231 tests, all passing.**
+**Total: 313 tests, all passing (100 phase1 + 82 deliberation + 15 e2e + 49 backend + 37 frontend + 30 dashboard).**
 
 ## Package Manager
 
@@ -163,19 +224,23 @@ cd replit_dashboard && python -m pytest tests/ -v
 ## Key Engineering Rules
 
 - **asyncpg**: Never use `$N + INTERVAL '1 day'` — pre-compute bounds in Python
+- **asyncpg**: Never use `do` as a SQL table alias — `do` is a reserved PostgreSQL keyword; use `dout` or similar
 - **MCP skills**: Never use `print()` — all logging goes to `sys.stderr`
 - **Model name**: `claude-sonnet-4-5` (hardcoded in mcp_server.py, verified by tests)
 - **pytest-asyncio**: Pinned to 0.21.2 — 1.x breaks session-scoped event_loop
 - **Replit Secrets**: Take priority over local `.env` in dashboard and connectivity tests
 - **Dashboard tests**: `clean_env` fixture pops ALL_KEYS from os.environ — isolates from Replit Secrets
-- **Port config**: Next.js=5000, Config Dashboard=8080, Clinical MCP Server=8001
+- **Port config**: Next.js=5000, Config Dashboard=8080, Clinical MCP=8001, Skills MCP=8002, Ingestion MCP=8003
+- **FastMCP**: `FastMCP()` does NOT accept `description=` kwarg — causes startup crash
+- **Deliberation**: `run_deliberation` is async fire-and-forget — poll `get_deliberation_results` for output
 
 ## Key Bug Fixes Applied
 
-1. **generate_patient.py**: `birth_date` string→`date` object conversion for asyncpg
-2. **compute_obt_score.py**: Pre-computed `target_plus_one` to avoid asyncpg type error; returns JSON
-3. **crisis_escalation.py**: Same INTERVAL fix; returns JSON with `escalation_triggered` field
-4. **pytest-asyncio**: Pinned to 0.21.2 (1.x broke session-scoped event_loop pattern)
-5. **schema.sql**: Added FK constraints to 10 previously unlinked tables; added UNIQUE index on biometric_readings
-6. **dashboard completeness**: Uses `_explicitly_set()` — defaults don't count as user-configured
-7. **FHIR fixtures**: 10 minimal Synthea bundles in `/home/runner/synthea-output/fhir/`
+1. **get_pending_nudges SQL**: `do` is a reserved PostgreSQL keyword — renamed table alias to `dout` in deliberation JOIN query
+2. **generate_patient.py**: `birth_date` string→`date` object conversion for asyncpg
+3. **compute_obt_score.py**: Pre-computed `target_plus_one` to avoid asyncpg type error; returns JSON
+4. **crisis_escalation.py**: Same INTERVAL fix; returns JSON with `escalation_triggered` field
+5. **pytest-asyncio**: Pinned to 0.21.2 (1.x broke session-scoped event_loop pattern)
+6. **schema.sql**: Added FK constraints to 10 previously unlinked tables; added UNIQUE index on biometric_readings
+7. **dashboard completeness**: Uses `_explicitly_set()` — defaults don't count as user-configured
+8. **FHIR fixtures**: 10 minimal Synthea bundles in `/home/runner/synthea-output/fhir/`
