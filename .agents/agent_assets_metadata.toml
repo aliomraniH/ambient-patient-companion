@@ -6,3 +6,15 @@ id = "zuO5X31LkLHFw7Asrp8qw"
 uri = "file://README.md"
 type = "text"
 title = "Ambient Patient Companion — README"
+
+[[outputs]]
+id = "f0urLFbAiz-kx4yEZjdNX"
+uri = "file://submission/icon.png"
+type = "image"
+title = "icon.png — 512×512 MCP logo"
+
+[[outputs]]
+id = "OIvDeoZzhhz3iJTw4dJw8"
+uri = "file://submission/README.md"
+type = "text"
+title = "README.md — Anthropic Connectors Directory submission"
