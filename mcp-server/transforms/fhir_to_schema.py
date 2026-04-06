@@ -30,6 +30,7 @@ def _parse_date(date_str: str | None) -> date | None:
 def transform_patient(
     patient_resource: dict[str, Any],
     data_source: str = "synthea",
+    is_synthetic: bool = True,
 ) -> dict[str, Any]:
     """Transform a FHIR Patient resource into a patients table record."""
     name = {}
@@ -83,7 +84,7 @@ def transform_patient(
         "city": _safe_str(address.get("city")),
         "state": _safe_str(address.get("state")),
         "zip_code": _safe_str(address.get("postalCode")),
-        "is_synthetic": True,
+        "is_synthetic": is_synthetic,
         "data_source": data_source,
     }
 

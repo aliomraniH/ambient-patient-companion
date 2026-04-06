@@ -799,5 +799,36 @@ python agents/orchestrator.py
 
 ---
 
+---
+
+## 13. HealthEx Session-Bridge Protocol
+
+### Correct protocol for real patients (8 steps)
+
+**Step 1** — HealthEx: `get_health_summary`
+  → raw JSON response saved as `summary_json`
+
+**Step 2 — NEW REQUIRED:** `register_healthex_patient(health_summary_json=summary_json)`
+  → returns `{"patient_id": "<uuid>", "mrn": "<mrn>", ...}`
+  → save `patient_id` — use it for ALL subsequent calls in this session
+
+**Step 3** — HealthEx: `get_labs` → `ingest_from_healthex(patient_id, "labs", <json>)`
+**Step 4** — HealthEx: `get_medications` → `ingest_from_healthex(patient_id, "medications", <json>)`
+**Step 5** — HealthEx: `get_conditions` → `ingest_from_healthex(patient_id, "conditions", <json>)`
+**Step 6** — HealthEx: `get_visits` → `ingest_from_healthex(patient_id, "encounters", <json>)`
+
+**Step 7** — `check_data_freshness(patient_id)` — verify all 5 resource types landed
+
+**Step 8** — `run_deliberation(patient_id)` — 5-phase dual-LLM critique loop now works
+
+### Why Step 2 is mandatory
+
+`run_deliberation` → `context_compiler` does `WHERE mrn = $1` in the patients table.
+Without Step 2, no patient row exists, and the deliberation engine raises
+"Patient with MRN '...' not found". Maria Chen works because she was
+registered via `generate_patient` during Synthea seeding.
+
+---
+
 *Last updated: April 2026 — Ambient Action Model v2.0*
 *Architecture source: "Healthcare AI Architecture: Six Technical Pillars" (2026)*
