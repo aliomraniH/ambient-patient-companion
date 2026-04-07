@@ -223,14 +223,16 @@ cd replit-app && npm test
 cd replit_dashboard && python -m pytest tests/ -v
 ```
 
-**Total: 417 tests (380 Python + 37 Jest), all passing**
+**Total: 532 tests (495 Python + 37 Jest), all passing**
 | Suite | Count |
 |-------|-------|
 | Phase 1 clinical intelligence | 106 |
-| Phase 2 deliberation (unit + features) | 97 |
+| Phase 2 deliberation (unit + features + fence-stripping) | 119 |
 | E2E use-case suite (UC-01→UC-18) | 18 |
 | Skills MCP backend | 60 |
-| Adaptive ingestion pipeline | 69 |
+| Adaptive ingestion pipeline (parsers + edge cases + perf) | 120 |
+| MCP tool registration + REST smoke tests | 24 |
+| DB integration tests — all 5 formats + live DB | 18 |
 | Next.js frontend (Jest) | 37 |
 | Config dashboard | 30 |
 

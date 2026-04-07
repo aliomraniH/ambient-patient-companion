@@ -1528,6 +1528,17 @@ async def ingest_from_healthex(
                             transform_clinical_observations, transform_encounters,
                         )
                         written_by_table[resource_type] = n
+                        # Set format metadata for the old path
+                        try:
+                            from ingestion.adapters.healthex.format_detector import (
+                                detect_format as _detect_fmt,
+                            )
+                            _fmt, _ = _detect_fmt(fhir_json)
+                            format_detected = _fmt.value
+                            parser_used = f"legacy_{_fmt.value}"
+                        except Exception:
+                            format_detected = "fhir_bundle_json"
+                            parser_used = "legacy_fhir_bundle"
                     else:
                         fhir_data = None  # force adaptive path
 

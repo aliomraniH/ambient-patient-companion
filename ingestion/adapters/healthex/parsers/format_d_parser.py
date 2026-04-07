@@ -12,7 +12,7 @@ _normalize_to_fhir → transform_* path.
 
 def parse_fhir_bundle(payload: dict, resource_type: str) -> list[dict]:
     """Extract resources from a FHIR Bundle and return HealthEx native dicts."""
-    entries = payload.get("entry", [])
+    entries = payload.get("entry") or []
     rows: list[dict] = []
 
     for entry in entries:
@@ -57,7 +57,7 @@ def _observation_to_native(r: dict) -> dict | None:
         or ""
     )
 
-    vq = r.get("valueQuantity", {})
+    vq = r.get("valueQuantity") or {}
     value = vq.get("value")
     unit = vq.get("unit", "")
     date = (r.get("effectiveDateTime") or "")[:10]

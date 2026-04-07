@@ -158,7 +158,7 @@ def _fhir_dict_to_native(fhir: dict, resource_type: str) -> dict | None:
             "name": name,
             "status": status,
             "onset_date": onset,
-            "code": _first_coding_field(code, "code") or "",
+            "code": str(_first_coding_field(code, "code") or ""),
         }
 
     elif resource_type == "medications" and rt in (
