@@ -1,0 +1,113 @@
+Good, I have everything needed. Here's the Replit deployment prompt:
+
+---
+
+## Replit Deployment Prompt
+
+Copy and paste this into your Replit Agent or Claude session on Replit:
+
+---
+
+**Deploy branch `claude/fix-ingestion-pipeline-7qQy4` and run full verification.**
+
+### What changed (commit `f6047ab`)
+
+Three files were modified to fix the ingestion pipeline — 3 bugs, +152/-42 lines:
+
+**1. `mcp-server/skills/ingestion_tools.py` (main fix)**
+Previously, `ingest_from_healthex()` short-circuited all text payloads (Format A/B/C) with `records_written: 0` — caching raw text but never parsing it. Now the text-payload branch calls `adaptive_parse()` (which routes to the existing format_b_parser, format_a_parser, etc.), maps the output through a new `_native_to_warehouse_rows()` helper, and feeds the rows into the existing per-table INSERT loop. Two new module-level helpers were added:
+- `_parse_lab_value()` — extracts numeric values from lab strings like `"34.0-34.9"` or `">60"`
+- `_native_to_warehouse_rows()` — maps parser native dicts to the warehouse schema (`biometric_readings`, `patient_conditions`, `clinical_events`, `patient_medications`)
+
+**2. `server/deliberation/json_utils.py`**
+Added `safe_json_loads()` — strips markdown fences before `json.loads()`, raises `ValueError` with a preview on failure instead of raw `JSONDecodeError`.
+
+**3. `server/deliberation/synthesizer.py`**
+Replaced bare `json.loads(raw)` at the synthesizer output with `safe_json_loads(raw)` to prevent crashes when Claude wraps its response in markdown fences.
+
+### Step 1: Pull the latest code
+
+```bash
+git fetch origin claude/fix-ingestion-pipeline-7qQy4
+git checkout claude/fix-ingestion-pipeline-7qQy4
+git pull origin claude/fix-ingestion-pipeline-7qQy4
+```
+
+### Step 2: Install dependencies
+
+```bash
+pip install -r requirements.txt
+pip install -r replit_dashboard/requirements.txt
+cd replit-app && npm install && cd ..
+```
+
+### Step 3: Run all test suites
+
+```bash
+# Parser tests (Format A/B/C/D/E) — should all pass
+pytest ingestion/tests/test_parsers.py -v
+
+# Format detection tests — should all pass
+pytest ingestion/tests/test_format_detector.py -v
+
+# Adaptive ingest tests — should all pass
+pytest ingestion/tests/test_adaptive_ingest.py -v
+
+# Deliberation JSON utils (includes safe_json_loads coverage)
+pytest server/deliberation/tests/test_json_utils.py -v
+
+# Deliberation pipeline tests (synthesizer, analyst, critic, etc.)
+pytest server/deliberation/tests/ -v
+
+# MCP server skill tests
+cd mcp-server && pytest tests/ -v && cd ..
+
+# Full ingestion suite
+pytest ingestion/tests/ -v
+
+# E2E and integration tests
+pytest tests/ -v
+
+# Fix verification tests from previous runs
+pytest tests/phase1/test_fix_verification.py -v
+```
+
+### Step 4: Start all services and verify
+
+```bash
+# Start all 3 MCP servers + dashboard + frontend (uses .replit workflows)
+# Or manually:
+MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server &
+cd mcp-server && MCP_TRANSPORT=streamable-http MCP_PORT=8002 python server.py &
+MCP_TRANSPORT=streamable-http MCP_PORT=8003 python -m ingestion.server &
+cd replit_dashboard && python server.py &
+cd replit-app && npm run dev &
+```
+
+### Step 5: Live verification with HealthEx data
+
+After all services are running, verify the fix end-to-end by calling the MCP tools:
+
+1. **Register a patient** via `register_healthex_patient`
+2. **Ingest Format B conditions** — call `ingest_from_healthex` with a `#Conditions` compressed table payload. Verify `records_written > 0` (previously was always 0).
+3. **Ingest Format B labs** — call `ingest_from_healthex` with a `#Lab Report` payload. Verify rows appear in `biometric_readings`.
+4. **Ingest Format B visits** — call `ingest_from_healthex` with visit data. Verify rows in `clinical_events`.
+5. **Run deliberation** — call `run_deliberation` for the patient. Verify it does NOT crash with `Unterminated string` error, and `days_since_last_encounter` is a real number (not 999).
+
+### Expected test results
+
+| Suite | Expected |
+|-------|----------|
+| `test_parsers.py` | 23 passed |
+| `test_format_detector.py` | 14 passed |
+| `test_json_utils.py` | 8+ passed |
+| `test_adaptive_ingest.py` | all passed |
+| Format B → `records_written` | > 0 (was 0) |
+| Deliberation manual trigger | no json.loads crash |
+| `days_since_last_encounter` | real date (not 999) |
+
+### Key things to watch for
+
+- The `ConflictResolver` import uses `sys.path.insert` — verify it resolves correctly in the Replit environment where `mcp-server/` is the working directory for the Skills server
+- The `adaptive_parse` import from `ingestion.adapters.healthex.ingest` uses the same `sys.path` pattern — confirm it works from port 8002
+- The `_parse_date` import from `transforms.fhir_to_schema` is a top-level import in `ingestion_tools.py` — verify the `mcp-server/` PYTHONPATH includes this module
