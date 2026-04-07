@@ -9,6 +9,7 @@ from .schemas import (
     IndependentAnalysis, CrossCritique, RevisedAnalysis,
     PatientContextPackage, ClaimWithConfidence
 )
+from .json_utils import strip_markdown_fences
 
 
 CONVERGENCE_THRESHOLD = 0.90  # semantic similarity score to stop early
@@ -60,7 +61,7 @@ async def _critique_with_model(
     })
     raw = await call_model_fn(model, system_prompt,
                               "Produce your critique now.")
-    critique = CrossCritique.model_validate_json(raw)
+    critique = CrossCritique.model_validate_json(strip_markdown_fences(raw))
     critique.round_number = round_number
     return critique
 
@@ -110,7 +111,7 @@ No preamble. No markdown fences. Pure JSON.
 
     raw = await call_model_fn(model, revision_prompt,
                               "Produce your revised analysis now.")
-    revision = RevisedAnalysis.model_validate_json(raw)
+    revision = RevisedAnalysis.model_validate_json(strip_markdown_fences(raw))
     revision.model_id = model
     revision.round_number = round_number
     return revision
