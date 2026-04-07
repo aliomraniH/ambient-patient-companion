@@ -20,7 +20,7 @@ ambient-patient-companion/
 │   ├── components/      ← React UI components
 │   └── lib/db.ts        ← PostgreSQL pool (pg)
 ├── server/              ← Phase 1 Clinical Intelligence FastMCP server (port 8001)
-│   ├── mcp_server.py    ← FastMCP server: 15 tools + REST wrappers + guardrails
+│   ├── mcp_server.py    ← FastMCP server: 17 tools + REST wrappers + guardrails
 │   ├── guardrails/      ← input_validator, output_validator, clinical_rules
 │   └── deliberation/
 │       ├── json_utils.py  ← strip_markdown_fences() — handles LLM code-fence wrapping
@@ -71,7 +71,7 @@ ambient-patient-companion/
 
 | Server | Port | Public Path | Tools | Claude Web Name |
 |--------|------|-------------|-------|-----------------|
-| ClinicalIntelligence | 8001 | `/mcp` | 9 | `ambient-clinical-intelligence` |
+| ClinicalIntelligence | 8001 | `/mcp` | 17 | `ambient-clinical-intelligence` |
 | PatientCompanion (Skills) | 8002 | `/mcp-skills` | 17 | `ambient-skills-companion` |
 | PatientIngestion | 8003 | `/mcp-ingestion` | 1 | `ambient-ingestion` |
 
@@ -79,7 +79,7 @@ All three are proxied through Next.js (port 5000) — no port number in public U
 
 ### Server 1 — ClinicalIntelligence (`server/mcp_server.py`)
 
-Fifteen tools at `https://[domain]/mcp` (9 Phase 1 + 6 HealthEx/Deliberation):
+Seventeen tools at `https://[domain]/mcp` (9 Phase 1 + 8 HealthEx/Deliberation/Ingestion):
 
 | Tool | Description |
 |------|-------------|
@@ -93,7 +93,9 @@ Fifteen tools at `https://[domain]/mcp` (9 Phase 1 + 6 HealthEx/Deliberation):
 | `switch_data_track` | Switch to named track (synthea/healthex/auto) |
 | `get_data_source_status` | Report active track + available sources |
 | `register_healthex_patient` | Create/upsert a HealthEx patient row, return UUID |
-| `ingest_from_healthex` | Write HealthEx FHIR data into the warehouse |
+| `ingest_from_healthex` | Two-phase ingest: plan (fast) + execute (write rows) |
+| `execute_pending_plans` | Re-execute failed/pending ingestion plans from cache |
+| `get_ingestion_plans` | Read plan summaries + insights_summary for a patient |
 | `run_deliberation` | Trigger full dual-LLM deliberation for a patient |
 | `get_deliberation_results` | Retrieve stored deliberation outputs |
 | `get_patient_knowledge` | Fetch accumulated patient-specific knowledge |
@@ -101,8 +103,8 @@ Fifteen tools at `https://[domain]/mcp` (9 Phase 1 + 6 HealthEx/Deliberation):
 
 Also has REST wrappers at `/tools/<name>` and liveness check at `/health`.
 
-**HealthEx pipeline** (all on `/mcp`, port 8001):
-`use_healthex` → `register_healthex_patient` → `ingest_from_healthex` → `run_deliberation` → `get_deliberation_results` → `get_pending_nudges`
+**HealthEx two-phase pipeline** (all on `/mcp`, port 8001):
+`use_healthex` → `register_healthex_patient` → `ingest_from_healthex` (plan) → `execute_pending_plans` (write) → `get_ingestion_plans` (status) → `run_deliberation` → `get_deliberation_results` → `get_pending_nudges`
 
 ### Server 2 — PatientCompanion (`mcp-server/server.py`)
 
@@ -143,7 +145,8 @@ server/deliberation/
 ├── behavioral_adapter.py ← Phase 4: SMS/nudge formatting
 ├── knowledge_store.py  ← Phase 5: atomic DB commit
 ├── prompts/            ← 5 XML prompt templates
-└── migrations/001_deliberation_tables.sql  ← 4 new tables
+├── migrations/001_deliberation_tables.sql  ← 4 new tables
+└── migrations/002_ingestion_plans.sql     ← ingestion_plans table + raw_fhir_cache columns
 ```
 
 4 new DB tables: `deliberations`, `deliberation_outputs`, `patient_knowledge`, `core_knowledge_updates`
@@ -153,7 +156,7 @@ UI: `prototypes/pcp-encounter.html` has 2 tabs — **Clinical Workspace** and **
 ## Database
 
 - **Provider**: Replit built-in PostgreSQL
-- **Schema**: `mcp-server/db/schema.sql` (22 core tables) + `server/deliberation/migrations/001_deliberation_tables.sql` (4 deliberation tables = 26 total)
+- **Schema**: `mcp-server/db/schema.sql` (22 core tables) + `server/deliberation/migrations/001_deliberation_tables.sql` (4 deliberation tables) + `server/migrations/002_ingestion_plans.sql` (1 ingestion_plans table = 27 total)
 - **Connection**: `DATABASE_URL` environment variable (auto-set by Replit)
 - **Key constraints**:
   - `is_stale` in `source_freshness` is a regular boolean (not generated — PostgreSQL requires immutable expressions for generated columns)
@@ -187,7 +190,7 @@ python mcp-server/scripts/create_minimal_fixtures.py
 
 Each suite runs independently (conftest scoping keeps them isolated).
 
-### Phase 1 Clinical Intelligence — 124 tests
+### Phase 1 Clinical Intelligence — 132 tests
 ```bash
 python -m pytest tests/phase1/ -v
 ```
@@ -198,7 +201,7 @@ python -m pytest server/deliberation/tests/ -v   # 40 passed, 1 skipped
 python -m pytest tests/phase2/ -v                # 57 passed
 ```
 
-### End-to-end MCP use-case suite — 18 tests (5 skipped without live servers)
+### End-to-end MCP use-case suite — 21 tests (5 skipped without live servers)
 ```bash
 python -m pytest tests/e2e/ -v
 ```
@@ -208,9 +211,9 @@ python -m pytest tests/e2e/ -v
 cd mcp-server && pytest tests/ -v
 ```
 
-### Adaptive Ingestion Pipeline — 69 tests
+### Adaptive Ingestion Pipeline — 85 tests
 ```bash
-python -m pytest ingestion/tests/ -v   # format detection, parsers A/B/C/D, pipeline
+python -m pytest ingestion/tests/ -v   # format detection, parsers A/B/C/D, pipeline, planner, executor
 ```
 
 ### Frontend (Next.js/Jest) — 37 tests
@@ -223,14 +226,14 @@ cd replit-app && npm test
 cd replit_dashboard && python -m pytest tests/ -v
 ```
 
-**Total: 559 tests (522 Python + 37 Jest), all passing**
+**Total: 586 tests (549 Python + 37 Jest), all passing**
 | Suite | Count |
 |-------|-------|
-| Phase 1 clinical intelligence (incl. 18 DB format integration) | 124 |
+| Phase 1 clinical intelligence (incl. 18 DB format integration + 8 ingestion-plans IP tests) | 132 |
 | Phase 2 deliberation (unit + features + fence-stripping) | 119 |
-| E2E use-case suite (UC-01→UC-18) | 18 |
+| E2E use-case suite (UC-01→UC-18 + 3 ingestion-tool smoke tests) | 21 |
 | Skills MCP backend (incl. 27 fix verification tests) | 87 |
-| Adaptive ingestion pipeline (parsers + edge cases + perf) | 120 |
+| Adaptive ingestion pipeline (parsers + edge cases + perf + planner PL-1–8 + executor EX-1–8) | 136 |
 | MCP tool registration + REST smoke tests | 24 |
 | Next.js frontend (Jest) | 37 |
 | Config dashboard | 30 |
@@ -300,6 +303,8 @@ cd replit_dashboard && python -m pytest tests/ -v
 21. **Fix — Text payloads routed through adaptive_parse** (`mcp-server/skills/ingestion_tools.py` — branch `claude/fix-ingestion-pipeline-7qQy4`, commit `f6047ab`): Previously `ingest_from_healthex` short-circuited all `#`-prefixed text payloads (Format A/B/C) with `records_written: 0`, caching raw text but never parsing it. Now the text-payload branch calls `adaptive_parse()`, maps results through new `_native_to_warehouse_rows()` helper (labs→`biometric_readings`, conditions→`patient_conditions`, medications→`patient_medications`, encounters→`clinical_events`), and feeds rows into the existing per-table INSERT loop. Also added `_parse_lab_value()` to extract floats from strings like `"34.0-34.9"` or `">60"`. Verified live: Format B conditions=3 rows, labs=3 rows, encounters=2 rows (all previously 0).
 22. **Fix — `safe_json_loads()` in deliberation engine** (`server/deliberation/json_utils.py`): Added `safe_json_loads(text)` — strips markdown fences first, returns `{}` for empty/None input, raises `ValueError` with a 200-char preview on `JSONDecodeError` instead of propagating raw exception. Prevents synthesizer crash when Claude wraps its output in ` ```json ``` ` fences.
 23. **Fix — synthesizer uses `safe_json_loads`** (`server/deliberation/synthesizer.py`): Replaced bare `json.loads(raw)` with `safe_json_loads(raw)` — prevents `Unterminated string` / `JSONDecodeError` crash when the synthesizer receives fence-wrapped output from Claude.
+24. **Fix — Two-phase async ingestion architecture** (`ingestion/adapters/healthex/planner.py` + `executor.py` — branch `claude/fix-ingestion-blob-loop-2A6H2`, commit `3609e7e`): Large HealthEx blobs previously wrote only 1 row instead of 34+ due to timeout in the single-pass loop. Phase 1 (fast, <500ms): `ingest_from_healthex` caches raw blob in `raw_fhir_cache` (with new `raw_text` + `detected_format` columns), runs LLM planner → creates `ingestion_plans` row. Phase 2 (inline or async): `execute_pending_plans` reads plan → adaptive_parse → writes rows one-at-a-time → updates plan status. Non-numeric lab values (Negative, Positive, No growth) are now preserved (previously dropped silently). Added 2 new MCP tools (`execute_pending_plans`, `get_ingestion_plans`) + migration `002_ingestion_plans.sql` (18-column table). 16 new unit tests (PL-1–PL-8 + EX-1–EX-8) + 8 IP integration tests + 3 REST smoke tests.
+25. **Fix — REST wrappers for execute_pending_plans + get_ingestion_plans** (`server/mcp_server.py`): Added `@mcp.custom_route("/tools/execute_pending_plans")` and `@mcp.custom_route("/tools/get_ingestion_plans")` so the new tools are reachable from HTML prototypes and smoke tests via the same `/tools/<name>` REST pattern as all other tools.
 
 ## "No approval received" Note (Claude Web Behaviour)
 

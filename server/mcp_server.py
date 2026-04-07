@@ -2177,6 +2177,37 @@ async def rest_get_pending_nudges(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+@mcp.custom_route("/tools/execute_pending_plans", methods=["POST"])
+async def rest_execute_pending_plans(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await execute_pending_plans(
+            patient_id=body.get("patient_id", ""),
+            plan_id=body.get("plan_id", ""),
+            limit=body.get("limit", 10),
+        )
+        return JSONResponse(json.loads(result) if isinstance(result, str) else result)
+    except Exception as e:
+        import sys as _sys
+        print(f"[execute_pending_plans] error: {e}", file=_sys.stderr)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
+@mcp.custom_route("/tools/get_ingestion_plans", methods=["POST"])
+async def rest_get_ingestion_plans(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await get_ingestion_plans(
+            patient_id=body.get("patient_id", ""),
+            status=body.get("status", ""),
+        )
+        return JSONResponse(json.loads(result) if isinstance(result, str) else result)
+    except Exception as e:
+        import sys as _sys
+        print(f"[get_ingestion_plans] error: {e}", file=_sys.stderr)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
