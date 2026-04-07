@@ -16,8 +16,6 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
-pytest_plugins = ["pytest_asyncio"]
-
 _has_db = "DATABASE_URL" in os.environ
 
 

@@ -20,28 +20,39 @@ ambient-patient-companion/
 │   ├── components/      ← React UI components
 │   └── lib/db.ts        ← PostgreSQL pool (pg)
 ├── server/              ← Phase 1 Clinical Intelligence FastMCP server (port 8001)
-│   ├── mcp_server.py    ← FastMCP server: 13 tools + REST wrappers + guardrails
-│   └── guardrails/      ← input_validator, output_validator, clinical_rules
+│   ├── mcp_server.py    ← FastMCP server: 15 tools + REST wrappers + guardrails
+│   ├── guardrails/      ← input_validator, output_validator, clinical_rules
+│   └── deliberation/
+│       ├── json_utils.py  ← strip_markdown_fences() — handles LLM code-fence wrapping
+│       ├── analyst.py     ← Phase 1: strips fences before model_validate_json
+│       └── critic.py      ← Phase 2: strips fences on CrossCritique + RevisedAnalysis
 ├── mcp-server/          ← FastMCP Python agent server
 │   ├── db/schema.sql    ← 22-table PostgreSQL schema (source of truth)
 │   ├── skills/          ← 12 MCP agent skill implementations
 │   ├── seed.py          ← Data seeding: python mcp-server/seed.py --patients 10 --months 6
 │   ├── orchestrator.py  ← Daily pipeline sequencer
-│   └── tests/           ← pytest test suite (49 backend tests)
+│   └── tests/           ← pytest test suite (60 backend tests)
+├── ingestion/           ← Adaptive HealthEx ingest pipeline
+│   ├── adapters/healthex/
+│   │   ├── format_detector.py  ← detect_format() → 5 formats (A/B/C/D/JSON-dict)
+│   │   ├── ingest.py           ← adaptive_parse(): detect → parse → LLM fallback
+│   │   ├── llm_fallback.py     ← Claude fallback for unrecognised payloads
+│   │   └── parsers/            ← format_a/b/c/d + json_dict parsers
+│   └── tests/                  ← 69 ingestion tests (format detection, parsers, pipeline)
 ├── docs/                ← Planning documents (mcp_use_cases.md — story line + action plan)
-├── tests/e2e/           ← End-to-end use-case suite (15 tests, all 15 MCP tools)
+├── tests/e2e/           ← End-to-end use-case suite (18 tests, all tools)
 │   ├── data_entry_agent.py  ← PatientDataEntryAgent: seeds 6 months of Maria Chen history
 │   ├── conftest.py          ← Session-scoped DB pool + maria_chen fixture
-│   └── test_all_mcp_tools.py ← 15 use-case tests (UC-01 → UC-15)
+│   └── test_all_mcp_tools.py ← UC-01→UC-15 (MCP skills) + deliberation tools
 ├── replit_dashboard/    ← FastAPI config dashboard (API keys, MCP URLs, Claude config)
-│   ├── server.py        ← FastAPI app (port 8080)
+│   ├── server.py        ← FastAPI app (port 8080) — includes MCP_CLINICAL_INTELLIGENCE_URL
 │   ├── index.html       ← Single-page dashboard UI
 │   └── tests/           ← 30 dashboard tests (anyio-based)
 ├── shared/              ← Shared JS client (claude-client.js)
 ├── prototypes/          ← 4 HTML proof-of-concept prototypes
 ├── config/system_prompts/ ← Role-based system prompts (pcp, care_manager, patient)
-├── tests/phase1/        ← 100 Phase 1 integration tests
-├── ingestion/           ← Data ingestion service (Synthea FHIR)
+├── tests/phase1/        ← 106 Phase 1 integration tests
+├── tests/phase2/        ← 57 Phase 2 deliberation feature tests
 ├── CLAUDE.md            ← Full implementation guide for Claude Code agents
 └── requirements.txt     ← Root Python dependencies (pytest-asyncio==0.21.2)
 ```
@@ -174,25 +185,32 @@ python mcp-server/scripts/create_minimal_fixtures.py
 
 ## Testing
 
-### Phase 1 Clinical Intelligence — 100 tests
+Each suite runs independently (conftest scoping keeps them isolated).
+
+### Phase 1 Clinical Intelligence — 106 tests
 ```bash
 python -m pytest tests/phase1/ -v
 ```
 
-### Phase 2 Deliberation Engine — 32 unit tests + 50 feature tests
+### Phase 2 Deliberation Engine — 40 unit tests + 57 feature tests
 ```bash
-python -m pytest server/deliberation/tests/ -v          # 32 passed, 1 skipped
-python -m pytest tests/phase2/test_deliberation_features.py -v  # 50 passed
+python -m pytest server/deliberation/tests/ -v   # 40 passed, 1 skipped
+python -m pytest tests/phase2/ -v                # 57 passed
 ```
 
-### End-to-end MCP use-case suite — 15 tests
+### End-to-end MCP use-case suite — 18 tests (5 skipped without live servers)
 ```bash
 python -m pytest tests/e2e/ -v
 ```
 
-### Backend (Python/pytest) — 49 tests
+### Backend Skills MCP (Python/pytest) — 60 tests
 ```bash
 cd mcp-server && pytest tests/ -v
+```
+
+### Adaptive Ingestion Pipeline — 69 tests
+```bash
+python -m pytest ingestion/tests/ -v   # format detection, parsers A/B/C/D, pipeline
 ```
 
 ### Frontend (Next.js/Jest) — 37 tests
@@ -205,20 +223,16 @@ cd replit-app && npm test
 cd replit_dashboard && python -m pytest tests/ -v
 ```
 
-### Ingestion & HealthEx Registration — 23 tests
-```bash
-python -m pytest ingestion/tests/ -v                        # 16 passed (adapters + pipeline)
-python -m pytest ingestion/tests/test_healthex_registration.py -v  # 7 passed (HR-1→HR-7)
-```
-
-**Total: 338 tests, all passing**
-- 100 Phase 1 clinical intelligence
-- 82 Phase 2 deliberation (32 unit + 50 feature)
-- 8 e2e deliberation tools (UC-16→UC-20b)
-- 48 mcp-server backend
-- 37 Next.js frontend
-- 30 config dashboard
-- 23 ingestion (16 pipeline/adapters + 7 HealthEx HR tests)
+**Total: 417 tests (380 Python + 37 Jest), all passing**
+| Suite | Count |
+|-------|-------|
+| Phase 1 clinical intelligence | 106 |
+| Phase 2 deliberation (unit + features) | 97 |
+| E2E use-case suite (UC-01→UC-18) | 18 |
+| Skills MCP backend | 60 |
+| Adaptive ingestion pipeline | 69 |
+| Next.js frontend (Jest) | 37 |
+| Config dashboard | 30 |
 
 ## Package Manager
 
@@ -245,7 +259,7 @@ python -m pytest ingestion/tests/test_healthex_registration.py -v  # 7 passed (H
 - **asyncpg**: Never use `$N + INTERVAL '1 day'` — pre-compute bounds in Python
 - **asyncpg**: Never use `do` as a SQL table alias — `do` is a reserved PostgreSQL keyword; use `dout` or similar
 - **MCP skills**: Never use `print()` — all logging goes to `sys.stderr`
-- **Model name**: `claude-sonnet-4-5` (hardcoded in mcp_server.py, verified by tests)
+- **Model names**: `claude-sonnet-4-20250514` (Clinical/Synthesis), `gpt-4o` (deliberation critic)
 - **pytest-asyncio**: Pinned to 0.21.2 — 1.x breaks session-scoped event_loop
 - **Replit Secrets**: Take priority over local `.env` in dashboard and connectivity tests
 - **Dashboard tests**: `clean_env` fixture pops ALL_KEYS from os.environ — isolates from Replit Secrets
@@ -255,6 +269,10 @@ python -m pytest ingestion/tests/test_healthex_registration.py -v  # 7 passed (H
 - **MCP Proxy**: Browser calls `/api/mcp/<port>/tools/<name>` → Next.js route proxies to `http://localhost:<port>/tools/<name>`; shared/claude-client.js uses relative `/api/mcp/8001` in browser context
 - **HealthEx Protocol**: `register_healthex_patient` MUST be called before `ingest_from_healthex` — it bootstraps the `patients` row that `run_deliberation` requires. See CLAUDE.md Section 13.
 - **Synthea fixtures**: `mcp-server/tests/fixtures/fhir/` holds 3 minimal FHIR bundles; conftest.py sets `SYNTHEA_OUTPUT_DIR` to fixtures when `/home/runner/synthea-output/fhir/` is absent
+- **Adaptive ingest**: `ingest_from_healthex` routes all payloads through `ingestion.adapters.healthex.ingest.adaptive_parse()` — 5 formats (A: plain text, B: compressed table, C: flat FHIR text, D: FHIR Bundle JSON, JSON-dict arrays); response always includes `format_detected` and `parser_used` fields; `records_written` is a dict (not int)
+- **Fence-stripping**: LLMs sometimes wrap JSON in ```json ... ``` fences even when told not to — `server/deliberation/json_utils.strip_markdown_fences()` is called in both `analyst.py` and `critic.py` before `model_validate_json`
+- **pytest conftest scoping**: `tests/e2e/conftest.py` must NOT declare `pytest_plugins` — this causes collection errors when running suites together; `asyncio_mode = auto` in root `pytest.ini` is sufficient
+- **source_freshness staleness**: Sources with `records_count=0` are correctly flagged `is_stale=True` in tests — this is expected for registered-but-empty sources like `synthea`; only check staleness for sources with `records_count > 0`
 
 ## Key Bug Fixes Applied
 
@@ -270,6 +288,11 @@ python -m pytest ingestion/tests/test_healthex_registration.py -v  # 7 passed (H
 10. **IndependentAnalysis schema**: `model_id`, `role_emphasis`, `raw_reasoning` now default to `""` so `model_validate_json` succeeds before the caller sets them server-side (analyst.py lines 112-116)
 11. **Analyst prompts**: Updated `analyst_claude.xml` and `analyst_gpt4.xml` with explicit JSON skeleton showing `claim`/`confidence` field names, plain-string `anticipated_trajectory`, plain-string list for `missing_data_identified` — prevents LLM from using `finding`/`risk`/`action` aliases or wrapping values in dicts
 12. **test_system_config_data_track**: Fixed to accept any valid track value (`synthea`, `healthex`, `auto`) instead of hardcoding `synthea` — `DATA_TRACK` is a live mutable config that changes when `use_healthex()` is called
+13. **Adaptive ingest pipeline** (PR #12): `ingest_from_healthex` now calls `adaptive_parse()` — all 5 HealthEx payload formats (plain text, compressed table, flat FHIR text, FHIR Bundle JSON, JSON dict arrays) are detected and normalized deterministically; LLM fallback fires when deterministic parsers return 0 rows on non-trivial input
+14. **Fence-stripping in deliberation engine**: `strip_markdown_fences()` added to `json_utils.py` and wired into `analyst.py` (both Claude + GPT-4) and `critic.py` (CrossCritique + RevisedAnalysis) — prevents `model_validate_json` crash when LLMs wrap responses in ```json fences despite explicit instructions
+15. **TestRawTextPayloadCaching → TestFormatBCompressedTableIngest**: Old tests asserting `records_written == 0` for `#`-prefixed payloads were incorrect after the adaptive pipeline landed — updated to verify `format_detected='compressed_table'`, `parser_used='format_b_compressed_table'`, and `records_written` is a dict
+16. **UC-07 staleness assertion**: `test_uc07_check_data_freshness` updated to only flag stale sources with `records_count > 0` — `synthea` source in test environment has 0 records (never populated) and being stale is expected and non-critical
+17. **e2e conftest pytest_plugins**: Removed `pytest_plugins = ["pytest_asyncio"]` from `tests/e2e/conftest.py` — non-top-level `pytest_plugins` declarations cause collection errors when running suites together; `asyncio_mode = auto` in `pytest.ini` is sufficient
 
 ## "No approval received" Note (Claude Web Behaviour)
 

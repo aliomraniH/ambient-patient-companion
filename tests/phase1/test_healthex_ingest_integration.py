@@ -2,7 +2,8 @@
 
 Calls the actual FastMCP tool end-to-end against the live database, covering:
   - Patient-existence guard: unknown UUID → structured error response
-  - Raw text payload: JSON-encoded string → cached, records_written = 0
+  - Format B payload: #-prefixed compressed table → adaptive pipeline detects
+    and parses it, returns format_detected/parser_used, records_written is a dict
   - code.text fallback for metric_type (HbA1c with no coding block)
   - onset key alias for native HealthEx conditions
 """
@@ -54,14 +55,17 @@ class TestPatientExistenceGuard:
 
 
 # ---------------------------------------------------------------------------
-# Fix 6: raw text payload caching
+# Format B: compressed table payloads are now detected + parsed adaptively
+# (previously cached as raw text with records_written=0; pipeline now handles them)
 # ---------------------------------------------------------------------------
 
-class TestRawTextPayloadCaching:
-    """JSON-encoded plain strings must be cached and return records_written = 0."""
+class TestFormatBCompressedTableIngest:
+    """#-prefixed payloads are detected as compressed_table and run through
+    the adaptive pipeline — records_written is a dict, not 0."""
 
     @pytest.mark.asyncio
-    async def test_raw_text_returns_ok_zero_records(self, healthex_patient):
+    async def test_format_b_detected_and_parsed(self, healthex_patient):
+        """Format B compressed table is detected, parsed, and returns metadata."""
         raw_text_payload = json.dumps(
             "#Conditions 5y|Total:39\nDate|Condition\n2020-01-01|Prediabetes"
         )
@@ -72,13 +76,20 @@ class TestRawTextPayloadCaching:
         )
         result = json.loads(raw)
         assert result["status"] == "ok", f"Expected ok, got: {result}"
-        assert result["records_written"] == 0, (
-            f"records_written must be 0 for raw text, got: {result['records_written']!r}"
+        assert result["format_detected"] == "compressed_table", (
+            f"Expected format_detected='compressed_table', got: {result['format_detected']!r}"
         )
-        assert result["total_written"] == 0
+        assert result["parser_used"] == "format_b_compressed_table", (
+            f"Expected parser_used='format_b_compressed_table', got: {result['parser_used']!r}"
+        )
+        assert isinstance(result["records_written"], dict), (
+            f"records_written must be a dict from the adaptive pipeline, "
+            f"got: {result['records_written']!r}"
+        )
 
     @pytest.mark.asyncio
-    async def test_raw_text_note_matches_spec(self, healthex_patient):
+    async def test_format_b_response_shape(self, healthex_patient):
+        """Adaptive pipeline response always includes format_detected and parser_used."""
         raw_text_payload = json.dumps("#Labs|HbA1c: 7.2")
         raw = await ingest_from_healthex(
             patient_id=healthex_patient,
@@ -86,9 +97,14 @@ class TestRawTextPayloadCaching:
             fhir_json=raw_text_payload,
         )
         result = json.loads(raw)
-        assert result.get("note") == "raw text cached, normalization skipped", (
-            f"Note does not match spec exactly: {result.get('note')!r}"
+        assert result["status"] == "ok", f"Expected ok, got: {result}"
+        assert "format_detected" in result, "Response must include format_detected field"
+        assert "parser_used" in result, "Response must include parser_used field"
+        assert result["format_detected"] == "compressed_table", (
+            f"Short #-prefixed payload should be compressed_table, "
+            f"got: {result['format_detected']!r}"
         )
+        assert "total_written" in result, "Response must include total_written field"
 
 
 # ---------------------------------------------------------------------------
