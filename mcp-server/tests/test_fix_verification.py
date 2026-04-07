@@ -34,6 +34,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 _MCP_SERVER = os.path.join(_REPO_ROOT, "mcp-server")
 if _MCP_SERVER not in sys.path:
     sys.path.insert(0, _MCP_SERVER)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from transforms.fhir_to_schema import (          # noqa: E402
     transform_by_type,

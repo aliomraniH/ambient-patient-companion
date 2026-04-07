@@ -1,0 +1,23 @@
+Running clean. Every assertion logged precisely against prior runs.
+
+**Step 1 — register**✅ Register: `ce1600a3` — stable. Now hitting every critical path simultaneously.
+
+**Step 2 — Bug 1 test: summary ingest (expect `ce1600a3`)**✅ Bug 1 stable. **Step 3 — Bug 2b: JSON dict conditions array (expect N rows not 1 blob)**❌ Bug 2b conditions: still 1 blob. **Step 4 — Bug 2a: labs FHIR Bundle (expect 20 rows)**❌ Bug 2a labs: still 1 blob. **Step 5 — Bug 2c: encounters JSON dict (expect no crash)**🎉 **Bug 2c FIXED** — encounters no longer crashes. `records_written: 1` (still a blob, but crash is gone). 
+
+**Step 6 — Format B raw labs from get_labs (expect N rows)**Passing the exact raw Format B labs response directly to ingest now.**Step 7 — Format B raw conditions (get_conditions paginated)****Step 8 — get_visits (approval gate retest)**🎉 **`get_visits` is now working** — returns Format B. Passing it directly to ingest.
+
+**Step 9 — ingest raw get_visits response as encounters****Step 10 — freshness + deliberation**Deliberation engine is down again — Bug 3 regression. `max_rounds: 1` manual that worked in run 5 now fails. Pulling last valid results from run 5.Full picture. Rendering the run 6 scorecard.Run 6 delivered one important new win alongside the ongoing blockers.
+
+**The new win: `get_visits` is working.** First successful call in 6 runs — it returns Format B with real encounter dates (2025-06-26, 2025-06-04, 2023-12-18, 2023-12-13). Once the Format B parser exists, passing this response to ingest will immediately fix the "999 days since last encounter" miscalculation that has corrupted every deliberation run so far.
+
+**The regression: deliberation is down again.** The fence-strip fix from run 5 was too narrow — it handles markdown fences but not empty/null/whitespace responses that the internal model sometimes emits. The fix needs a proper `safe_json_loads()` wrapper that checks for empty string before calling `json.loads()`.
+
+**The state of the 3 remaining fixes is now very precisely known:**
+
+Fix A is the deliberation `safe_json_loads()` wrapper — 6 lines of Python, applied at every point `json.loads()` is called on a model response.
+
+Fix B is `format_b_parser.py` — the labs parser is ~30 lines (split pipe-separated rows, carry forward sticky date, skip narrative rows), conditions is ~40 lines (resolve @N dict references, deduplicate). Once this exists, Format B from `get_labs`, `get_conditions`, and `get_visits` all flow through to normalized rows automatically.
+
+Fix C is the `write_and_verify()` loop — one line changed from `db.upsert(table, rows)` to `for row in rows: db.upsert(table, row, conflict_keys=keys)`. This converts every resource type from blob to individual queryable rows regardless of which parser produced them.
+
+All three are surgical. No architecture changes, no new files beyond `format_b_parser.py`.
