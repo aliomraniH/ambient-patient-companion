@@ -9,6 +9,7 @@ from pathlib import Path
 import anthropic
 import openai
 from .schemas import IndependentAnalysis, PatientContextPackage
+from .json_utils import strip_markdown_fences
 
 
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
@@ -63,7 +64,7 @@ async def _analyze_with_claude(
         }]
     )
     raw = response.content[0].text
-    return IndependentAnalysis.model_validate_json(raw)
+    return IndependentAnalysis.model_validate_json(strip_markdown_fences(raw))
 
 
 async def _analyze_with_gpt4(
@@ -89,7 +90,7 @@ async def _analyze_with_gpt4(
         response_format={"type": "json_object"}
     )
     raw = response.choices[0].message.content
-    return IndependentAnalysis.model_validate_json(raw)
+    return IndependentAnalysis.model_validate_json(strip_markdown_fences(raw))
 
 
 async def run_parallel_analysis(

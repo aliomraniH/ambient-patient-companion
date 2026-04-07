@@ -1340,6 +1340,43 @@ _WRITER_MAP = {
 }
 
 
+def _find_summary_items(summary: dict, sub_type: str) -> list[dict]:
+    """Extract items for a sub_type from a structured summary dict."""
+    for key in _HX_CONTAINER_KEYS.get(sub_type, []):
+        if key in summary and isinstance(summary[key], list) and summary[key]:
+            return summary[key]
+    return []
+
+
+async def _transform_and_write(
+    conn,
+    resource_type: str,
+    fhir_resources: list[dict],
+    patient_id: str,
+    transform_conditions,
+    transform_medications,
+    transform_clinical_observations,
+    transform_encounters,
+) -> int:
+    """Transform FHIR resources to DB records and write them. Returns count."""
+    if not fhir_resources:
+        return 0
+    transform_fn_map = {
+        "conditions":  lambda r: transform_conditions(r, patient_id, "healthex"),
+        "medications": lambda r: transform_medications(r, patient_id, "healthex"),
+        "labs":        lambda r: transform_clinical_observations(r, patient_id, "healthex"),
+        "encounters":  lambda r: transform_encounters(r, patient_id, "healthex"),
+    }
+    fn = transform_fn_map.get(resource_type)
+    if not fn:
+        return 0
+    records = fn(fhir_resources)
+    writer = _WRITER_MAP.get(resource_type)
+    if not writer:
+        return 0
+    return await writer(conn, records)
+
+
 @mcp.tool()
 async def ingest_from_healthex(
     patient_id: str,
@@ -1348,10 +1385,15 @@ async def ingest_from_healthex(
 ) -> str:
     """Accept a HealthEx MCP tool response and write it to the warehouse.
 
-    Handles three input shapes automatically:
-      - FHIR Bundle (resourceType=Bundle, entry=[...]) → explodes entries
-      - List of FHIR resources → used directly
-      - HealthEx native JSON (flat dict or list with non-FHIR fields) → converted
+    Uses an adaptive schema-inference pipeline that handles all known
+    HealthEx payload formats:
+      A. Plain text summary (from get_health_summary)
+      B. Compressed dictionary table (from get_conditions, etc.)
+      C. Flat FHIR text ("resourceType is Observation. id is ...")
+      D. Proper FHIR R4 Bundle JSON
+      E. Custom JSON dict-with-arrays
+
+    Falls back to LLM-based extraction when deterministic parsers fail.
 
     For resource_type="summary", all embedded clinical arrays
     (conditions, medications, labs, encounters) are written to their
@@ -1360,11 +1402,12 @@ async def ingest_from_healthex(
     Args:
         patient_id:    UUID from register_healthex_patient
         resource_type: "labs" | "medications" | "conditions" | "encounters" | "summary"
-        fhir_json:     raw JSON string from the HealthEx tool response
+        fhir_json:     raw string from the HealthEx tool response (any format)
 
     Returns:
         JSON string with records_written per table, resource_type, duration_ms.
     """
+    import sys as _sys
     import time as _time
     pool = await _get_db_pool()
     try:
@@ -1376,8 +1419,6 @@ async def ingest_from_healthex(
                 "error": f"resource_type must be one of {sorted(valid_types)}, got '{resource_type}'"
             })
 
-        fhir_data = json.loads(fhir_json)
-
         # ── Load FHIR transforms ───────────────────────────────────────────────
         from transforms.fhir_to_schema import (          # type: ignore
             transform_conditions,
@@ -1386,7 +1427,20 @@ async def ingest_from_healthex(
             transform_encounters,
         )
 
+        # ── Import adaptive parser ─────────────────────────────────────────────
+        try:
+            from ingestion.adapters.healthex.ingest import adaptive_parse
+        except ImportError:
+            # Fallback: add parent dir to path if needed
+            import pathlib
+            _parent = str(pathlib.Path(__file__).resolve().parent.parent)
+            if _parent not in _sys.path:
+                _sys.path.insert(0, _parent)
+            from ingestion.adapters.healthex.ingest import adaptive_parse
+
         written_by_table: dict[str, int] = {}
+        format_detected = "unknown"
+        parser_used = "none"
 
         async with pool.acquire() as conn:
 
@@ -1404,116 +1458,128 @@ async def ingest_from_healthex(
                     ),
                 })
 
-            # ── Raw text payload: cache and short-circuit ──────────────────────
-            # When fhir_data is a plain string (JSON-encoded HealthEx compressed
-            # text like '"#Conditions 5y|Total:39\n..."'), store it verbatim in
-            # raw_fhir_cache and return without attempting normalization.
-            if not isinstance(fhir_data, (dict, list)):
-                raw_text = str(fhir_data)
-                raw_id = str(_uuid_mod.uuid4())
-                await conn.execute(
-                    """INSERT INTO raw_fhir_cache
-                           (patient_id, source_name, resource_type, raw_json,
-                            fhir_resource_id, retrieved_at, processed)
-                       VALUES ($1,$2,$3,$4,$5,NOW(),false)
-                       ON CONFLICT (patient_id, source_name, fhir_resource_id)
-                       DO UPDATE SET raw_json=EXCLUDED.raw_json,
-                                     retrieved_at=NOW(), processed=false""",
-                    patient_id, "healthex", resource_type,
-                    json.dumps(raw_text), raw_id,
-                )
-                return json.dumps({
-                    "status": "ok",
-                    "patient_id": patient_id,
-                    "resource_type": resource_type,
-                    "records_written": 0,
-                    "total_written": 0,
-                    "note": "raw text cached, normalization skipped",
-                }, indent=2)
+            # ── Always cache raw input for auditability ────────────────────────
+            raw_cache_id = str(_uuid_mod.uuid4())
+            await conn.execute(
+                """INSERT INTO raw_fhir_cache
+                       (patient_id, source_name, resource_type, raw_json,
+                        fhir_resource_id, retrieved_at, processed)
+                   VALUES ($1,$2,$3,$4,$5,NOW(),false)
+                   ON CONFLICT (patient_id, source_name, fhir_resource_id)
+                   DO UPDATE SET raw_json=EXCLUDED.raw_json,
+                                 retrieved_at=NOW(), processed=false""",
+                patient_id, "healthex", resource_type,
+                json.dumps(fhir_json[:50000]), raw_cache_id,
+            )
+
+            # ── Try JSON parse first — if it works AND is dict/list, also ──────
+            # ── try the old path so existing structured payloads keep working ──
+            fhir_data = None
+            try:
+                fhir_data = json.loads(fhir_json)
+                if not isinstance(fhir_data, (dict, list)):
+                    fhir_data = None  # double-encoded string or scalar
+            except (json.JSONDecodeError, ValueError):
+                fhir_data = None
 
             if resource_type == "summary":
                 # ── Fan-out: extract every clinical array from the summary ──
-                # Supports both HealthEx native summary and FHIR Patient bundles.
+                # For summary, try structured JSON path first, then adaptive
                 summary = fhir_data if isinstance(fhir_data, dict) else {}
 
-                # Possible key names HealthEx uses for each clinical domain
-                cond_items  = (summary.get("conditions") or
-                               summary.get("Conditions") or [])
-                med_items   = (summary.get("medications") or
-                               summary.get("Medications") or [])
-                lab_items   = (summary.get("labs") or summary.get("labResults") or
-                               summary.get("observations") or
-                               summary.get("Labs") or [])
-                enc_items   = (summary.get("encounters") or
-                               summary.get("Encounters") or [])
+                sub_types = ["conditions", "medications", "labs", "encounters"]
+                for sub_type in sub_types:
+                    # Try to find items from structured summary dict
+                    items = _find_summary_items(summary, sub_type)
 
-                # Conditions
-                if cond_items:
-                    fhir_conds = _normalize_to_fhir("conditions", cond_items)
-                    recs = transform_conditions(fhir_conds, patient_id)
-                    written_by_table["conditions"] = await _write_condition_rows(conn, recs)
+                    if items:
+                        # Structured path: use existing _normalize_to_fhir
+                        fhir_resources = _normalize_to_fhir(sub_type, items)
+                    else:
+                        # Adaptive path: parse the raw text for this sub_type
+                        native_items, fmt, prs = adaptive_parse(fhir_json, sub_type)
+                        format_detected = fmt
+                        parser_used = prs
+                        if not native_items:
+                            continue
+                        fhir_resources = _normalize_to_fhir(sub_type, native_items)
 
-                # Medications
-                if med_items:
-                    fhir_meds = _normalize_to_fhir("medications", med_items)
-                    recs = transform_medications(fhir_meds, patient_id)
-                    written_by_table["medications"] = await _write_medication_rows(conn, recs)
-
-                # Labs / biometrics
-                if lab_items:
-                    fhir_labs = _normalize_to_fhir("labs", lab_items)
-                    recs = transform_clinical_observations(fhir_labs, patient_id)
-                    written_by_table["labs"] = await _write_lab_rows(conn, recs)
-
-                # Encounters
-                if enc_items:
-                    fhir_encs = _normalize_to_fhir("encounters", enc_items)
-                    recs = transform_encounters(fhir_encs, patient_id)
-                    written_by_table["encounters"] = await _write_encounter_rows(conn, recs)
+                    # Transform + write
+                    n = await _transform_and_write(
+                        conn, sub_type, fhir_resources, patient_id,
+                        transform_conditions, transform_medications,
+                        transform_clinical_observations, transform_encounters,
+                    )
+                    if n > 0:
+                        written_by_table[sub_type] = n
 
             else:
-                # ── Single resource type: explode bundle → normalize → write ──
-                raw_list = _explode_fhir_bundle(fhir_data, resource_type)
+                # ── Single resource type ───────────────────────────────────────
+                native_items = []
 
-                # Cache raw blobs before transform
-                for resource in raw_list:
-                    fhir_id = resource.get("id", str(_uuid_mod.uuid4()))
-                    await conn.execute(
-                        """INSERT INTO raw_fhir_cache
-                               (patient_id, source_name, resource_type, raw_json,
-                                fhir_resource_id, retrieved_at, processed)
-                           VALUES ($1,$2,$3,$4,$5,NOW(),false)
-                           ON CONFLICT (patient_id, source_name, fhir_resource_id)
-                           DO UPDATE SET raw_json=EXCLUDED.raw_json,
-                                         retrieved_at=NOW(), processed=false""",
-                        patient_id, "healthex", resource_type,
-                        json.dumps(resource), fhir_id,
+                if fhir_data is not None:
+                    # Structured JSON — try existing explode + normalize path
+                    raw_list = _explode_fhir_bundle(fhir_data, resource_type)
+                    if raw_list:
+                        fhir_resources = _normalize_to_fhir(resource_type, raw_list)
+                        n = await _transform_and_write(
+                            conn, resource_type, fhir_resources, patient_id,
+                            transform_conditions, transform_medications,
+                            transform_clinical_observations, transform_encounters,
+                        )
+                        written_by_table[resource_type] = n
+                    else:
+                        fhir_data = None  # force adaptive path
+
+                if fhir_data is None or not written_by_table.get(resource_type):
+                    # Adaptive path: handles all 4+ formats
+                    native_items, format_detected, parser_used = adaptive_parse(
+                        fhir_json, resource_type
                     )
+                    if native_items:
+                        fhir_resources = _normalize_to_fhir(resource_type, native_items)
+                        n = await _transform_and_write(
+                            conn, resource_type, fhir_resources, patient_id,
+                            transform_conditions, transform_medications,
+                            transform_clinical_observations, transform_encounters,
+                        )
+                        written_by_table[resource_type] = n
 
-                # Normalize to FHIR if needed
-                fhir_resources = _normalize_to_fhir(resource_type, raw_list)
-
-                # Transform to DB records
-                transform_fn_map = {
-                    "conditions":  lambda r: transform_conditions(r, patient_id),
-                    "medications": lambda r: transform_medications(r, patient_id),
-                    "labs":        lambda r: transform_clinical_observations(r, patient_id),
-                    "encounters":  lambda r: transform_encounters(r, patient_id),
-                }
-                records = transform_fn_map[resource_type](fhir_resources)
-
-                writer = _WRITER_MAP[resource_type]
-                written_by_table[resource_type] = await writer(conn, records)
-
-            # Stage 8: update source freshness
+            # ── Mark raw cache as processed ────────────────────────────────────
             total_written = sum(written_by_table.values())
             await conn.execute(
-                """UPDATE source_freshness
-                   SET last_ingested_at = NOW(),
-                       records_count    = records_count + $1
-                   WHERE patient_id = $2 AND source_name = 'healthex'""",
-                total_written, patient_id,
+                """UPDATE raw_fhir_cache SET processed = true
+                   WHERE fhir_resource_id = $1 AND patient_id = $2""",
+                raw_cache_id, patient_id,
             )
+
+            # ── Update source freshness ────────────────────────────────────────
+            if total_written > 0:
+                await conn.execute(
+                    """UPDATE source_freshness
+                       SET last_ingested_at = NOW(),
+                           records_count    = records_count + $1
+                       WHERE patient_id = $2 AND source_name = 'healthex'""",
+                    total_written, patient_id,
+                )
+
+            # ── Write verification ─────────────────────────────────────────────
+            verified_counts = {}
+            table_map = {
+                "conditions": "patient_conditions",
+                "medications": "patient_medications",
+                "labs": "biometric_readings",
+                "encounters": "clinical_events",
+            }
+            for sub_type, count in written_by_table.items():
+                tbl = table_map.get(sub_type)
+                if tbl and count > 0:
+                    v = await conn.fetchval(
+                        f"SELECT COUNT(*) FROM {tbl} "
+                        f"WHERE patient_id = $1::uuid AND data_source = 'healthex'",
+                        patient_id,
+                    )
+                    verified_counts[sub_type] = v
 
         duration_ms = int((_time.time() - start) * 1000)
         return json.dumps({
@@ -1521,12 +1587,13 @@ async def ingest_from_healthex(
             "patient_id": patient_id,
             "resource_type": resource_type,
             "records_written": written_by_table,
-            "total_written": sum(written_by_table.values()),
+            "total_written": total_written,
+            "verified_counts": verified_counts,
+            "format_detected": format_detected,
+            "parser_used": parser_used,
             "duration_ms": duration_ms,
         }, indent=2)
 
-    except json.JSONDecodeError as e:
-        return json.dumps({"status": "error", "error": f"fhir_json is not valid JSON: {e}"})
     except Exception as e:
         logger.error("ingest_from_healthex failed: %s", e, exc_info=True)
         return json.dumps({"status": "error", "error": type(e).__name__, "detail": str(e)})
