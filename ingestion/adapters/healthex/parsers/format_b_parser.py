@@ -134,6 +134,10 @@ def _default_headers(resource_type: str) -> Optional[list[str]]:
             "Date", "TestName", "Value", "Unit", "ReferenceRange",
             "Status", "LOINC", "EffectiveDate",
         ],
+        "encounters": [
+            "Date", "Type", "Period", "Description", "Provider",
+            "Status", "Location", "Code",
+        ],
     }
     return defaults.get(resource_type)
 
@@ -147,8 +151,9 @@ def _build_col_dict_map(
         "Date": "D", "OnsetDate": "D", "AbatementDate": "D",
         "AuthoredOn": "D", "EffectiveDate": "D",
         "Condition": "C", "Medication": "C", "TestName": "C",
-        "Vaccine": "C",
+        "Vaccine": "C", "Type": "C",
         "ClinicalStatus": "S", "Status": "S",
+        "Location": "C",
         "PreferredSystem": "Sys",
     }
     result: dict[str, Optional[str]] = {}
@@ -217,6 +222,17 @@ def _to_native(row: dict[str, str], resource_type: str) -> Optional[dict]:
             "unit": row.get("Unit", ""),
             "date": row.get("EffectiveDate") or row.get("Date", ""),
         }
+    elif resource_type == "encounters":
+        enc_type = row.get("Type", "") or row.get("Description", "")
+        if not enc_type or enc_type.startswith("@"):
+            return None
+        return {
+            "type": enc_type,
+            "date": row.get("Date") or row.get("Period", ""),
+            "description": row.get("Description", "") or enc_type,
+            "provider": row.get("Provider", ""),
+            "status": row.get("Status", ""),
+        }
     return None
 
 
@@ -226,6 +242,7 @@ def _deduplicate(rows: list[dict], resource_type: str) -> list[dict]:
         "conditions": ("name", "onset_date"),
         "medications": ("name", "start_date"),
         "labs": ("name", "date"),
+        "encounters": ("type", "date"),
     }
     fields = key_fields.get(resource_type, ("name",))
     seen: set[tuple] = set()
