@@ -4,6 +4,7 @@ Uses Claude as the synthesizer (rotates in production for bias prevention).
 """
 import json
 from datetime import datetime
+from .json_utils import safe_json_loads
 from .schemas import DeliberationResult, PatientContextPackage
 
 
@@ -37,7 +38,7 @@ async def synthesize(
         max_tokens=4096
     )
 
-    result_data = json.loads(raw)
+    result_data = safe_json_loads(raw)
     result_data.update({
         "deliberation_id": deliberation_id,
         "patient_id": context.patient_id,
