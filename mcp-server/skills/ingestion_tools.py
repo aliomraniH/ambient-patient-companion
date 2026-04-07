@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from datetime import datetime
@@ -13,6 +14,7 @@ from fastmcp import FastMCP
 
 from db.connection import get_pool
 from skills.base import log_skill_execution
+from transforms.fhir_to_schema import _parse_date
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
@@ -58,6 +60,72 @@ def _explode_fhir_bundle(data: object, resource_type: str = "") -> list[dict]:
     if isinstance(data, list):
         return data
     return []
+
+
+def _parse_lab_value(raw_value: str) -> float:
+    """Extract a numeric value from a lab result string.
+
+    Handles plain numbers, ranges like "34.0-34.9", and prefixed
+    values like ">60" or "<5".  Returns 0.0 when no number is found.
+    """
+    if not raw_value:
+        return 0.0
+    m = re.search(r"[\d.]+", str(raw_value))
+    return float(m.group()) if m else 0.0
+
+
+def _native_to_warehouse_rows(
+    rows: list[dict],
+    resource_type: str,
+    patient_id: str,
+) -> list[dict]:
+    """Map adaptive_parse native dicts to warehouse-schema rows.
+
+    The returned dicts have exactly the keys the Stage 7 per-table
+    INSERT statements expect, so they can be fed directly into the
+    existing write loop.
+    """
+    mapped: list[dict] = []
+    for row in rows:
+        rec: dict = {
+            "id": str(uuid.uuid4()),
+            "patient_id": patient_id,
+            "data_source": "healthex",
+        }
+        if resource_type == "labs":
+            rec["metric_type"] = row.get("test_name") or row.get("name", "")
+            rec["value"] = _parse_lab_value(row.get("value", ""))
+            rec["unit"] = row.get("unit", "")
+            rec["measured_at"] = _parse_date(
+                row.get("date") or row.get("effective_date", "")
+            )
+        elif resource_type == "conditions":
+            rec["code"] = row.get("code") or row.get("icd10", "")
+            rec["display"] = row.get("name", "")
+            rec["system"] = ""
+            rec["onset_date"] = _parse_date(row.get("onset_date", ""))
+            rec["clinical_status"] = row.get("status", "active")
+        elif resource_type == "medications":
+            rec["code"] = row.get("code", "")
+            rec["display"] = row.get("display") or row.get("name", "")
+            rec["system"] = ""
+            rec["status"] = row.get("status", "active")
+            rec["authored_on"] = _parse_date(row.get("start_date", ""))
+        elif resource_type == "encounters":
+            rec["event_type"] = row.get("type", "")
+            rec["event_date"] = _parse_date(row.get("date", ""))
+            rec["description"] = row.get("description", "")
+            rec["source_system"] = row.get("provider", "")
+        else:
+            continue
+
+        # Skip rows where all resource-specific fields are empty
+        skip_keys = {"id", "patient_id", "data_source"}
+        if not any(v for k, v in rec.items() if k not in skip_keys):
+            continue
+
+        mapped.append(rec)
+    return mapped
 
 
 async def _set_data_track(track: str, tool_name: str) -> str:
@@ -611,7 +679,12 @@ def register(mcp: FastMCP):
                     ),
                 })
 
-            # ── Raw text payload: cache and short-circuit ──────────────────
+            # ── Stage 6 prereq: conflict resolver (shared by both branches) ─
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+            from ingestion.conflict_resolver import ConflictResolver
+            resolver = ConflictResolver(policy="patient_first")
+
+            # ── Raw text payload: cache, then parse via adaptive_parse ────
             # json.loads of a JSON-encoded string (e.g. '"#Conditions 5y|..."')
             # produces a Python str, not a dict/list.
             if not isinstance(fhir_data, (dict, list)):
@@ -630,50 +703,64 @@ def register(mcp: FastMCP):
                         patient_id, "healthex", resource_type,
                         json.dumps(str(fhir_data)), _raw_id,
                     )
-                return json.dumps({
-                    "status": "ok",
-                    "resource_type": resource_type,
-                    "records_written": 0,
-                    "total_written": 0,
-                    "patient_id": patient_id,
-                    "note": "raw text cached, normalization skipped",
-                })
 
-            # ── Explode FHIR Bundles / HealthEx container dicts ───────────
-            # Produces a flat list of individual FHIR resource dicts so the
-            # transform functions receive one resource per item (not a blob).
-            resources = _explode_fhir_bundle(fhir_data, resource_type)
+                # Route through adaptive_parse to extract structured rows
+                from ingestion.adapters.healthex.ingest import adaptive_parse
+                parsed_rows, fmt_detected, parser_used = adaptive_parse(
+                    str(fhir_data), resource_type
+                )
 
-            # Stage 4: cache raw FHIR before any transformation
-            async with pool.acquire() as conn:
-                for resource in resources:
-                    fhir_id = resource.get("id", str(uuid.uuid4())) if isinstance(resource, dict) else str(uuid.uuid4())
-                    await conn.execute(
-                        """
-                        INSERT INTO raw_fhir_cache
-                            (patient_id, source_name, resource_type,
-                             raw_json, fhir_resource_id, retrieved_at, processed)
-                        VALUES ($1, $2, $3, $4, $5, NOW(), false)
-                        ON CONFLICT (patient_id, source_name, fhir_resource_id)
-                        DO UPDATE SET raw_json = EXCLUDED.raw_json,
-                                      retrieved_at = NOW(),
-                                      processed = false
-                        """,
-                        patient_id, "healthex", resource_type,
-                        json.dumps(resource), fhir_id,
-                    )
+                if not parsed_rows:
+                    return json.dumps({
+                        "status": "ok",
+                        "resource_type": resource_type,
+                        "records_written": 0,
+                        "total_written": 0,
+                        "patient_id": patient_id,
+                        "format_detected": fmt_detected,
+                        "parser_used": parser_used,
+                        "note": "raw text cached, parser returned 0 rows",
+                    })
 
-            # Stage 5: normalize FHIR to schema rows
-            from transforms.fhir_to_schema import transform_by_type
-            records = transform_by_type(
-                resource_type, resources, patient_id, source="healthex"
-            )
+                # Map native dicts to warehouse schema
+                warehouse_rows = _native_to_warehouse_rows(
+                    parsed_rows, resource_type, patient_id
+                )
+                resolved = resolver.resolve(warehouse_rows)
 
-            # Stage 6: conflict resolution
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-            from ingestion.conflict_resolver import ConflictResolver
-            resolver = ConflictResolver(policy="patient_first")
-            resolved = resolver.resolve(records)
+            else:
+                # ── Explode FHIR Bundles / HealthEx container dicts ───────
+                # Produces a flat list of individual FHIR resource dicts so
+                # the transform functions receive one resource per item.
+                resources = _explode_fhir_bundle(fhir_data, resource_type)
+
+                # Stage 4: cache raw FHIR before any transformation
+                async with pool.acquire() as conn:
+                    for resource in resources:
+                        fhir_id = resource.get("id", str(uuid.uuid4())) if isinstance(resource, dict) else str(uuid.uuid4())
+                        await conn.execute(
+                            """
+                            INSERT INTO raw_fhir_cache
+                                (patient_id, source_name, resource_type,
+                                 raw_json, fhir_resource_id, retrieved_at, processed)
+                            VALUES ($1, $2, $3, $4, $5, NOW(), false)
+                            ON CONFLICT (patient_id, source_name, fhir_resource_id)
+                            DO UPDATE SET raw_json = EXCLUDED.raw_json,
+                                          retrieved_at = NOW(),
+                                          processed = false
+                            """,
+                            patient_id, "healthex", resource_type,
+                            json.dumps(resource), fhir_id,
+                        )
+
+                # Stage 5: normalize FHIR to schema rows
+                from transforms.fhir_to_schema import transform_by_type
+                records = transform_by_type(
+                    resource_type, resources, patient_id, source="healthex"
+                )
+
+                # Stage 6: conflict resolution
+                resolved = resolver.resolve(records)
 
             # Stage 7: warehouse write — per-table parameterized inserts
             records_written = 0
