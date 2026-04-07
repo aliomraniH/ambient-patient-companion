@@ -204,13 +204,17 @@ def transform_encounters(
     records = []
     for r in encounter_resources:
         type_coding = {}
-        if r.get("type"):
-            type_list = r["type"][0] if r["type"] else {}
-            type_coding = (
-                type_list.get("coding", [{}])[0]
-                if type_list.get("coding")
-                else {}
-            )
+        raw_type = r.get("type")
+        if raw_type and isinstance(raw_type, list):
+            type_list = raw_type[0] if raw_type else {}
+            if isinstance(type_list, dict):
+                type_coding = (
+                    type_list.get("coding", [{}])[0]
+                    if type_list.get("coding")
+                    else {}
+                )
+        elif raw_type and isinstance(raw_type, str):
+            type_coding = {"display": raw_type}
 
         period = r.get("period", {})
         event_date = _parse_date(period.get("start"))
@@ -285,7 +289,7 @@ def transform_by_type(
             transformed = fn(resource)
         else:
             # All other transforms take (resource_list, patient_id, data_source)
-            transformed = fn([resource], patient_id)
+            transformed = fn([resource], patient_id, source)
         if isinstance(transformed, list):
             results.extend(transformed)
         elif transformed:
