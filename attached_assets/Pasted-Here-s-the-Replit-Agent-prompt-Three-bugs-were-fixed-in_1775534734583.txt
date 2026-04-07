@@ -1,0 +1,64 @@
+Here's the Replit Agent prompt:
+
+---
+
+**Three bugs were fixed in the HealthEx ingestion pipeline. Run the tests, verify the fixes, and deploy.**
+
+## What Changed (branch: `claude/fix-healthex-logging-TElYa`)
+
+### File 1: `mcp-server/transforms/fhir_to_schema.py`
+
+**Fix A — Line 292:** `transform_by_type()` now passes `source` as the third argument to transform functions:
+```python
+transformed = fn([resource], patient_id, source)
+```
+Previously it was `fn([resource], patient_id)` — every record got `data_source="synthea"` (the default) and relied on a fragile post-hoc override on line 298.
+
+**Fix B — Lines 206-217:** `transform_encounters()` now guards `r.get("type")` with `isinstance(..., list)` before indexing. When `type` is a raw string (e.g. `"encounter"`), it wraps it as `{"display": raw_type}` instead of crashing on `.get("coding")`. When `type` is a list of FHIR CodeableConcepts, it also checks `isinstance(type_list, dict)` before calling `.get()`.
+
+### File 2: `ingestion/adapters/healthex/parsers/format_b_parser.py`
+
+**Fix C — Encounters support added to Format B parser:**
+- `_default_headers()`: added `"encounters"` key with columns `["Date", "Type", "Period", "Description", "Provider", "Status", "Location", "Code"]`
+- `_build_col_dict_map()`: added `"Type": "C"` and `"Location": "C"` to known column-to-dictionary mappings
+- `_to_native()`: added `elif resource_type == "encounters"` branch that maps to `{"type", "date", "description", "provider", "status"}` — matching what `_healthex_native_to_fhir_encounters()` in `server/mcp_server.py` expects
+- `_deduplicate()`: added `"encounters": ("type", "date")` dedup key
+
+## Test Commands
+
+Run these in order:
+
+```bash
+# 1. Pull the branch
+git fetch origin claude/fix-healthex-logging-TElYa
+git checkout claude/fix-healthex-logging-TElYa
+
+# 2. Run existing test suites — all must pass
+pytest mcp-server/tests/ -v
+pytest ingestion/tests/test_healthex_registration.py -v
+pytest ingestion/tests/test_pipeline.py -v
+pytest tests/e2e/test_deliberation_tools.py -v
+
+# 3. Verify Fix A: transform_by_type passes data_source correctly
+# In a Python shell or test, call:
+#   transform_by_type("conditions", [sample_condition], "patient-uuid", source="healthex")
+# and assert every returned record has data_source="healthex" (not "synthea")
+
+# 4. Verify Fix B: transform_encounters handles string type without crash
+# Call transform_encounters with a resource where "type" is a string:
+#   transform_encounters([{"type": "encounter", "period": {"start": "2025-01-01"}}], "patient-uuid", "healthex")
+# Must return a record with event_type="encounter", not crash
+
+# 5. Verify Fix C: Format B parser handles encounters
+# Call parse_compressed_table with a sample encounters Format B payload and resource_type="encounters"
+# Must return non-empty list of dicts with keys: type, date, description
+
+# 6. Restart the MCP server on port 8001
+# The server imports fhir_to_schema.py — it needs a restart to pick up the changes
+```
+
+## Deploy
+
+After all tests pass, restart the Clinical Intelligence MCP server (`server/mcp_server.py` on port 8001) so the fixes are live. The MCP Skills server on port 8002 also imports `fhir_to_schema.py` via `sys.path` — restart it too if it's running.
+
+No database migrations needed. No new dependencies. No config changes.
