@@ -31,7 +31,7 @@ ambient-patient-companion/
 │   ├── skills/          ← 12 MCP agent skill implementations
 │   ├── seed.py          ← Data seeding: python mcp-server/seed.py --patients 10 --months 6
 │   ├── orchestrator.py  ← Daily pipeline sequencer
-│   └── tests/           ← pytest test suite (60 backend tests)
+│   └── tests/           ← pytest test suite (87 backend tests)
 ├── ingestion/           ← Adaptive HealthEx ingest pipeline
 │   ├── adapters/healthex/
 │   │   ├── format_detector.py  ← detect_format() → 5 formats (A/B/C/D/JSON-dict)
@@ -51,7 +51,7 @@ ambient-patient-companion/
 ├── shared/              ← Shared JS client (claude-client.js)
 ├── prototypes/          ← 4 HTML proof-of-concept prototypes
 ├── config/system_prompts/ ← Role-based system prompts (pcp, care_manager, patient)
-├── tests/phase1/        ← 106 Phase 1 integration tests
+├── tests/phase1/        ← 124 Phase 1 integration tests
 ├── tests/phase2/        ← 57 Phase 2 deliberation feature tests
 ├── CLAUDE.md            ← Full implementation guide for Claude Code agents
 └── requirements.txt     ← Root Python dependencies (pytest-asyncio==0.21.2)
@@ -187,7 +187,7 @@ python mcp-server/scripts/create_minimal_fixtures.py
 
 Each suite runs independently (conftest scoping keeps them isolated).
 
-### Phase 1 Clinical Intelligence — 106 tests
+### Phase 1 Clinical Intelligence — 124 tests
 ```bash
 python -m pytest tests/phase1/ -v
 ```
@@ -203,7 +203,7 @@ python -m pytest tests/phase2/ -v                # 57 passed
 python -m pytest tests/e2e/ -v
 ```
 
-### Backend Skills MCP (Python/pytest) — 60 tests
+### Backend Skills MCP (Python/pytest) — 87 tests
 ```bash
 cd mcp-server && pytest tests/ -v
 ```
@@ -223,16 +223,15 @@ cd replit-app && npm test
 cd replit_dashboard && python -m pytest tests/ -v
 ```
 
-**Total: 532 tests (495 Python + 37 Jest), all passing**
+**Total: 559 tests (522 Python + 37 Jest), all passing**
 | Suite | Count |
 |-------|-------|
-| Phase 1 clinical intelligence | 106 |
+| Phase 1 clinical intelligence (incl. 18 DB format integration) | 124 |
 | Phase 2 deliberation (unit + features + fence-stripping) | 119 |
 | E2E use-case suite (UC-01→UC-18) | 18 |
-| Skills MCP backend | 60 |
+| Skills MCP backend (incl. 27 fix verification tests) | 87 |
 | Adaptive ingestion pipeline (parsers + edge cases + perf) | 120 |
 | MCP tool registration + REST smoke tests | 24 |
-| DB integration tests — all 5 formats + live DB | 18 |
 | Next.js frontend (Jest) | 37 |
 | Config dashboard | 30 |
 
@@ -295,6 +294,9 @@ cd replit_dashboard && python -m pytest tests/ -v
 15. **TestRawTextPayloadCaching → TestFormatBCompressedTableIngest**: Old tests asserting `records_written == 0` for `#`-prefixed payloads were incorrect after the adaptive pipeline landed — updated to verify `format_detected='compressed_table'`, `parser_used='format_b_compressed_table'`, and `records_written` is a dict
 16. **UC-07 staleness assertion**: `test_uc07_check_data_freshness` updated to only flag stale sources with `records_count > 0` — `synthea` source in test environment has 0 records (never populated) and being stale is expected and non-critical
 17. **e2e conftest pytest_plugins**: Removed `pytest_plugins = ["pytest_asyncio"]` from `tests/e2e/conftest.py` — non-top-level `pytest_plugins` declarations cause collection errors when running suites together; `asyncio_mode = auto` in `pytest.ini` is sufficient
+18. **Fix A — transform_by_type data_source passthrough** (`mcp-server/transforms/fhir_to_schema.py` line 292): `transform_by_type()` now passes `source` as the third positional argument to every transform function (`fn([resource], patient_id, source)`). Previously it called `fn([resource], patient_id)` so every record silently got `data_source="synthea"` (the default) regardless of the caller-supplied source. `source` is now required (no default). Verified by 6 new tests in `mcp-server/tests/test_fix_verification.py`.
+19. **Fix B — transform_encounters string type guard** (`mcp-server/transforms/fhir_to_schema.py` lines 206-217): `transform_encounters()` now guards `r.get("type")` with `isinstance(..., list)` before indexing. When `type` is a raw string (e.g. `"encounter"`) it wraps it as `{"display": raw_type}` instead of crashing with `AttributeError: 'str' object has no attribute 'get'`. When `type` is `None` or a list with a non-dict first element, the guard prevents the crash. Verified by 9 new tests in `test_fix_verification.py`.
+20. **Fix C — Format B parser encounters support** (`ingestion/adapters/healthex/parsers/format_b_parser.py`): `parse_compressed_table()` now handles `resource_type="encounters"`. Added `"encounters"` to `_default_headers()` (8 columns), `"Type": "C"` and `"Location": "C"` to `_build_col_dict_map()`, an `elif resource_type == "encounters"` branch to `_to_native()` returning `{type, date, description, provider, status}`, and `"encounters": ("type", "date")` to `_deduplicate()`. Dict references use `C:` prefix for type lookups. Verified by 12 new tests in `test_fix_verification.py`.
 
 ## "No approval received" Note (Claude Web Behaviour)
 
