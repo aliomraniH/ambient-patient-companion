@@ -35,6 +35,8 @@ class PatientContextPackage(BaseModel):
     upcoming_appointments: list[dict]
     days_since_last_encounter: int
     deliberation_trigger: str
+    # Ingestion plan summaries (from ingestion_plans table)
+    data_inventory: list[dict] = []     # [{resource_type, summary, rows}]
 
 
 class DeliberationRequest(BaseModel):

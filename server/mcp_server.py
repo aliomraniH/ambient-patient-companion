@@ -1176,7 +1176,13 @@ def _healthex_native_to_fhir_medications(items: list[dict]) -> list[dict]:
 
 
 def _healthex_native_to_fhir_observations(items: list[dict]) -> list[dict]:
-    """HealthEx native lab result → FHIR Observation resource."""
+    """HealthEx native lab result → FHIR Observation resource.
+
+    IMPORTANT: Does NOT drop non-numeric values.  If the value cannot be
+    parsed as a float, it is stored as 0.0 with the original text preserved
+    in the unit field.  This fixes the bug where labs with string values
+    (e.g. "Positive", "Normal", ranges like "10-20") were silently dropped.
+    """
     out = []
     for item in items:
         if not isinstance(item, dict):
@@ -1189,11 +1195,16 @@ def _healthex_native_to_fhir_observations(items: list[dict]) -> list[dict]:
                    or item.get("collected_date") or item.get("resulted_date") or "")
         raw_val = item.get("value") or item.get("result") or item.get("numeric_value")
         if raw_val is None:
-            continue
+            raw_val = ""
+
+        # Try numeric conversion; fall back to 0.0 with original text in unit
         try:
             numeric = float(str(raw_val).split()[0])
-        except (ValueError, TypeError):
-            continue
+        except (ValueError, TypeError, IndexError):
+            numeric = 0.0
+            if raw_val:
+                unit = f"{raw_val} ({unit})" if unit else str(raw_val)
+
         out.append({
             "resourceType": "Observation",
             "code": {"coding": [{"code": code, "display": display}]},
@@ -1385,8 +1396,13 @@ async def ingest_from_healthex(
 ) -> str:
     """Accept a HealthEx MCP tool response and write it to the warehouse.
 
-    Uses an adaptive schema-inference pipeline that handles all known
-    HealthEx payload formats:
+    Two-phase architecture:
+      Phase 1 (fast): Cache raw blob → LLM Planner produces ExtractionPlan
+                      → store plan in ingestion_plans table
+      Phase 2 (inline): Execute plan → adaptive parse → transform → write rows
+                        one at a time → verify counts
+
+    Handles all known HealthEx payload formats:
       A. Plain text summary (from get_health_summary)
       B. Compressed dictionary table (from get_conditions, etc.)
       C. Flat FHIR text ("resourceType is Observation. id is ...")
@@ -1405,8 +1421,9 @@ async def ingest_from_healthex(
         fhir_json:     raw string from the HealthEx tool response (any format)
 
     Returns:
-        JSON string with records_written per table, resource_type, duration_ms.
+        JSON string with plan metadata + records_written per table.
     """
+    import asyncio
     import sys as _sys
     import time as _time
     pool = await _get_db_pool()
@@ -1438,9 +1455,21 @@ async def ingest_from_healthex(
                 _sys.path.insert(0, _parent)
             from ingestion.adapters.healthex.ingest import adaptive_parse
 
+        # ── Import planner ─────────────────────────────────────────────────────
+        try:
+            from ingestion.adapters.healthex.planner import (
+                plan_extraction,
+                plan_extraction_deterministic,
+            )
+        except ImportError:
+            plan_extraction = None
+            plan_extraction_deterministic = None
+
         written_by_table: dict[str, int] = {}
         format_detected = "unknown"
         parser_used = "none"
+        plan_id = None
+        insights_summary = ""
 
         async with pool.acquire() as conn:
 
@@ -1458,45 +1487,109 @@ async def ingest_from_healthex(
                     ),
                 })
 
-            # ── Always cache raw input for auditability ────────────────────────
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # PHASE 1: Cache raw + plan extraction
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+            raw_text = fhir_json if isinstance(fhir_json, str) else json.dumps(fhir_json)
+
+            # Detect format deterministically (fast)
+            try:
+                from ingestion.adapters.healthex.format_detector import detect_format as _detect_fmt
+                _fmt, _ = _detect_fmt(fhir_json)
+                fmt_code = _fmt.value
+            except Exception:
+                fmt_code = "unknown"
+
+            # Always cache raw input for auditability
             raw_cache_id = str(_uuid_mod.uuid4())
             await conn.execute(
                 """INSERT INTO raw_fhir_cache
                        (patient_id, source_name, resource_type, raw_json,
+                        raw_text, detected_format,
                         fhir_resource_id, retrieved_at, processed)
-                   VALUES ($1,$2,$3,$4,$5,NOW(),false)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),false)
                    ON CONFLICT (patient_id, source_name, fhir_resource_id)
                    DO UPDATE SET raw_json=EXCLUDED.raw_json,
+                                 raw_text=EXCLUDED.raw_text,
+                                 detected_format=EXCLUDED.detected_format,
                                  retrieved_at=NOW(), processed=false""",
                 patient_id, "healthex", resource_type,
-                json.dumps(fhir_json[:50000]), raw_cache_id,
+                json.dumps(raw_text[:50000]),
+                raw_text[:50000],
+                fmt_code,
+                raw_cache_id,
             )
 
-            # ── Try JSON parse first — if it works AND is dict/list, also ──────
-            # ── try the old path so existing structured payloads keep working ──
+            # Run LLM Planner (or deterministic fallback)
+            plan = None
+            if plan_extraction_deterministic is not None:
+                # Always run deterministic planner first (instant)
+                plan = plan_extraction_deterministic(raw_text, resource_type, patient_id)
+
+                # Optionally run LLM planner for richer insights
+                if plan_extraction is not None and len(raw_text) > 500:
+                    try:
+                        llm_plan = await asyncio.to_thread(
+                            plan_extraction, raw_text, resource_type, patient_id
+                        )
+                        # Merge LLM insights into deterministic plan
+                        if llm_plan.get("planner_confidence", 0) > plan.get("planner_confidence", 0):
+                            plan["insights_summary"] = llm_plan.get("insights_summary", plan.get("insights_summary", ""))
+                            plan["sample_rows"] = llm_plan.get("sample_rows", plan.get("sample_rows", []))
+                            plan["column_map"] = llm_plan.get("column_map", plan.get("column_map", {}))
+                            if llm_plan.get("estimated_rows", 0) > plan.get("estimated_rows", 0):
+                                plan["estimated_rows"] = llm_plan["estimated_rows"]
+                    except Exception as e:
+                        logger.warning("LLM planner failed (using deterministic): %s", e)
+
+            # Store ExtractionPlan in ingestion_plans table
+            if plan is not None:
+                plan_id = str(_uuid_mod.uuid4())
+                insights_summary = plan.get("insights_summary", "")
+                try:
+                    await conn.execute(
+                        """INSERT INTO ingestion_plans
+                               (id, patient_id, cache_id, resource_type,
+                                detected_format, extraction_strategy, estimated_rows,
+                                column_map, sample_rows, insights_summary,
+                                planner_confidence, status, planned_at)
+                           VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',NOW())""",
+                        plan_id, patient_id, raw_cache_id, resource_type,
+                        plan.get("detected_format", "unknown"),
+                        plan.get("extraction_strategy", "llm_fallback"),
+                        plan.get("estimated_rows", 0),
+                        json.dumps(plan.get("column_map", {})),
+                        json.dumps(plan.get("sample_rows", [])),
+                        insights_summary,
+                        plan.get("planner_confidence", 0.0),
+                    )
+                except Exception as e:
+                    logger.warning("ingestion_plans insert failed (table may not exist yet): %s", e)
+                    plan_id = None
+
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # PHASE 2: Execute — parse, transform, write rows (inline)
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+            # Try JSON parse first for structured payloads
             fhir_data = None
             try:
                 fhir_data = json.loads(fhir_json)
                 if not isinstance(fhir_data, (dict, list)):
-                    fhir_data = None  # double-encoded string or scalar
+                    fhir_data = None
             except (json.JSONDecodeError, ValueError):
                 fhir_data = None
 
             if resource_type == "summary":
-                # ── Fan-out: extract every clinical array from the summary ──
-                # For summary, try structured JSON path first, then adaptive
+                # Fan-out: extract every clinical array from the summary
                 summary = fhir_data if isinstance(fhir_data, dict) else {}
-
                 sub_types = ["conditions", "medications", "labs", "encounters"]
                 for sub_type in sub_types:
-                    # Try to find items from structured summary dict
                     items = _find_summary_items(summary, sub_type)
-
                     if items:
-                        # Structured path: use existing _normalize_to_fhir
                         fhir_resources = _normalize_to_fhir(sub_type, items)
                     else:
-                        # Adaptive path: parse the raw text for this sub_type
                         native_items, fmt, prs = adaptive_parse(fhir_json, sub_type)
                         format_detected = fmt
                         parser_used = prs
@@ -1504,7 +1597,6 @@ async def ingest_from_healthex(
                             continue
                         fhir_resources = _normalize_to_fhir(sub_type, native_items)
 
-                    # Transform + write
                     n = await _transform_and_write(
                         conn, sub_type, fhir_resources, patient_id,
                         transform_conditions, transform_medications,
@@ -1514,11 +1606,8 @@ async def ingest_from_healthex(
                         written_by_table[sub_type] = n
 
             else:
-                # ── Single resource type ───────────────────────────────────────
-                native_items = []
-
+                # Single resource type
                 if fhir_data is not None:
-                    # Structured JSON — try existing explode + normalize path
                     raw_list = _explode_fhir_bundle(fhir_data, resource_type)
                     if raw_list:
                         fhir_resources = _normalize_to_fhir(resource_type, raw_list)
@@ -1528,22 +1617,12 @@ async def ingest_from_healthex(
                             transform_clinical_observations, transform_encounters,
                         )
                         written_by_table[resource_type] = n
-                        # Set format metadata for the old path
-                        try:
-                            from ingestion.adapters.healthex.format_detector import (
-                                detect_format as _detect_fmt,
-                            )
-                            _fmt, _ = _detect_fmt(fhir_json)
-                            format_detected = _fmt.value
-                            parser_used = f"legacy_{_fmt.value}"
-                        except Exception:
-                            format_detected = "fhir_bundle_json"
-                            parser_used = "legacy_fhir_bundle"
+                        format_detected = fmt_code
+                        parser_used = f"legacy_{fmt_code}"
                     else:
-                        fhir_data = None  # force adaptive path
+                        fhir_data = None
 
                 if fhir_data is None or not written_by_table.get(resource_type):
-                    # Adaptive path: handles all 4+ formats
                     native_items, format_detected, parser_used = adaptive_parse(
                         fhir_json, resource_type
                     )
@@ -1592,6 +1671,24 @@ async def ingest_from_healthex(
                     )
                     verified_counts[sub_type] = v
 
+            # ── Update plan status ─────────────────────────────────────────────
+            if plan_id:
+                try:
+                    await conn.execute(
+                        """UPDATE ingestion_plans
+                           SET status = $1, rows_written = $2,
+                               rows_verified = $3, executed_at = NOW(),
+                               extraction_time_ms = $4
+                           WHERE id = $5::uuid""",
+                        "complete" if total_written > 0 else "failed",
+                        total_written,
+                        sum(verified_counts.values()),
+                        int((_time.time() - start) * 1000),
+                        plan_id,
+                    )
+                except Exception:
+                    pass  # ingestion_plans table may not exist yet
+
         duration_ms = int((_time.time() - start) * 1000)
         return json.dumps({
             "status": "ok",
@@ -1603,11 +1700,111 @@ async def ingest_from_healthex(
             "format_detected": format_detected,
             "parser_used": parser_used,
             "duration_ms": duration_ms,
+            "plan_id": plan_id,
+            "insights_summary": insights_summary,
         }, indent=2)
 
     except Exception as e:
         logger.error("ingest_from_healthex failed: %s", e, exc_info=True)
         return json.dumps({"status": "error", "error": type(e).__name__, "detail": str(e)})
+
+
+@mcp.tool()
+async def execute_pending_plans(
+    patient_id: str,
+    plan_id: str = "",
+    limit: int = 10,
+) -> str:
+    """Execute pending ingestion extraction plans for a patient.
+
+    Reads plans from ingestion_plans table (status='pending' or 'failed'),
+    routes each to the appropriate format parser, and writes structured
+    rows to the warehouse one row at a time.
+
+    Call this after ingest_from_healthex() to re-execute failed plans,
+    or to process plans that were deferred.
+
+    The typical ingestion sequence is:
+      1. ingest_from_healthex()  → plan created + executed inline
+      2. execute_pending_plans() → re-run any failed plans from cache
+      3. get_ingestion_plans()   → check plan status + insights
+
+    Args:
+        patient_id: UUID of the patient
+        plan_id:    Optional specific plan ID to execute (all pending if empty)
+        limit:      Max plans to execute in this call (default 10)
+    """
+    pool = await _get_db_pool()
+    try:
+        from ingestion.adapters.healthex.executor import execute_pending_plans as _execute
+        result = await _execute(
+            pool,
+            patient_id=patient_id,
+            plan_id=plan_id if plan_id else None,
+            limit=limit,
+        )
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error("execute_pending_plans failed: %s", e, exc_info=True)
+        return json.dumps({"status": "error", "error": str(e)})
+
+
+@mcp.tool()
+async def get_ingestion_plans(
+    patient_id: str,
+    status: str = "",
+) -> str:
+    """Read extraction plans and their insights_summary for a patient.
+
+    Other agents (deliberation, synthesis, provider brief) should call this
+    to understand what data has been ingested — WITHOUT re-reading raw blobs.
+    The insights_summary field is a plain-language description safe for any
+    agent to use.
+
+    Args:
+        patient_id: UUID of the patient
+        status:     Filter by status ('pending'|'complete'|'failed') — empty returns all
+    """
+    pool = await _get_db_pool()
+    try:
+        async with pool.acquire() as conn:
+            if status:
+                plans = await conn.fetch(
+                    """SELECT id, resource_type, detected_format, extraction_strategy,
+                              estimated_rows, rows_written, rows_verified,
+                              insights_summary, status, planner_confidence,
+                              planned_at, executed_at, error_message
+                       FROM ingestion_plans
+                       WHERE patient_id = $1::uuid AND status = $2
+                       ORDER BY planned_at DESC LIMIT 50""",
+                    patient_id, status,
+                )
+            else:
+                plans = await conn.fetch(
+                    """SELECT id, resource_type, detected_format, extraction_strategy,
+                              estimated_rows, rows_written, rows_verified,
+                              insights_summary, status, planner_confidence,
+                              planned_at, executed_at, error_message
+                       FROM ingestion_plans
+                       WHERE patient_id = $1::uuid
+                       ORDER BY planned_at DESC LIMIT 50""",
+                    patient_id,
+                )
+
+            plan_list = [dict(p) for p in plans]
+            return json.dumps({
+                "patient_id": patient_id,
+                "total_plans": len(plan_list),
+                "plans": plan_list,
+                "complete_count": sum(1 for p in plan_list if p.get("status") == "complete"),
+                "pending_count": sum(1 for p in plan_list if p.get("status") == "pending"),
+                "failed_count": sum(1 for p in plan_list if p.get("status") == "failed"),
+                "total_rows_written": sum(p.get("rows_written") or 0 for p in plan_list),
+            }, indent=2, default=str)
+
+    except Exception as e:
+        logger.error("get_ingestion_plans failed: %s", e, exc_info=True)
+        return json.dumps({"status": "error", "error": str(e)})
 
 
 # ---------------------------------------------------------------------------

@@ -187,7 +187,29 @@ async def compile_patient_context(
         else:
             days_since = 999
 
-    # 9. Applicable guidelines from vector store (placeholder returns [] gracefully)
+        # 9. Ingestion plan summaries (from ingestion_plans if available)
+        data_inventory = []
+        try:
+            plans = await conn.fetch(
+                """SELECT resource_type, insights_summary, rows_written, status
+                   FROM ingestion_plans
+                   WHERE patient_id = $1 AND status = 'complete'
+                   ORDER BY executed_at DESC LIMIT 20""",
+                internal_id,
+            )
+            data_inventory = [
+                {
+                    "resource_type": p["resource_type"],
+                    "summary": p["insights_summary"] or "",
+                    "rows": p["rows_written"] or 0,
+                }
+                for p in plans
+            ]
+        except Exception:
+            # Table may not exist yet — graceful fallback
+            pass
+
+    # 10. Applicable guidelines from vector store (placeholder returns [] gracefully)
     try:
         condition_terms = " ".join([c["display"] or "" for c in conditions if c["display"]])
         med_terms = " ".join([m["display"] or "" for m in medications if m["display"]])
@@ -250,5 +272,6 @@ async def compile_patient_context(
         applicable_guidelines=applicable_guidelines,
         upcoming_appointments=[],
         days_since_last_encounter=days_since,
-        deliberation_trigger="compiled_by_context_compiler"
+        deliberation_trigger="compiled_by_context_compiler",
+        data_inventory=data_inventory,
     )
