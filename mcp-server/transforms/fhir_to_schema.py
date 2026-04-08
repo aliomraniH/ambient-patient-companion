@@ -141,6 +141,43 @@ def transform_medications(
     return records
 
 
+def _extract_loinc_code(code_obj: dict[str, Any]) -> str:
+    """Extract LOINC code from a FHIR CodeableConcept's coding array."""
+    for coding in code_obj.get("coding", []):
+        system = coding.get("system", "")
+        if "loinc" in system.lower():
+            return coding.get("code", "")
+    return ""
+
+
+def _extract_reference_range(observation: dict[str, Any]) -> tuple[str, float | None, float | None]:
+    """Extract reference range text and bounds from FHIR Observation.referenceRange."""
+    ref_ranges = observation.get("referenceRange", [])
+    if not ref_ranges:
+        # Check pass-through field from HealthEx converters
+        ref_text = observation.get("_reference_text", "")
+        return ref_text, None, None
+
+    ref = ref_ranges[0]
+    low_val = ref.get("low", {}).get("value")
+    high_val = ref.get("high", {}).get("value")
+    text = ref.get("text", "")
+
+    if not text:
+        parts = []
+        if low_val is not None:
+            parts.append(str(low_val))
+        if high_val is not None:
+            parts.append(str(high_val))
+        if parts:
+            text = " - ".join(parts)
+            low_unit = ref.get("low", {}).get("unit", "") or ref.get("high", {}).get("unit", "")
+            if low_unit:
+                text += f" {low_unit}"
+
+    return text, low_val, high_val
+
+
 def transform_clinical_observations(
     observation_resources: list[dict[str, Any]],
     patient_id: str,
@@ -152,16 +189,26 @@ def transform_clinical_observations(
         code_obj = r.get("code", {})
         coding = code_obj.get("coding", [{}])[0] if code_obj.get("coding") else {}
 
+        # Extract LOINC code from coding system or pass-through field
+        loinc_code = _extract_loinc_code(code_obj) or r.get("_loinc_code", "")
+
+        # Extract reference range
+        ref_text, ref_low, ref_high = _extract_reference_range(r)
+
         # Extract value
         value = None
         unit = ""
+        result_text = r.get("_result_text")  # pass-through from HealthEx converter
         if "valueQuantity" in r:
             value = r["valueQuantity"].get("value")
             unit = r["valueQuantity"].get("unit", "")
         elif "valueCodeableConcept" in r:
-            continue  # Skip non-numeric observations
+            # Qualitative result — extract display text
+            val_coding = r["valueCodeableConcept"].get("coding", [{}])
+            result_text = val_coding[0].get("display", "") if val_coding else ""
+            value = 0.0  # placeholder for backward compat
 
-        if value is None:
+        if value is None and not result_text:
             # Try component-based observations (e.g., BP)
             for comp in r.get("component", []):
                 comp_code_obj = comp.get("code", {})
@@ -169,27 +216,45 @@ def transform_clinical_observations(
                 # Prefer coding.display; fall back to code.text
                 comp_display = comp_coding.get("display", "") or comp_code_obj.get("text", "")
                 comp_value = comp.get("valueQuantity", {})
+                comp_loinc = _extract_loinc_code(comp_code_obj)
                 if comp_value.get("value") is not None:
+                    comp_unit = comp_value.get("unit", "")
+                    comp_numeric = float(comp_value["value"])
                     records.append({
                         "id": str(uuid.uuid4()),
                         "patient_id": patient_id,
                         "metric_type": comp_display.lower().replace(" ", "_"),
-                        "value": float(comp_value["value"]),
-                        "unit": comp_value.get("unit", ""),
+                        "value": comp_numeric,
+                        "unit": comp_unit,
                         "measured_at": _parse_date(r.get("effectiveDateTime")),
+                        "result_numeric": comp_numeric,
+                        "result_unit": comp_unit,
+                        "loinc_code": comp_loinc or None,
                         "data_source": data_source,
                     })
             continue
 
+        if value is None and result_text:
+            value = 0.0  # placeholder for backward compat with NOT NULL constraint
+
         # Prefer coding.display; fall back to code.text when coding block is absent
         metric_display = coding.get("display", "") or code_obj.get("text", "")
+        numeric_val = float(value)
         records.append({
             "id": str(uuid.uuid4()),
             "patient_id": patient_id,
             "metric_type": metric_display.lower().replace(" ", "_"),
-            "value": float(value),
+            "value": numeric_val,
             "unit": unit,
             "measured_at": _parse_date(r.get("effectiveDateTime")),
+            # New structured fields
+            "result_text": result_text,
+            "result_numeric": numeric_val if not result_text else None,
+            "result_unit": unit,
+            "reference_text": ref_text or None,
+            "reference_low": ref_low,
+            "reference_high": ref_high,
+            "loinc_code": loinc_code or None,
             "data_source": data_source,
         })
     return records

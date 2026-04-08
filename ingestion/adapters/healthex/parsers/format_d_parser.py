@@ -62,6 +62,12 @@ def _observation_to_native(r: dict) -> dict | None:
     unit = vq.get("unit", "")
     date = (r.get("effectiveDateTime") or "")[:10]
 
+    # Extract LOINC code from coding system URI
+    loinc_code = _coding_by_system(code, "loinc")
+
+    # Extract reference range
+    ref_range = _extract_ref_range(r)
+
     # Handle component-based observations (e.g. blood pressure)
     components = r.get("component", [])
     if value is None and components:
@@ -70,6 +76,7 @@ def _observation_to_native(r: dict) -> dict | None:
             comp_code = comp.get("code", {})
             comp_name = comp_code.get("text") or _first_coding(comp_code, "display") or ""
             comp_vq = comp.get("valueQuantity", {})
+            comp_loinc = _coding_by_system(comp_code, "loinc")
             if comp_vq.get("value") is not None:
                 full_name = f"{name} - {comp_name}".strip(" - ") if name else comp_name
                 rows.append({
@@ -79,6 +86,7 @@ def _observation_to_native(r: dict) -> dict | None:
                     "unit": comp_vq.get("unit", ""),
                     "date": date,
                     "code": _first_coding(comp_code, "code") or "",
+                    "loinc_code": comp_loinc,
                 })
         # Return first component; caller handles the rest via the list return
         # Actually we need to return all — but this function returns one dict.
@@ -98,6 +106,8 @@ def _observation_to_native(r: dict) -> dict | None:
         "unit": unit,
         "date": date,
         "code": _first_coding(code, "code") or "",
+        "loinc_code": loinc_code,
+        "ref_range": ref_range,
     }
 
 
@@ -184,6 +194,31 @@ def _immunization_to_native(r: dict) -> dict | None:
         "date": date,
         "status": r.get("status", "completed"),
     }
+
+
+def _extract_ref_range(observation: dict) -> str:
+    """Extract reference range text from a FHIR Observation."""
+    ref_ranges = observation.get("referenceRange", [])
+    if not ref_ranges:
+        return ""
+    ref = ref_ranges[0]
+    text = ref.get("text", "")
+    if text:
+        return text
+    low = ref.get("low", {}).get("value")
+    high = ref.get("high", {}).get("value")
+    unit = ref.get("low", {}).get("unit", "") or ref.get("high", {}).get("unit", "")
+    parts = []
+    if low is not None:
+        parts.append(str(low))
+    if high is not None:
+        parts.append(str(high))
+    if parts:
+        result = " - ".join(parts)
+        if unit:
+            result += f" {unit}"
+        return result
+    return ""
 
 
 def _first_coding(code_obj: dict, field: str) -> str:

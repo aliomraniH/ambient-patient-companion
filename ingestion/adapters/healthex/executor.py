@@ -323,23 +323,32 @@ def _native_to_fhir_observations(items: list[dict]) -> list[dict]:
                    or item.get("result") or item.get("numeric_value"))
         if raw_val is None:
             raw_val = ""
+        ref_range = item.get("ref_range") or item.get("reference_range") or ""
         is_abnormal = item.get("flag") == "out_of_range" or item.get("status") == "out_of_range"
 
-        # Try numeric conversion; fall back to 0.0 with original in unit
+        # Try numeric conversion; preserve qualitative text separately
+        result_text = None
         try:
             numeric = float(str(raw_val).split()[0])
         except (ValueError, TypeError, IndexError):
             numeric = 0.0
             if raw_val:
-                unit = f"{raw_val} ({unit})" if unit else str(raw_val)
+                result_text = str(raw_val)
 
-        out.append({
+        obs = {
             "resourceType": "Observation",
             "code": {"coding": [{"code": code, "display": display}]},
             "valueQuantity": {"value": numeric, "unit": unit},
             "effectiveDateTime": date,
             "_is_abnormal": is_abnormal,
-        })
+        }
+        if result_text:
+            obs["_result_text"] = result_text
+        if ref_range:
+            obs["_reference_text"] = ref_range
+        if code:
+            obs["_loinc_code"] = code
+        out.append(obs)
     return out
 
 
@@ -442,19 +451,31 @@ async def _write_lab_rows(conn, records: list[dict]) -> int:
             await conn.execute(
                 """INSERT INTO biometric_readings
                        (id, patient_id, metric_type, value, unit,
-                        measured_at, is_abnormal, data_source)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                        measured_at, is_abnormal,
+                        result_text, result_numeric, result_unit,
+                        reference_text, loinc_code, data_source)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                    ON CONFLICT (patient_id, metric_type, measured_at)
                    DO UPDATE SET
-                       value       = EXCLUDED.value,
-                       unit        = EXCLUDED.unit,
-                       is_abnormal = EXCLUDED.is_abnormal,
-                       data_source = EXCLUDED.data_source""",
+                       value        = EXCLUDED.value,
+                       unit         = EXCLUDED.unit,
+                       is_abnormal  = EXCLUDED.is_abnormal,
+                       result_text  = EXCLUDED.result_text,
+                       result_numeric = EXCLUDED.result_numeric,
+                       result_unit  = EXCLUDED.result_unit,
+                       reference_text = EXCLUDED.reference_text,
+                       loinc_code   = EXCLUDED.loinc_code,
+                       data_source  = EXCLUDED.data_source""",
                 rec.get("id", str(_uuid_mod.uuid4())),
                 rec["patient_id"], metric_type,
                 rec.get("value"), rec.get("unit", ""),
                 rec.get("measured_at"),
                 rec.get("is_abnormal", False),
+                rec.get("result_text"),
+                rec.get("result_numeric"),
+                rec.get("result_unit") or rec.get("unit", ""),
+                rec.get("reference_text"),
+                rec.get("loinc_code"),
                 "healthex",
             )
             n += 1

@@ -69,20 +69,31 @@ def _native_to_fhir_one(resource_type: str, item: dict) -> dict | None:
                 or item.get("collected_date") or item.get("resulted_date") or "")
         raw_val = (item.get("result_value") or item.get("value")
                    or item.get("result") or item.get("numeric_value") or "")
+        ref_range = item.get("ref_range") or item.get("reference_range") or ""
         is_abnormal = item.get("flag") == "out_of_range" or item.get("status") == "out_of_range"
+        # Try numeric conversion; preserve qualitative text separately
+        result_text = None
         try:
             numeric = float(str(raw_val).split()[0])
         except (ValueError, TypeError, IndexError):
             numeric = 0.0
             if raw_val:
-                unit = f"{raw_val} ({unit})" if unit else str(raw_val)
-        return {
+                result_text = str(raw_val)
+        obs = {
             "resourceType": "Observation",
             "code": {"coding": [{"code": code, "display": display}]},
             "valueQuantity": {"value": numeric, "unit": unit},
             "effectiveDateTime": date,
             "_is_abnormal": is_abnormal,
         }
+        # Pass-through fields for structured storage
+        if result_text:
+            obs["_result_text"] = result_text
+        if ref_range:
+            obs["_reference_text"] = ref_range
+        if code:
+            obs["_loinc_code"] = code
+        return obs
 
     elif resource_type == "conditions":
         code = item.get("icd10") or item.get("icd10_code") or item.get("code") or ""
@@ -145,14 +156,22 @@ def _fhir_to_db_one(resource_type: str, fhir: dict,
         # Normalize: lowercase + spaces→underscores so metric_type is consistent
         metric_type = raw_display.lower().replace(" ", "_")
         is_abnormal = bool(fhir.get("_is_abnormal", False))
+        unit = vq.get("unit", "")
+        numeric_val = vq.get("value")
         return {
             "id": str(_uuid_mod.uuid4()),
             "patient_id": patient_id,
             "metric_type": metric_type,
-            "value": vq.get("value"),
-            "unit": vq.get("unit", ""),
+            "value": numeric_val,
+            "unit": unit,
             "measured_at": measured_at,
             "is_abnormal": is_abnormal,
+            # New structured fields
+            "result_text": fhir.get("_result_text"),
+            "result_numeric": numeric_val if numeric_val != 0.0 or not fhir.get("_result_text") else None,
+            "result_unit": unit,
+            "reference_text": fhir.get("_reference_text"),
+            "loinc_code": fhir.get("_loinc_code"),
             "data_source": "healthex",
         }
 
@@ -283,20 +302,32 @@ async def _write_one_record(conn, resource_type: str, db_rec: dict) -> bool:
             await conn.execute(
                 """INSERT INTO biometric_readings
                        (id, patient_id, metric_type, value, unit,
-                        measured_at, is_abnormal, data_source)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                        measured_at, is_abnormal,
+                        result_text, result_numeric, result_unit,
+                        reference_text, loinc_code, data_source)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                    ON CONFLICT (patient_id, metric_type, measured_at)
                    DO UPDATE SET
-                       value      = EXCLUDED.value,
-                       unit       = EXCLUDED.unit,
-                       is_abnormal = EXCLUDED.is_abnormal,
-                       data_source = EXCLUDED.data_source""",
+                       value        = EXCLUDED.value,
+                       unit         = EXCLUDED.unit,
+                       is_abnormal  = EXCLUDED.is_abnormal,
+                       result_text  = EXCLUDED.result_text,
+                       result_numeric = EXCLUDED.result_numeric,
+                       result_unit  = EXCLUDED.result_unit,
+                       reference_text = EXCLUDED.reference_text,
+                       loinc_code   = EXCLUDED.loinc_code,
+                       data_source  = EXCLUDED.data_source""",
                 db_rec["id"], db_rec["patient_id"],
                 db_rec.get("metric_type", ""),
                 db_rec.get("value"),
                 db_rec.get("unit", ""),
                 db_rec.get("measured_at") or _dt.utcnow(),
                 db_rec.get("is_abnormal", False),
+                db_rec.get("result_text"),
+                db_rec.get("result_numeric"),
+                db_rec.get("result_unit") or db_rec.get("unit", ""),
+                db_rec.get("reference_text"),
+                db_rec.get("loinc_code"),
                 "healthex",
             )
         elif resource_type == "conditions":

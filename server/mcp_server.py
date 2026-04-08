@@ -1178,39 +1178,52 @@ def _healthex_native_to_fhir_medications(items: list[dict]) -> list[dict]:
 def _healthex_native_to_fhir_observations(items: list[dict]) -> list[dict]:
     """HealthEx native lab result → FHIR Observation resource.
 
-    IMPORTANT: Does NOT drop non-numeric values.  If the value cannot be
-    parsed as a float, it is stored as 0.0 with the original text preserved
-    in the unit field.  This fixes the bug where labs with string values
-    (e.g. "Positive", "Normal", ranges like "10-20") were silently dropped.
+    Stores non-numeric values in _result_text (a pass-through field) instead
+    of cramming them into the unit field.  Preserves reference ranges and
+    LOINC codes from parser output for structured storage.
     """
     out = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        code    = item.get("loinc") or item.get("code") or ""
+        loinc   = item.get("loinc") or item.get("loinc_code") or item.get("code") or ""
         display = (item.get("name") or item.get("display")
                    or item.get("test_name") or "")
-        unit    = item.get("unit") or item.get("units") or ""
+        unit    = (item.get("result_unit") or item.get("unit")
+                   or item.get("units") or "")
         date    = (item.get("date") or item.get("effectiveDateTime")
                    or item.get("collected_date") or item.get("resulted_date") or "")
-        raw_val = item.get("value") or item.get("result") or item.get("numeric_value")
+        ref_range = item.get("ref_range") or item.get("reference_range") or ""
+        raw_val = (item.get("result_value") or item.get("value")
+                   or item.get("result") or item.get("numeric_value"))
         if raw_val is None:
             raw_val = ""
 
-        # Try numeric conversion; fall back to 0.0 with original text in unit
+        # Try numeric conversion; preserve qualitative text separately
+        result_text = None
         try:
             numeric = float(str(raw_val).split()[0])
         except (ValueError, TypeError, IndexError):
             numeric = 0.0
             if raw_val:
-                unit = f"{raw_val} ({unit})" if unit else str(raw_val)
+                result_text = str(raw_val)
 
-        out.append({
+        obs = {
             "resourceType": "Observation",
-            "code": {"coding": [{"code": code, "display": display}]},
+            "code": {"coding": [{"code": loinc, "display": display}]},
             "valueQuantity": {"value": numeric, "unit": unit},
             "effectiveDateTime": date,
-        })
+        }
+        # Pass-through fields for structured storage (not standard FHIR,
+        # consumed by _write_lab_rows and transform functions)
+        if result_text:
+            obs["_result_text"] = result_text
+        if ref_range:
+            obs["_reference_text"] = ref_range
+        if loinc:
+            obs["_loinc_code"] = loinc
+
+        out.append(obs)
     return out
 
 
@@ -1309,19 +1322,79 @@ async def _write_medication_rows(conn, records: list[dict]) -> int:
 async def _write_lab_rows(conn, records: list[dict]) -> int:
     n = 0
     for rec in records:
+        # Parse reference range bounds if reference_text is provided
+        ref_low = rec.get("reference_low")
+        ref_high = rec.get("reference_high")
+        ref_text = rec.get("reference_text", "")
+        if ref_text and ref_low is None and ref_high is None:
+            ref_low, ref_high = _parse_reference_bounds(ref_text)
+
         await conn.execute(
             """INSERT INTO biometric_readings
                    (id, patient_id, metric_type, value, unit,
-                    measured_at, data_source)
-               VALUES ($1,$2,$3,$4,$5,$6,$7)
+                    measured_at, is_abnormal,
+                    result_text, result_numeric, result_unit,
+                    reference_text, reference_low, reference_high,
+                    loinc_code, interpretation, data_source)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
                ON CONFLICT DO NOTHING""",
             rec.get("id", str(_uuid_mod.uuid4())),
             rec["patient_id"], rec.get("metric_type", ""),
             rec.get("value"), rec.get("unit", ""),
-            rec.get("measured_at") or _dt.utcnow(), "healthex",
+            rec.get("measured_at") or _dt.utcnow(),
+            rec.get("is_abnormal", False),
+            rec.get("result_text"),
+            rec.get("result_numeric"),
+            rec.get("result_unit") or rec.get("unit", ""),
+            ref_text or None,
+            ref_low, ref_high,
+            rec.get("loinc_code") or None,
+            rec.get("interpretation") or None,
+            "healthex",
         )
         n += 1
     return n
+
+
+def _parse_reference_bounds(ref_text: str):
+    """Extract numeric low/high bounds from a reference range string.
+
+    Examples:
+        "70-100 mg/dL"     → (70, 100)
+        "<5.7"             → (None, 5.7)
+        ">60"              → (60, None)
+        "4.5 - 11.0"       → (4.5, 11.0)
+        "Male: 13.5-17.5"  → (13.5, 17.5)
+    """
+    import re
+    ref_low = None
+    ref_high = None
+
+    range_match = re.search(r'([\d.]+)\s*[-\u2013]\s*([\d.]+)', ref_text)
+    if range_match:
+        try:
+            ref_low = float(range_match.group(1))
+            ref_high = float(range_match.group(2))
+        except ValueError:
+            pass
+        return ref_low, ref_high
+
+    lt_match = re.search(r'<\s*([\d.]+)', ref_text)
+    if lt_match:
+        try:
+            ref_high = float(lt_match.group(1))
+        except ValueError:
+            pass
+        return ref_low, ref_high
+
+    gt_match = re.search(r'>\s*([\d.]+)', ref_text)
+    if gt_match:
+        try:
+            ref_low = float(gt_match.group(1))
+        except ValueError:
+            pass
+
+    return ref_low, ref_high
 
 
 async def _write_encounter_rows(conn, records: list[dict]) -> int:

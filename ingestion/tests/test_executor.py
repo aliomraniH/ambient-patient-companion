@@ -48,9 +48,10 @@ def test_native_labs_to_fhir_mixed():
     # HbA1c — numeric
     assert fhir[0]["valueQuantity"]["value"] == 7.8
     assert fhir[0]["valueQuantity"]["unit"] == "%"
-    # HIV Screen — non-numeric, stored as 0.0 with original in unit
+    # HIV Screen — non-numeric, stored as 0.0 in value, text in _result_text
     assert fhir[1]["valueQuantity"]["value"] == 0.0
-    assert "Negative" in fhir[1]["valueQuantity"]["unit"]
+    assert fhir[1].get("_result_text") == "Negative"
+    assert fhir[1]["valueQuantity"]["unit"] == ""
     # eGFR — numeric
     assert fhir[2]["valueQuantity"]["value"] == 68.0
 
@@ -77,18 +78,19 @@ def test_non_numeric_lab_preserved():
     fhir = _native_to_fhir_observations(native)
     assert len(fhir) == 3
 
-    # "Positive" can't be float → stored as 0.0 with text in unit
+    # "Positive" can't be float → stored as 0.0 in value, text in _result_text
     assert fhir[0]["valueQuantity"]["value"] == 0.0
-    assert "Positive" in fhir[0]["valueQuantity"]["unit"]
+    assert fhir[0].get("_result_text") == "Positive"
+    assert fhir[0]["valueQuantity"]["unit"] == "qual"
 
     # "No growth" → same
     assert fhir[1]["valueQuantity"]["value"] == 0.0
-    assert "No growth" in fhir[1]["valueQuantity"]["unit"]
+    assert fhir[1].get("_result_text") == "No growth"
+    assert fhir[1]["valueQuantity"]["unit"] == ""
 
-    # "120-130" → float("120-130".split()[0]) = float("120-130") fails
-    # but float("120-130") actually raises ValueError
+    # "120-130" → float("120-130") fails (no whitespace), stored in _result_text
     assert fhir[2]["valueQuantity"]["value"] == 0.0
-    assert "120-130" in fhir[2]["valueQuantity"]["unit"]
+    assert fhir[2].get("_result_text") == "120-130"
 
 
 # ── EX-5: Empty/None values handled ───────────────────────────────────────────
