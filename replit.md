@@ -23,7 +23,10 @@ ambient-patient-companion/
 │   ├── mcp_server.py    ← FastMCP server: 18 tools + REST wrappers + guardrails
 │   ├── guardrails/      ← input_validator, output_validator, clinical_rules
 │   └── deliberation/
-│       ├── json_utils.py  ← strip_markdown_fences() — handles LLM code-fence wrapping
+│       ├── json_utils.py            ← strip_markdown_fences() — handles LLM code-fence wrapping
+│       ├── tiered_context_loader.py ← TieredContextLoader: 3-tier budget-capped context (11K limit)
+│       ├── data_request_parser.py   ← parse_data_requests(): signals from round output → tier loads
+│       ├── migrations/002_data_requests.sql ← deliberation_data_requests table
 │       ├── analyst.py     ← Phase 1: strips fences before model_validate_json
 │       └── critic.py      ← Phase 2: strips fences on CrossCritique + RevisedAnalysis
 ├── mcp-server/          ← FastMCP Python agent server
@@ -101,7 +104,7 @@ Eighteen tools at `https://[domain]/mcp` (9 Phase 1 + 9 HealthEx/Deliberation/In
 | `execute_pending_plans` | Re-execute failed/pending ingestion plans from cache |
 | `get_ingestion_plans` | Read plan summaries + insights_summary for a patient |
 | `get_transfer_audit` | Per-record transfer_log audit trail (status, timing, errors) |
-| `run_deliberation` | Trigger full dual-LLM deliberation for a patient |
+| `run_deliberation` | Trigger deliberation (mode="progressive" default, or "full" dual-LLM) |
 | `get_deliberation_results` | Retrieve stored deliberation outputs |
 | `get_patient_knowledge` | Fetch accumulated patient-specific knowledge |
 | `get_pending_nudges` | List undelivered nudges for patient or care team |
