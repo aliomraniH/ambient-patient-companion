@@ -1,0 +1,1230 @@
+# Replit Agent — Multi-Step Traceable Transfer Pipeline
+## Privacy-First, Size-Aware, Per-Record Audited Ingest
+
+---
+
+## Background: What 10 Test Runs Revealed
+
+This prompt is grounded in 10 live pipeline runs against a real HealthEx patient
+(UUID `ce1600a3-8760-4928-87fd-2f8628851979`, MRN `ALI_OMRANI_HEALTHEX`,
+Stanford Health Care). The current `ingest_from_healthex` tool has these confirmed failures:
+
+1. **Bulk write**: All N parsed rows are inserted as 1 blob → 35 blobs in warehouse,
+   0 individual queryable rows after 10 runs
+2. **No transfer audit trail**: No timestamp, no per-record identity, no traceability
+3. **Blob escaping**: Dec 2023 ultrasound narrative contains unescaped double-quotes
+   that break JSON context serialization at ~char 15000–17000, drifting with warehouse size
+4. **Format B not parsed**: `get_labs` returns `#Lab Report 3y|Total:74` compressed
+   table; currently cached as raw text, never normalized into rows
+5. **No size-aware planning**: 1 lab result and 74 lab results handled identically —
+   no chunking, no rate limiting, no back-pressure
+
+The fix is a complete redesign of the transfer layer with three new components:
+**TransferPlanner**, **TransferLedger**, and **TracedWriter**.
+
+---
+
+## Architecture Overview
+
+```
+HealthEx MCP Tool Response
+        │
+        ▼
+┌─────────────────────┐
+│   FORMAT DETECTOR   │  (already implemented)
+│  A | B | C | D | E │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│  TRANSFER PLANNER   │  ← NEW
+│  assess size/count  │
+│  decide strategy    │
+│  assign batch_ids   │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│   FORMAT PARSER     │  (format_b_parser to implement)
+│  extract N rows     │
+│  sanitize each row  │  ← blob escaping happens HERE
+└──────────┬──────────┘
+           │  List[TransferRecord]
+           ▼
+┌─────────────────────┐
+│   TRACED WRITER     │  ← NEW (replaces write_and_verify)
+│  for each row:      │
+│    log PENDING      │
+│    write to table   │
+│    verify write     │
+│    log VERIFIED     │
+│    on fail: FAILED  │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│  TRANSFER LEDGER    │  ← NEW TABLE
+│  transfer_log rows  │
+│  one per record     │
+│  full timestamp arc │
+└─────────────────────┘
+```
+
+---
+
+## Step 1: Database Migration — `transfer_log` Table
+
+Create this table before any other changes:
+
+```sql
+CREATE TABLE IF NOT EXISTS transfer_log (
+    -- Identity
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transfer_id         UUID NOT NULL DEFAULT gen_random_uuid(),
+
+    -- Patient and resource context
+    patient_id          UUID NOT NULL REFERENCES patients(id),
+    resource_type       TEXT NOT NULL,   -- labs | conditions | encounters | medications | immunizations | summary
+    source              TEXT NOT NULL,   -- healthex | fhir | synthea | manual
+
+    -- Record identity (natural key — no PHI values)
+    record_key          TEXT NOT NULL,   -- e.g. "Hemoglobin A1c::2025-07-11" or "Prediabetes::2017-04-25"
+    record_hash         TEXT,            -- SHA-256 of sanitized row JSON for integrity check
+    loinc_code          TEXT,            -- for labs: LOINC code if available
+    icd10_code          TEXT,            -- for conditions: ICD-10 code if available
+    encounter_id        TEXT,            -- for encounters: HealthEx encounter ID if available
+
+    -- Batch context
+    batch_id            UUID,            -- all records from one ingest_from_healthex call share a batch_id
+    batch_sequence      INTEGER,         -- position within batch (1-indexed)
+    batch_total         INTEGER,         -- total records in this batch
+    chunk_id            UUID,            -- for large payloads split into chunks
+    chunk_sequence      INTEGER,         -- which chunk within the batch
+    chunk_total         INTEGER,
+
+    -- Transfer strategy
+    strategy            TEXT NOT NULL,   -- single | chunked_small | chunked_medium | chunked_large | llm_fallback
+    format_detected     TEXT,            -- plain_text_summary | compressed_table | flat_fhir | fhir_bundle | json_dict | unknown
+
+    -- Timestamp arc (every state transition logged)
+    planned_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    extracted_at        TIMESTAMPTZ,     -- parser produced the row
+    sanitized_at        TIMESTAMPTZ,     -- blob escaping + PHI check applied
+    written_at          TIMESTAMPTZ,     -- db.upsert() called
+    verified_at         TIMESTAMPTZ,     -- SELECT COUNT confirmed write
+    failed_at           TIMESTAMPTZ,
+
+    -- Status
+    status              TEXT NOT NULL DEFAULT 'planned',
+    -- planned → extracted → sanitized → written → verified
+    --                                            → failed (at any stage)
+
+    error_stage         TEXT,            -- which stage failed
+    error_message       TEXT,            -- truncated to 500 chars
+
+    -- Metadata
+    payload_size_bytes  INTEGER,         -- size of the raw fhir_json payload
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Indexes for the queries we run
+CREATE INDEX IF NOT EXISTS idx_transfer_log_patient    ON transfer_log (patient_id, resource_type);
+CREATE INDEX IF NOT EXISTS idx_transfer_log_batch      ON transfer_log (batch_id);
+CREATE INDEX IF NOT EXISTS idx_transfer_log_status     ON transfer_log (status, patient_id);
+CREATE INDEX IF NOT EXISTS idx_transfer_log_planned_at ON transfer_log (planned_at DESC);
+```
+
+---
+
+## Step 2: Transfer Planner — `ingestion/adapters/healthex/transfer_planner.py`
+
+```python
+import hashlib
+import json
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Optional
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+@dataclass
+class TransferRecord:
+    """One individual clinical record to be transferred."""
+    # Identity
+    transfer_id:     str = field(default_factory=lambda: str(uuid.uuid4()))
+    batch_id:        str = ""
+    batch_sequence:  int = 0
+    batch_total:     int = 0
+    chunk_id:        str = ""
+    chunk_sequence:  int = 0
+    chunk_total:     int = 0
+
+    # Content (the actual row to write to the warehouse)
+    row:             dict = field(default_factory=dict)
+
+    # Keys for traceability (no PHI values — only identifiers)
+    record_key:      str = ""     # "TestName::YYYY-MM-DD" or "ConditionName::OnsetDate"
+    record_hash:     str = ""     # SHA-256 of sanitized row
+    loinc_code:      str = ""
+    icd10_code:      str = ""
+    encounter_id:    str = ""
+
+    # Context
+    resource_type:   str = ""
+    source:          str = "healthex"
+    format_detected: str = ""
+    strategy:        str = ""
+
+    # Timestamps
+    planned_at:      Optional[datetime] = None
+    extracted_at:    Optional[datetime] = None
+    sanitized_at:    Optional[datetime] = None
+
+    def compute_key(self) -> str:
+        """Derive a privacy-safe natural key from the row."""
+        rt = self.resource_type
+        if rt == "labs":
+            return f"{self.row.get('test_name', 'unknown')}::{self.row.get('date', '')}"
+        elif rt == "conditions":
+            return f"{self.row.get('name', 'unknown')}::{self.row.get('onset_date', '')}"
+        elif rt == "encounters":
+            eid = self.row.get("encounter_id") or self.row.get("encounter_date", "")
+            return f"encounter::{eid}"
+        elif rt == "medications":
+            return f"{self.row.get('name', 'unknown')}::{self.row.get('start_date', '')}"
+        elif rt == "immunizations":
+            return f"{self.row.get('vaccine_name', 'unknown')}::{self.row.get('date', '')}"
+        else:
+            return f"summary::{self.row.get('last_visit', '')}"
+
+    def compute_hash(self) -> str:
+        """SHA-256 of the sanitized row JSON for integrity verification."""
+        sanitized = json.dumps(self.row, sort_keys=True, default=str)
+        return hashlib.sha256(sanitized.encode()).hexdigest()[:16]  # 16-char prefix
+
+@dataclass
+class TransferPlan:
+    """The plan for transferring a batch of records."""
+    batch_id:      str
+    strategy:      str
+    total_records: int
+    chunks:        list[list[TransferRecord]]
+    payload_bytes: int
+    resource_type: str
+    patient_id:    str
+    planned_at:    datetime
+
+# Size-based strategy thresholds
+STRATEGY_THRESHOLDS = {
+    "single":          (0,   9,    0,     1_000),    # ≤9 records AND ≤1KB
+    "chunked_small":   (10,  49,   1_000,  10_000),  # 10-49 records OR 1-10KB  → chunks of 10
+    "chunked_medium":  (50,  199,  10_000, 50_000),  # 50-199 records OR 10-50KB → chunks of 25
+    "chunked_large":   (200, 9999, 50_000, 999_999), # 200+ records OR >50KB     → chunks of 50
+}
+
+CHUNK_SIZES = {
+    "single":         999,  # no chunking
+    "chunked_small":   10,
+    "chunked_medium":  25,
+    "chunked_large":   50,
+    "llm_fallback":    10,  # LLM fallback results chunked small
+}
+
+def plan_transfer(
+    patient_id: str,
+    resource_type: str,
+    records: list[dict],
+    payload_bytes: int,
+    format_detected: str,
+    source: str = "healthex",
+    strategy_override: str = "",
+) -> TransferPlan:
+    """
+    Assess record count and payload size, select strategy, assign batch/chunk IDs.
+    Returns a TransferPlan with records organised into chunks.
+    """
+    n = len(records)
+    batch_id = str(uuid.uuid4())
+    planned_at = now_utc()
+
+    # Determine strategy
+    if strategy_override:
+        strategy = strategy_override
+    elif n == 0:
+        strategy = "single"
+    elif n <= 9 and payload_bytes <= 1_000:
+        strategy = "single"
+    elif n <= 49 or payload_bytes <= 10_000:
+        strategy = "chunked_small"
+    elif n <= 199 or payload_bytes <= 50_000:
+        strategy = "chunked_medium"
+    else:
+        strategy = "chunked_large"
+
+    chunk_size = CHUNK_SIZES.get(strategy, 10)
+
+    # Build TransferRecord objects
+    transfer_records: list[TransferRecord] = []
+    for i, row in enumerate(records):
+        tr = TransferRecord(
+            batch_id=batch_id,
+            batch_sequence=i + 1,
+            batch_total=n,
+            row=row.copy(),
+            resource_type=resource_type,
+            source=source,
+            format_detected=format_detected,
+            strategy=strategy,
+            planned_at=planned_at,
+        )
+        tr.record_key = tr.compute_key()
+        tr.record_hash = tr.compute_hash()
+        tr.loinc_code = row.get("loinc", "")
+        tr.icd10_code = row.get("icd10", "")
+        tr.encounter_id = row.get("encounter_id", "")
+        transfer_records.append(tr)
+
+    # Split into chunks and assign chunk IDs
+    chunks: list[list[TransferRecord]] = []
+    chunk_total = max(1, (n + chunk_size - 1) // chunk_size)
+
+    for chunk_idx in range(chunk_total):
+        chunk_id = str(uuid.uuid4())
+        start = chunk_idx * chunk_size
+        end = min(start + chunk_size, n)
+        chunk = transfer_records[start:end]
+        for tr in chunk:
+            tr.chunk_id = chunk_id
+            tr.chunk_sequence = chunk_idx + 1
+            tr.chunk_total = chunk_total
+        chunks.append(chunk)
+
+    return TransferPlan(
+        batch_id=batch_id,
+        strategy=strategy,
+        total_records=n,
+        chunks=chunks,
+        payload_bytes=payload_bytes,
+        resource_type=resource_type,
+        patient_id=patient_id,
+        planned_at=planned_at,
+    )
+```
+
+---
+
+## Step 3: Traced Writer — `ingestion/adapters/healthex/traced_writer.py`
+
+Replaces `write_and_verify.py` entirely. This is the core of the per-record audit trail.
+
+```python
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Optional
+
+from .transfer_planner import TransferRecord, TransferPlan, now_utc
+
+log = logging.getLogger(__name__)
+
+TABLE_MAP = {
+    "labs":          "lab_results",
+    "conditions":    "conditions",
+    "medications":   "medications",
+    "encounters":    "encounters",
+    "immunizations": "immunizations",
+    "summary":       "patient_summaries",
+}
+
+UPSERT_KEYS = {
+    "labs":          ["patient_id", "test_name", "date"],
+    "conditions":    ["patient_id", "name", "onset_date"],
+    "medications":   ["patient_id", "name", "start_date"],
+    "encounters":    ["patient_id", "encounter_date", "encounter_type"],
+    "immunizations": ["patient_id", "vaccine_name", "date"],
+    "summary":       ["patient_id"],
+}
+
+# ── Blob sanitizer (the quote-escaping fix applied at write time) ──────────────
+
+def sanitize_text_field(value: str) -> str:
+    """
+    Sanitize any text field before writing to DB.
+    Replaces unescaped double-quotes with single-quotes.
+    Strips null bytes and non-printable characters that break JSON.
+    Truncates to 10,000 chars to prevent context blowout.
+    """
+    if not isinstance(value, str):
+        return value
+    # Replace double-quotes (the ultrasound narrative bug)
+    value = value.replace('"', "'")
+    # Strip null bytes
+    value = value.replace('\x00', '')
+    # Truncate
+    if len(value) > 10_000:
+        value = value[:9_997] + "..."
+    return value
+
+def sanitize_row(row: dict) -> dict:
+    """Apply sanitize_text_field to all string values in a row."""
+    return {
+        k: sanitize_text_field(v) if isinstance(v, str) else v
+        for k, v in row.items()
+    }
+
+# ── Ledger writes ─────────────────────────────────────────────────────────────
+
+def _log_transfer(db, tr: TransferRecord, patient_id: str, payload_bytes: int):
+    """Insert the initial PLANNED row into transfer_log."""
+    try:
+        db.insert("transfer_log", {
+            "transfer_id":       tr.transfer_id,
+            "patient_id":        patient_id,
+            "resource_type":     tr.resource_type,
+            "source":            tr.source,
+            "record_key":        tr.record_key,
+            "record_hash":       tr.record_hash,
+            "loinc_code":        tr.loinc_code,
+            "icd10_code":        tr.icd10_code,
+            "encounter_id":      tr.encounter_id,
+            "batch_id":          tr.batch_id,
+            "batch_sequence":    tr.batch_sequence,
+            "batch_total":       tr.batch_total,
+            "chunk_id":          tr.chunk_id,
+            "chunk_sequence":    tr.chunk_sequence,
+            "chunk_total":       tr.chunk_total,
+            "strategy":          tr.strategy,
+            "format_detected":   tr.format_detected,
+            "planned_at":        tr.planned_at,
+            "payload_size_bytes": payload_bytes,
+            "status":            "planned",
+        })
+    except Exception as e:
+        log.warning(f"transfer_log insert failed for {tr.record_key}: {e}")
+
+def _update_transfer(db, transfer_id: str, updates: dict):
+    """Update a transfer_log row with new status/timestamps."""
+    try:
+        db.update(
+            "transfer_log",
+            updates,
+            where={"transfer_id": transfer_id}
+        )
+    except Exception as e:
+        log.warning(f"transfer_log update failed for {transfer_id}: {e}")
+
+# ── Main traced writer ─────────────────────────────────────────────────────────
+
+def execute_transfer_plan(
+    db,
+    plan: TransferPlan,
+    patient_id: str,
+) -> dict:
+    """
+    Execute a TransferPlan chunk by chunk, record by record.
+    Every state transition is timestamped in transfer_log.
+
+    Returns summary dict compatible with ingest_from_healthex response schema.
+    """
+    table = TABLE_MAP.get(plan.resource_type)
+    if not table:
+        return {
+            "status": "failed",
+            "patient_id": patient_id,
+            "resource_type": plan.resource_type,
+            "records_written": 0,
+            "records_verified": 0,
+            "error": f"Unknown resource_type: {plan.resource_type}",
+        }
+
+    keys = UPSERT_KEYS.get(plan.resource_type, ["patient_id"])
+
+    records_written  = 0
+    records_verified = 0
+    records_failed   = 0
+
+    log.info(
+        f"Starting transfer plan: patient={patient_id} resource={plan.resource_type} "
+        f"strategy={plan.strategy} total={plan.total_records} "
+        f"chunks={len(plan.chunks)} batch={plan.batch_id}"
+    )
+
+    for chunk_idx, chunk in enumerate(plan.chunks):
+        log.info(
+            f"Chunk {chunk_idx+1}/{len(plan.chunks)}: "
+            f"{len(chunk)} records (chunk_id={chunk[0].chunk_id if chunk else 'n/a'})"
+        )
+
+        for tr in chunk:
+            # ── Step 1: Log PLANNED ──────────────────────────────────────────
+            _log_transfer(db, tr, patient_id, plan.payload_bytes)
+
+            # ── Step 2: Sanitize (blob escaping at write time) ───────────────
+            try:
+                sanitized_row = sanitize_row(tr.row)
+                sanitized_row["patient_id"] = patient_id  # enforce correct patient
+                tr.sanitized_at = now_utc()
+                _update_transfer(db, tr.transfer_id, {
+                    "status":       "sanitized",
+                    "sanitized_at": tr.sanitized_at,
+                })
+            except Exception as e:
+                records_failed += 1
+                _update_transfer(db, tr.transfer_id, {
+                    "status":        "failed",
+                    "failed_at":     now_utc(),
+                    "error_stage":   "sanitize",
+                    "error_message": str(e)[:500],
+                })
+                log.error(f"Sanitize failed for {tr.record_key}: {e}")
+                continue
+
+            # ── Step 3: Write to warehouse ───────────────────────────────────
+            try:
+                db.upsert(table, sanitized_row, conflict_keys=keys)
+                tr.written_at = now_utc()
+                _update_transfer(db, tr.transfer_id, {
+                    "status":     "written",
+                    "written_at": tr.written_at,
+                })
+                records_written += 1
+            except Exception as e:
+                records_failed += 1
+                _update_transfer(db, tr.transfer_id, {
+                    "status":        "failed",
+                    "failed_at":     now_utc(),
+                    "error_stage":   "write",
+                    "error_message": str(e)[:500],
+                })
+                log.error(f"Write failed for {tr.record_key}: {e}")
+                continue
+
+            # ── Step 4: Verify write ─────────────────────────────────────────
+            try:
+                # Build the verification query from the upsert keys
+                where_clause = " AND ".join(
+                    f"{k} = ${i+1}" for i, k in enumerate(keys)
+                )
+                values = [sanitized_row.get(k) for k in keys]
+                result = db.query(
+                    f"SELECT COUNT(*) as cnt FROM {table} WHERE {where_clause}",
+                    *values
+                )
+                verified = result[0]["cnt"] > 0 if result else False
+
+                if verified:
+                    records_verified += 1
+                    _update_transfer(db, tr.transfer_id, {
+                        "status":      "verified",
+                        "verified_at": now_utc(),
+                    })
+                else:
+                    records_failed += 1
+                    _update_transfer(db, tr.transfer_id, {
+                        "status":        "failed",
+                        "failed_at":     now_utc(),
+                        "error_stage":   "verify",
+                        "error_message": "Row not found after write",
+                    })
+                    log.warning(f"Verify failed for {tr.record_key}: not found after write")
+
+            except Exception as e:
+                # Verification query failed — row may still be written
+                log.warning(f"Verify query error for {tr.record_key}: {e}")
+                _update_transfer(db, tr.transfer_id, {
+                    "status":        "written_unverified",
+                    "error_stage":   "verify",
+                    "error_message": str(e)[:500],
+                })
+
+    status = (
+        "ok"       if records_failed == 0 and records_written > 0
+        else "partial" if records_written > 0
+        else "failed"
+    )
+
+    log.info(
+        f"Transfer complete: batch={plan.batch_id} written={records_written} "
+        f"verified={records_verified} failed={records_failed} status={status}"
+    )
+
+    return {
+        "status":           status,
+        "patient_id":       patient_id,
+        "resource_type":    plan.resource_type,
+        "batch_id":         plan.batch_id,
+        "strategy":         plan.strategy,
+        "records_planned":  plan.total_records,
+        "records_written":  records_written,
+        "records_verified": records_verified,
+        "records_failed":   records_failed,
+        "chunks_total":     len(plan.chunks),
+        "format_detected":  plan.format_detected,
+    }
+```
+
+---
+
+## Step 4: Format B Parser — `ingestion/adapters/healthex/parsers/format_b_parser.py`
+
+This is the parser for HealthEx compressed table format. Three sub-parsers: labs, conditions, encounters.
+
+```python
+import re
+from datetime import datetime
+
+def _parse_dictionaries(lines: list[str]) -> dict[str, dict[int, str]]:
+    """
+    Parse HealthEx dictionary definition lines.
+    e.g. "C:1=Prediabetes|2=Fatty liver|3=BMI 34.0-34.9,adult|"
+    Returns: {"C": {1: "Prediabetes", 2: "Fatty liver", 3: "BMI 34.0-34.9,adult"}}
+    """
+    dicts: dict[str, dict[int, str]] = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("Note:"):
+            continue
+        # Dictionary line: single letter, colon, key=value pairs separated by |
+        m = re.match(r'^([A-Z][A-Za-z]?):(.*)', line)
+        if not m:
+            continue
+        key = m.group(1)
+        rest = m.group(2)
+        if "=" not in rest:
+            continue
+        mapping: dict[int, str] = {}
+        for part in rest.split("|"):
+            part = part.strip()
+            if "=" in part:
+                idx_str, val = part.split("=", 1)
+                try:
+                    mapping[int(idx_str.strip())] = val.strip()
+                except ValueError:
+                    pass
+        if mapping:
+            dicts[key] = mapping
+    return dicts
+
+def _resolve(cell: str, dict_key: str, dicts: dict, prev: dict) -> str:
+    """Resolve a @N reference or empty cell (sticky date semantics)."""
+    cell = cell.strip()
+    if cell.startswith("@"):
+        try:
+            idx = int(cell[1:])
+            return dicts.get(dict_key, {}).get(idx, cell)
+        except ValueError:
+            return cell
+    if cell == "":
+        return prev.get(dict_key, "")
+    return cell
+
+def parse_format_b_labs(raw: str) -> list[dict]:
+    """
+    Parse HealthEx #Lab Report compressed table.
+
+    Format:
+      #Lab Report Ny|Total:M|Flag=...
+      T:1=Narrative|
+      Date|Code|Test|Result|Range|Flag
+      Note: ...
+      2025-07-11|2345-7|Glucose, Ser/Plas|98 mg/dL|70-100|
+      |-|Fasting|Yes||
+      |4548-4|Hemoglobin A1c|4.8 %||
+      2023-12-13|20584-9|WBC|4.6 K/uL|4-11|
+    """
+    lines = raw.strip().split("\n")
+    dicts = _parse_dictionaries(lines)
+
+    rows: list[dict] = []
+    current_date = ""
+    header_found = False
+
+    SKIP_CODES = {"-", ""}
+    SKIP_TESTS = {
+        "Fasting", "Narrative", "Impression", "REFERRED",
+        "Alcohol Use History", "Drug Use History", "Smoking History",
+    }
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#") or line.startswith("Note:") or line.startswith("T:"):
+            continue
+        if line.startswith("Date|Code|Test"):
+            header_found = True
+            continue
+        if line.startswith("---") or line.startswith("Pagination"):
+            break
+        if not header_found:
+            continue
+
+        parts = line.split("|")
+        if len(parts) < 4:
+            continue
+
+        date_cell  = parts[0].strip()
+        code_cell  = parts[1].strip() if len(parts) > 1 else ""
+        test_cell  = parts[2].strip() if len(parts) > 2 else ""
+        result_cell = parts[3].strip() if len(parts) > 3 else ""
+        range_cell = parts[4].strip() if len(parts) > 4 else ""
+        flag_cell  = parts[5].strip() if len(parts) > 5 else ""
+
+        # Resolve @N references
+        if date_cell.startswith("@"):
+            date_cell = _resolve(date_cell, "D", dicts, {"D": current_date})
+        if date_cell:
+            current_date = date_cell
+        effective_date = current_date
+
+        # Skip narrative rows (code is "-" or test is in skip list)
+        if code_cell in SKIP_CODES or test_cell in SKIP_TESTS:
+            continue
+        if test_cell.startswith("@"):
+            # Dictionary reference for test name — resolve via T dict
+            test_cell = _resolve(test_cell, "T", dicts, {})
+
+        if not test_cell or not result_cell:
+            continue
+
+        # Parse value + unit from result (e.g. "98 mg/dL", "4.8 %", "108 mL/min/1.73 m2")
+        value_str = result_cell
+        unit_str = ""
+        # Try to split numeric value from unit
+        m = re.match(r'^([\d.]+)\s*(.*)$', result_cell)
+        if m:
+            value_str = m.group(1)
+            unit_str  = m.group(2).strip()
+
+        # Interpret flag
+        flag = flag_cell.upper()
+        if "H" in flag or "A" in flag or "L" in flag:
+            status = "out_of_range"
+        else:
+            status = "normal"
+
+        rows.append({
+            "test_name":  test_cell,
+            "loinc":      code_cell if code_cell not in SKIP_CODES else "",
+            "value":      value_str,
+            "unit":       unit_str,
+            "ref_range":  range_cell,
+            "status":     status,
+            "date":       effective_date,
+            "source":     "healthex_labs_api",
+        })
+
+    # Deduplicate by (test_name, date) — keep first occurrence
+    seen: set[tuple] = set()
+    deduped: list[dict] = []
+    for r in rows:
+        key = (r["test_name"], r["date"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+
+    return deduped
+
+
+def parse_format_b_conditions(raw: str) -> list[dict]:
+    """
+    Parse HealthEx #Conditions compressed table.
+
+    Format:
+      #Conditions Ny|Total:M
+      D:1=2019-01-11|2=2017-04-25|
+      C:1=BMI 34.0-34.9,adult|2=Prediabetes|3=Fatty liver|
+      S:1=active|2=resolved|
+      Date|Condition|ClinicalStatus|OnsetDate|AbatementDate|SNOMED|ICD10|...
+      @1|@1|@1|2019-01-11||162864005|Z68.34|...
+      2017-09-19|Cholelithiasis|@2|2017-09-19|2017-12-06|266474003|K80.20|...
+    """
+    lines = raw.strip().split("\n")
+    dicts = _parse_dictionaries(lines)
+
+    # Column indices (fixed for this format)
+    COL_DATE     = 0
+    COL_COND     = 1
+    COL_STATUS   = 2
+    COL_ONSET    = 3
+    COL_ABATE    = 4
+    COL_SNOMED   = 5
+    COL_ICD10    = 6
+
+    rows: list[dict] = []
+    header_found = False
+    prev: dict[str, str] = {}
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("Note:"):
+            continue
+        if "Date|Condition|ClinicalStatus" in line:
+            header_found = True
+            continue
+        if line.startswith("---") or line.startswith("Pagination"):
+            break
+        if not header_found:
+            continue
+
+        parts = line.split("|")
+
+        def get(idx: int, dict_key: str) -> str:
+            if idx >= len(parts):
+                return prev.get(dict_key, "")
+            return _resolve(parts[idx], dict_key, dicts, prev)
+
+        date_val   = get(COL_DATE,   "D")
+        cond_val   = get(COL_COND,   "C")
+        status_val = get(COL_STATUS, "S")
+        onset_val  = get(COL_ONSET,  "D")
+        abate_val  = parts[COL_ABATE].strip() if COL_ABATE < len(parts) else ""
+        icd_val    = parts[COL_ICD10].strip() if COL_ICD10 < len(parts) else ""
+
+        # Update previous for sticky semantics
+        if date_val:   prev["D"] = date_val
+        if cond_val:   prev["C"] = cond_val
+        if status_val: prev["S"] = status_val
+
+        # Skip rows that are just duplicates of SNOMED/encounter references
+        if not cond_val or cond_val.startswith("@"):
+            continue
+        # Skip pure reference rows with no real condition name
+        if re.match(r'^@\d+$', cond_val):
+            continue
+
+        rows.append({
+            "name":           cond_val,
+            "icd10":          icd_val,
+            "status":         status_val if status_val else "unknown",
+            "onset_date":     onset_val,
+            "abatement_date": abate_val,
+            "source":         "healthex_conditions_api",
+        })
+
+    # Deduplicate by (name, onset_date)
+    seen: set[tuple] = set()
+    deduped: list[dict] = []
+    for r in rows:
+        key = (r["name"], r["onset_date"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+
+    return deduped
+
+
+def parse_format_b_encounters(raw: str) -> list[dict]:
+    """
+    Parse HealthEx #Encounters compressed table.
+
+    Format:
+      #Encounters Ny|Total:M
+      E:1=Office Visit|
+      S:1=finished|
+      Date|EncounterId|Encounter|Status|ClassCode|...|PeriodStart|PeriodEnd|...|Diagnoses|Participants|Locations|...
+      2025-06-26|e87li1W...|@1|@1|@1|@1|2025-06-26|2025-06-26|...|Diabetes; Abdominal Pain|...|Internal Medicine|...
+    """
+    lines = raw.strip().split("\n")
+    dicts = _parse_dictionaries(lines)
+
+    rows: list[dict] = []
+    header_cols: list[str] = []
+    header_found = False
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("Note:"):
+            continue
+        if "Date|EncounterId|Encounter" in line:
+            header_cols = [c.strip() for c in line.split("|")]
+            header_found = True
+            continue
+        if line.startswith("---") or line.startswith("Pagination"):
+            break
+        if not header_found:
+            continue
+
+        parts = [p.strip() for p in line.split("|")]
+
+        def col(name: str, dict_key: str = "") -> str:
+            try:
+                idx = header_cols.index(name)
+                val = parts[idx] if idx < len(parts) else ""
+                if dict_key and val.startswith("@"):
+                    return _resolve(val, dict_key, dicts, {})
+                return val
+            except ValueError:
+                return ""
+
+        # PeriodStart is the authoritative encounter date
+        period_start = col("PeriodStart")
+        encounter_id = col("EncounterId")
+        encounter_type = col("Encounter", "E")
+        status = col("Status", "S")
+        diagnoses = col("Diagnoses")
+        locations = col("Locations")
+
+        if not period_start:
+            period_start = col("Date")
+
+        if not period_start:
+            continue
+
+        rows.append({
+            "encounter_date":  period_start,
+            "encounter_id":    encounter_id,
+            "encounter_type":  encounter_type if encounter_type and not encounter_type.startswith("@") else "Office Visit",
+            "status":          status if status and not status.startswith("@") else "finished",
+            "diagnoses":       diagnoses,
+            "department":      locations,
+            "source":          "healthex_visits_api",
+        })
+
+    # Deduplicate by encounter_id, then by encounter_date+type
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for r in rows:
+        key = r["encounter_id"] or f"{r['encounter_date']}::{r['encounter_type']}"
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+
+    return deduped
+
+
+def parse_format_b(raw: str, resource_type: str) -> list[dict]:
+    """Dispatch to the correct Format B sub-parser based on resource_type."""
+    if resource_type == "labs":
+        return parse_format_b_labs(raw)
+    elif resource_type == "conditions":
+        return parse_format_b_conditions(raw)
+    elif resource_type == "encounters":
+        return parse_format_b_encounters(raw)
+    else:
+        # For other types, return empty and let LLM fallback handle it
+        return []
+```
+
+---
+
+## Step 5: Updated Ingest Entry Point — `ingestion/adapters/healthex/ingest_adapter.py`
+
+Wire everything together. Replace the existing `ingest_from_healthex` handler.
+
+```python
+import json
+import logging
+from datetime import datetime, timezone
+
+from .format_detector import detect_format, HealthExFormat
+from .parsers.format_a_parser import parse_plain_text_summary
+from .parsers.format_b_parser import parse_format_b
+from .parsers.format_d_parser import parse_fhir_bundle
+from .parsers.json_dict_parser import parse_json_dict_arrays
+from .llm_fallback_normaliser import llm_normalise
+from .transfer_planner import plan_transfer
+from .traced_writer import execute_transfer_plan, sanitize_row
+
+log = logging.getLogger(__name__)
+
+def ingest_from_healthex(
+    db,
+    patient_id: str,
+    resource_type: str,
+    fhir_json: str,
+) -> dict:
+    """
+    Multi-step, per-record traced transfer from HealthEx into warehouse.
+
+    Returns:
+        {
+          status, patient_id, resource_type,
+          batch_id, strategy,
+          records_planned, records_written, records_verified, records_failed,
+          chunks_total, format_detected,
+          duration_ms
+        }
+    """
+    t_start = datetime.now(timezone.utc)
+    payload_bytes = len(fhir_json.encode("utf-8"))
+
+    # ── Stage 1: Format Detection ─────────────────────────────────────────────
+    fmt, payload = detect_format(fhir_json)
+    log.info(f"Format detected: {fmt.value} | {resource_type} | {payload_bytes}B")
+
+    # ── Stage 2: Parse into rows ──────────────────────────────────────────────
+    rows: list[dict] = []
+    parser_used = "none"
+
+    if fmt == HealthExFormat.PLAIN_TEXT_SUMMARY:
+        rows = parse_plain_text_summary(payload, resource_type)
+        parser_used = "format_a"
+
+    elif fmt == HealthExFormat.COMPRESSED_TABLE:
+        rows = parse_format_b(payload, resource_type)
+        parser_used = "format_b"
+
+    elif fmt == HealthExFormat.FLAT_FHIR_TEXT:
+        rows = llm_normalise(payload, resource_type, patient_id)
+        parser_used = "llm_fallback_format_c"
+
+    elif fmt == HealthExFormat.FHIR_BUNDLE_JSON:
+        rows = parse_fhir_bundle(payload, resource_type)
+        parser_used = "format_d_fhir"
+
+    elif fmt == HealthExFormat.JSON_DICT_ARRAY:
+        rows = parse_json_dict_arrays(payload, resource_type)
+        parser_used = "json_dict"
+
+    elif fmt == HealthExFormat.UNKNOWN:
+        # Store in raw_cache for audit but don't normalize
+        _write_raw_cache(db, patient_id, resource_type, fhir_json, fmt.value)
+        return {
+            "status": "cached",
+            "patient_id": patient_id,
+            "resource_type": resource_type,
+            "records_written": 0,
+            "records_verified": 0,
+            "note": "Unknown format — stored in raw_cache only",
+            "format_detected": fmt.value,
+        }
+
+    # LLM fallback if deterministic parser returned 0 rows on non-trivial input
+    if len(rows) == 0 and payload_bytes > 200:
+        log.info(f"Deterministic parser returned 0 rows — triggering LLM fallback")
+        rows = llm_normalise(fhir_json, resource_type, patient_id)
+        parser_used = f"{parser_used}→llm_fallback"
+
+    # Always write raw_cache for auditability (with sanitized text)
+    _write_raw_cache(db, patient_id, resource_type, fhir_json, fmt.value,
+                     rows_extracted=len(rows), parser_used=parser_used)
+
+    # ── Stage 3: Plan the transfer ────────────────────────────────────────────
+    plan = plan_transfer(
+        patient_id=patient_id,
+        resource_type=resource_type,
+        records=rows,
+        payload_bytes=payload_bytes,
+        format_detected=fmt.value,
+    )
+
+    log.info(
+        f"Transfer plan: strategy={plan.strategy} records={plan.total_records} "
+        f"chunks={len(plan.chunks)} batch={plan.batch_id}"
+    )
+
+    # ── Stage 4: Execute — per-record write with audit trail ─────────────────
+    result = execute_transfer_plan(db, plan, patient_id)
+
+    # Add timing
+    elapsed = (datetime.now(timezone.utc) - t_start).total_seconds() * 1000
+    result["duration_ms"] = round(elapsed)
+    result["parser_used"] = parser_used
+
+    return result
+
+
+def _write_raw_cache(db, patient_id, resource_type, raw, fmt,
+                     rows_extracted=0, parser_used="none"):
+    """Write sanitized raw payload to raw_ingest_cache for audit trail."""
+    try:
+        # Sanitize before storing — fix the quote issue at write time
+        safe_raw = raw.replace('"', "'").replace('\x00', '')[:50_000]
+        db.upsert("raw_ingest_cache", {
+            "patient_id":      patient_id,
+            "resource_type":   resource_type,
+            "raw_payload":     safe_raw,
+            "format_detected": fmt,
+            "rows_extracted":  rows_extracted,
+            "parser_used":     parser_used,
+            "cached_at":       datetime.now(timezone.utc),
+        }, conflict_keys=["patient_id", "resource_type"])
+    except Exception as e:
+        log.warning(f"raw_cache write failed: {e}")
+```
+
+---
+
+## Step 6: Transfer Audit Query Helper
+
+Add this to your API/MCP server so you can inspect transfer history:
+
+```python
+def get_transfer_audit(db, patient_id: str, resource_type: str = None) -> dict:
+    """
+    Query transfer_log for a full audit trail of a patient's data transfers.
+    Returns per-record transfer history with all timestamps.
+    """
+    where = "WHERE patient_id = $1"
+    params = [patient_id]
+
+    if resource_type:
+        where += " AND resource_type = $2"
+        params.append(resource_type)
+
+    summary = db.query(f"""
+        SELECT
+            resource_type,
+            strategy,
+            COUNT(*)                                    AS total_records,
+            COUNT(*) FILTER (WHERE status = 'verified') AS verified,
+            COUNT(*) FILTER (WHERE status = 'failed')   AS failed,
+            COUNT(*) FILTER (WHERE status = 'written_unverified') AS unverified,
+            MIN(planned_at)                             AS first_planned,
+            MAX(verified_at)                            AS last_verified,
+            AVG(EXTRACT(EPOCH FROM (verified_at - planned_at))) AS avg_transfer_secs
+        FROM transfer_log
+        {where}
+        GROUP BY resource_type, strategy
+        ORDER BY resource_type
+    """, *params)
+
+    recent = db.query(f"""
+        SELECT
+            resource_type,
+            record_key,
+            loinc_code,
+            icd10_code,
+            status,
+            strategy,
+            batch_sequence,
+            batch_total,
+            chunk_sequence,
+            chunk_total,
+            planned_at,
+            sanitized_at,
+            written_at,
+            verified_at,
+            failed_at,
+            error_stage,
+            error_message
+        FROM transfer_log
+        {where}
+        ORDER BY planned_at DESC
+        LIMIT 100
+    """, *params)
+
+    return {"summary": summary, "recent_transfers": recent}
+```
+
+---
+
+## Step 7: Transfer Log MCP Tool (expose to Claude)
+
+Add this tool to your ambient-skills-companion MCP server:
+
+```python
+@mcp.tool()
+def get_transfer_audit(patient_id: str, resource_type: str = "") -> str:
+    """
+    Retrieve the per-record transfer audit log for a patient.
+    Shows timestamp for every stage: planned → sanitized → written → verified.
+    Use for traceability, privacy audits, and debugging ingest failures.
+
+    Args:
+        patient_id: UUID of the patient
+        resource_type: Optional filter — labs | conditions | encounters | medications
+    """
+    audit = get_transfer_audit_query(
+        db,
+        patient_id=patient_id,
+        resource_type=resource_type or None
+    )
+    return json.dumps(audit, default=str)
+```
+
+---
+
+## Verification Tests
+
+Run these after deploying. All must pass:
+
+```python
+# TEST 1 — Format B labs → multiple individual rows (not 1 blob)
+result = ingest_from_healthex(db, PATIENT_ID, "labs",
+    '#Lab Report 3y|Total:5|Flag=FHIR HL7 Interpretation\n'
+    'T:1=Narrative|\n'
+    'Date|Code|Test|Result|Range|Flag\n'
+    'Note: ...\n'
+    '2025-07-11|4548-4|Hemoglobin A1c|4.8 %||\n'
+    '|18262-6|Direct LDL Chol|104 mg/dL||\n'
+    '|2085-9|HDL Cholesterol|60 mg/dL||\n'
+    '|14927-8|Triglyceride, Ser/Plas|41 mg/dL|<150|\n'
+    '2023-12-13|4548-4|Hemoglobin A1c|5.0 %||\n'
+)
+assert result["records_written"] == 5       # 5 rows, not 1 blob
+assert result["records_verified"] == 5
+assert result["records_failed"]  == 0
+assert result["strategy"] in ("single", "chunked_small")
+
+# TEST 2 — transfer_log has individual entries
+audit = get_transfer_audit(db, PATIENT_ID, "labs")
+assert len(audit["recent_transfers"]) >= 5
+assert all(t["status"] == "verified" for t in audit["recent_transfers"][:5])
+assert audit["recent_transfers"][0]["record_key"].startswith("Hemoglobin A1c::")
+# Timestamp arc is complete
+for t in audit["recent_transfers"][:5]:
+    assert t["planned_at"] is not None
+    assert t["sanitized_at"] is not None
+    assert t["written_at"] is not None
+    assert t["verified_at"] is not None
+
+# TEST 3 — JSON dict conditions → 5 individual rows
+result = ingest_from_healthex(db, PATIENT_ID, "conditions",
+    '{"conditions": ['
+    '{"name":"Prediabetes","icd10":"R73.03","status":"active","onset":"2017-04-25"},'
+    '{"name":"Fatty liver","icd10":"K76.0","status":"active","onset":"2017-01-01"},'
+    '{"name":"Morbid obesity","icd10":"E66.01","status":"active","onset":"2015-02-26"},'
+    '{"name":"BMI 34.0-34.9","icd10":"Z68.34","status":"active","onset":"2019-01-11"},'
+    '{"name":"Family history CAD","icd10":"Z82.49","status":"active"}'
+    ']}'
+)
+assert result["records_written"] == 5       # 5 items → 5 rows
+assert result["records_verified"] == 5
+
+# TEST 4 — ultrasound narrative does NOT crash any trigger type
+# (the blob escaping in _write_raw_cache and sanitize_row kills the bad quotes)
+result = ingest_from_healthex(db, PATIENT_ID, "labs",
+    '"#Lab Report 1y|...\n2023-12-15|-|Impression|BY: Ly, Tiffany ABDOMINAL '
+    'ULTRASOUND: \\"Gallstone. Moderate hepatic steatosis.\\"||"'
+)
+assert result["status"] in ("ok", "cached")   # no crash
+
+# TEST 5 — strategy selection by size
+small  = ingest_from_healthex(db, PATIENT_ID, "labs", '{"resourceType":"Bundle","entry":[...3 obs...]}')
+assert small["strategy"] == "single"
+
+medium_payload = '{"conditions":[' + ','.join(['{"name":"C%d","icd10":"X"}' % i for i in range(60)]) + ']}'
+medium = ingest_from_healthex(db, PATIENT_ID, "conditions", medium_payload)
+assert medium["strategy"] == "chunked_medium"
+assert medium["chunks_total"] >= 3            # 60 items / chunk_size=25
+
+# TEST 6 — transfer_log has batch + chunk IDs for every record
+audit = get_transfer_audit(db, PATIENT_ID, "conditions")
+for t in audit["recent_transfers"]:
+    assert t.get("batch_id") is not None      # every record has batch identity
+    # chunk info present for chunked strategies
+```
+
+---
+
+## Files to Create / Modify
+
+```bash
+# New files
+ingestion/adapters/healthex/transfer_planner.py    ← Step 2 (new)
+ingestion/adapters/healthex/traced_writer.py        ← Step 3 (replaces write_and_verify.py)
+ingestion/adapters/healthex/parsers/format_b_parser.py ← Step 4 (new)
+
+# Modified files
+ingestion/adapters/healthex/ingest_adapter.py      ← Step 5 (full rewrite of ingest_from_healthex)
+db/migrations/add_transfer_log.sql                 ← Step 1 (new migration)
+mcp_skills/tools/transfer_audit.py                 ← Step 7 (new MCP tool)
+
+# Search commands to locate existing files
+grep -r "write_and_verify\|records_written\|ingest_from_healthex" . --include="*.py" -l
+grep -r "raw_ingest_cache\|format_detector\|HealthExFormat" . --include="*.py" -l
+```
