@@ -15,15 +15,129 @@ dicts compatible with the _healthex_native_to_fhir_* converters in mcp_server.py
 import re
 
 
-def parse_plain_text_summary(raw: str, resource_type: str) -> list[dict]:
+# Rows whose test name starts with these are pure narrative — skip them
+NARRATIVE_PREFIXES = {
+    "Narrative", "Interpretation", "Comment", "Quantiferon Criteria",
+    "QuantiFERON Incubation", "Alb/Creat Interp", "ECG Impression",
+    "Fasting",
+}
+
+
+def _parse_lab_value(raw: str) -> tuple:
+    """
+    Split a lab value+unit+ref string into (result_value, result_unit, ref_range).
+
+    Input examples:
+      "4.8 %(ref:<5.7)"              -> ("4.8", "%", "<5.7")
+      "98 mg/dL(ref:70-100 mg/dL)"  -> ("98", "mg/dL", "70-100 mg/dL")
+      "Negative"                     -> ("Negative", "", "")
+      "9.1 mIU/mL"                  -> ("9.1", "mIU/mL", "")
+      "108 mL/min/1.73 m2(ref:>60)" -> ("108", "mL/min/1.73 m2", ">60")
+      "<30"                          -> ("<30", "", "")
+      "Non Reactive"                 -> ("Non Reactive", "", "")
+    """
+    raw = raw.strip()
+
+    ref_range = ""
+    ref_match = re.search(r'\(ref:([^)]+)\)', raw)
+    if ref_match:
+        ref_range = ref_match.group(1).strip()
+        raw = raw[:ref_match.start()].strip()
+
+    num_match = re.match(r'^([<>]?[\d.]+)\s*(.*)', raw)
+    if num_match:
+        result_value = num_match.group(1).strip()
+        result_unit = num_match.group(2).strip()
+    else:
+        result_value = raw
+        result_unit = ""
+
+    return result_value, result_unit, ref_range
+
+
+def _is_numeric(value: str) -> bool:
+    """True if value is a numeric result (possibly prefixed with < or >)."""
+    return bool(re.match(r'^[<>]?[\d.]+$', value.strip()))
+
+
+def parse_labs_from_summary(raw: str) -> list:
+    """
+    Parse the LABS section from a Format A plain text summary.
+
+    Returns rows with fields:
+      test_name, result_value, result_unit, ref_range,
+      effective_date, flag, loinc_code, source
+    """
+    rows = []
+
+    content = _extract_section(raw, r'LABS\(\d+\):', _SECTION_HEADERS)
+    if not content:
+        return rows
+
+    items = content.split(" | ")
+
+    for item in items:
+        item = item.strip()
+        if not item:
+            continue
+
+        outer = re.match(
+            r'(.+?)'
+            r':'
+            r'(.+?)'
+            r'\s+(\d{4}-\d{2}-\d{2})'
+            r'@(.+?)'
+            r'(?:\[.*)?$',
+            item,
+            re.DOTALL,
+        )
+        if not outer:
+            continue
+
+        test_name = outer.group(1).strip()
+        raw_value_block = outer.group(2).strip()
+        effective_date = outer.group(3).strip()
+
+        if any(test_name.startswith(p) for p in NARRATIVE_PREFIXES):
+            continue
+
+        if len(raw_value_block.split()) > 8:
+            continue
+
+        result_value, result_unit, ref_range = _parse_lab_value(raw_value_block)
+
+        # Format A uses both "[OutOfRange]" and "OutOfRange:N" inside brackets
+        flag = "out_of_range" if "OutOfRange" in item else ""
+
+        rows.append({
+            "test_name":      test_name,
+            "result_value":   result_value,
+            "result_unit":    result_unit,
+            "ref_range":      ref_range,
+            "effective_date": effective_date,
+            "flag":           flag,
+            "loinc_code":     "",
+            "source":         "healthex_summary",
+            # Backward-compat aliases so existing FHIR converters keep working
+            "name":           test_name,
+            "value":          result_value,
+            "unit":           result_unit,
+            "date":           effective_date,
+            "status":         "out_of_range" if flag else "normal",
+        })
+
+    return rows
+
+
+def parse_plain_text_summary(raw: str, resource_type: str) -> list:
     """Parse HealthEx plain text summary and return native dicts for the
     requested resource_type."""
-    rows: list[dict] = []
+    rows = []
 
     if resource_type == "conditions":
         rows = _parse_conditions(raw)
     elif resource_type == "labs":
-        rows = _parse_labs(raw)
+        rows = parse_labs_from_summary(raw)
     elif resource_type == "encounters":
         rows = _parse_encounters(raw)
     elif resource_type == "immunizations":
@@ -34,7 +148,7 @@ def parse_plain_text_summary(raw: str, resource_type: str) -> list[dict]:
     return rows
 
 
-def _extract_section(raw: str, header_pattern: str, stop_headers: list[str]) -> str:
+def _extract_section(raw: str, header_pattern: str, stop_headers: list) -> str:
     """Extract the content of a section between header_pattern and the next
     section header (or end of string)."""
     stop_pattern = "|".join(re.escape(h) for h in stop_headers)
@@ -49,7 +163,7 @@ _SECTION_HEADERS = [
 ]
 
 
-def _parse_conditions(raw: str) -> list[dict]:
+def _parse_conditions(raw: str) -> list:
     content = _extract_section(
         raw, r'CONDITIONS\(\d+(?:/\d+)?\):', _SECTION_HEADERS
     )
@@ -63,8 +177,6 @@ def _parse_conditions(raw: str) -> list[dict]:
         if not item:
             continue
 
-        # Pattern: "Active: BMI 34.0-34.9,adult@Stanford Health Care 2019-01-11"
-        # or "Inactive: GERD@Provider 2017-04-25"
         m = re.match(
             r'(Active|Inactive|Resolved):\s*(.+?)@(.+?)\s+(\d{4}-\d{2}-\d{2})',
             item, re.IGNORECASE,
@@ -78,9 +190,7 @@ def _parse_conditions(raw: str) -> list[dict]:
                 "onset_date": date,
             })
         else:
-            # Fallback: try to extract just a name and date
             m2 = re.search(r'(\d{4}-\d{2}-\d{2})', item)
-            # Strip leading status prefix if present
             name = re.sub(r'^(Active|Inactive|Resolved):\s*', '', item, flags=re.IGNORECASE)
             name = re.sub(r'@.*', '', name).strip()
             if name:
@@ -93,59 +203,7 @@ def _parse_conditions(raw: str) -> list[dict]:
     return rows
 
 
-def _parse_labs(raw: str) -> list[dict]:
-    content = _extract_section(raw, r'LABS\(\d+\):', _SECTION_HEADERS)
-    if not content:
-        return []
-
-    rows = []
-    items = content.split(" | ")
-    for item in items:
-        item = item.strip()
-        if not item:
-            continue
-
-        # Pattern: "Hemoglobin A1c:4.8 %(ref:<5.7) 2025-07-11@Stanford[totalrecords:9]"
-        # Simpler: "Test Name:value_and_unit date@Provider"
-        m = re.match(r'(.+?):(.+?)\s+(\d{4}-\d{2}-\d{2})@', item)
-        if m:
-            test_name = m.group(1).strip()
-            value_unit = m.group(2).strip()
-            date = m.group(3)
-
-            # Try to split value from unit/ref
-            # e.g. "4.8 %(ref:<5.7)" → value="4.8", unit="%"
-            vm = re.match(r'([\d.]+)\s*([^(]*)', value_unit)
-            value = vm.group(1) if vm else value_unit
-            unit = vm.group(2).strip() if vm else ""
-
-            out_of_range = "[OutOfRange]" in item
-
-            rows.append({
-                "name": test_name,
-                "test_name": test_name,
-                "value": value,
-                "unit": unit,
-                "date": date,
-                "status": "out_of_range" if out_of_range else "normal",
-            })
-        else:
-            # Minimal fallback: just extract name if possible
-            m2 = re.match(r'(.+?):', item)
-            m3 = re.search(r'(\d{4}-\d{2}-\d{2})', item)
-            if m2:
-                rows.append({
-                    "name": m2.group(1).strip(),
-                    "test_name": m2.group(1).strip(),
-                    "value": "",
-                    "unit": "",
-                    "date": m3.group(1) if m3 else "",
-                })
-
-    return rows
-
-
-def _parse_encounters(raw: str) -> list[dict]:
+def _parse_encounters(raw: str) -> list:
     content = _extract_section(
         raw, r'CLINICAL VISITS\(\d+\):', _SECTION_HEADERS
     )
@@ -159,7 +217,6 @@ def _parse_encounters(raw: str) -> list[dict]:
         if not item:
             continue
 
-        # Pattern: "Office Visit:description:Internal Medicine,diagnoses:Fatty liver 2025-06-26@Stanford"
         m = re.match(
             r'(.+?):description:(.+?),diagnoses:(.+?)\s+(\d{4}-\d{2}-\d{2})@',
             item,
@@ -173,7 +230,6 @@ def _parse_encounters(raw: str) -> list[dict]:
                 "encounter_date": date,
             })
         else:
-            # Minimal: extract date
             m2 = re.search(r'(\d{4}-\d{2}-\d{2})', item)
             if m2:
                 visit_type = item.split(":")[0].strip() if ":" in item else "encounter"
@@ -187,7 +243,7 @@ def _parse_encounters(raw: str) -> list[dict]:
     return rows
 
 
-def _parse_immunizations(raw: str) -> list[dict]:
+def _parse_immunizations(raw: str) -> list:
     content = _extract_section(
         raw, r'IMMUNIZATIONS\(\d+\):', _SECTION_HEADERS
     )
@@ -201,7 +257,6 @@ def _parse_immunizations(raw: str) -> list[dict]:
         if not item:
             continue
 
-        # Pattern: "Flu vaccine (IIV4) 2023-12-13@Stanford"
         m = re.match(r'(.+?)\s+(\d{4}-\d{2}-\d{2})@', item)
         if m:
             rows.append({
@@ -214,7 +269,7 @@ def _parse_immunizations(raw: str) -> list[dict]:
     return rows
 
 
-def _parse_medications(raw: str) -> list[dict]:
+def _parse_medications(raw: str) -> list:
     content = _extract_section(
         raw, r'MEDICATIONS\(\d+\):', _SECTION_HEADERS
     )
@@ -228,8 +283,6 @@ def _parse_medications(raw: str) -> list[dict]:
         if not item:
             continue
 
-        # Pattern: "Metformin 1000mg BID@Stanford 2020-01-01"
-        # or "drug_name:status date@provider"
         m = re.search(r'(\d{4}-\d{2}-\d{2})', item)
         name = re.sub(r'@.*', '', item).strip()
         name = re.sub(r'\d{4}-\d{2}-\d{2}.*', '', name).strip()

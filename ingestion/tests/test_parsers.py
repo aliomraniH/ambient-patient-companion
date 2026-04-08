@@ -2,7 +2,11 @@
 import json
 import pytest
 
-from ingestion.adapters.healthex.parsers.format_a_parser import parse_plain_text_summary
+from ingestion.adapters.healthex.parsers.format_a_parser import (
+    parse_plain_text_summary,
+    parse_labs_from_summary,
+    _parse_lab_value,
+)
 from ingestion.adapters.healthex.parsers.format_b_parser import parse_compressed_table
 from ingestion.adapters.healthex.parsers.format_c_parser import parse_flat_fhir_text
 from ingestion.adapters.healthex.parsers.format_d_parser import parse_fhir_bundle
@@ -51,6 +55,107 @@ class TestFormatAParser:
     def test_unknown_resource_type(self):
         rows = parse_plain_text_summary(SAMPLE_PLAIN_TEXT, "allergies")
         assert rows == []
+
+    def test_labs_new_canonical_fields(self):
+        rows = parse_plain_text_summary(SAMPLE_PLAIN_TEXT, "labs")
+        assert len(rows) >= 2
+        hba1c = next(r for r in rows if "A1c" in r.get("test_name", ""))
+        assert hba1c["result_value"] == "4.8"
+        assert hba1c["result_unit"] == "%"
+        assert hba1c["ref_range"] == "<5.7"
+        assert hba1c["effective_date"] == "2025-07-11"
+        assert hba1c["flag"] == ""
+        ldl = next(r for r in rows if "LDL" in r.get("test_name", ""))
+        assert ldl["result_value"] == "104"
+        assert ldl["result_unit"] == "mg/dL"
+        assert ldl["flag"] == "out_of_range"
+
+
+# ── Format A: _parse_lab_value unit tests ────────────────────────────────────
+
+class TestParseLabValue:
+    def test_percent_with_ref(self):
+        assert _parse_lab_value("4.8 %(ref:<5.7)") == ("4.8", "%", "<5.7")
+
+    def test_mgdl_with_range_ref(self):
+        assert _parse_lab_value("98 mg/dL(ref:70-100 mg/dL)") == ("98", "mg/dL", "70-100 mg/dL")
+
+    def test_gt_ref(self):
+        assert _parse_lab_value("60 mg/dL(ref:>40)") == ("60", "mg/dL", ">40")
+
+    def test_complex_unit_with_ref(self):
+        rv, ru, rr = _parse_lab_value("108 mL/min/1.73 m2(ref:>60)")
+        assert rv == "108"
+        assert "mL/min" in ru
+        assert rr == ">60"
+
+    def test_no_ref(self):
+        assert _parse_lab_value("9.1 mIU/mL") == ("9.1", "mIU/mL", "")
+
+    def test_nonnumeric_negative(self):
+        assert _parse_lab_value("Negative") == ("Negative", "", "")
+
+    def test_nonnumeric_non_reactive(self):
+        assert _parse_lab_value("Non Reactive") == ("Non Reactive", "", "")
+
+    def test_lt_prefix(self):
+        rv, ru, rr = _parse_lab_value("<30")
+        assert rv == "<30"
+        assert ru == ""
+        assert rr == ""
+
+
+# ── Format A: parse_labs_from_summary integration tests ──────────────────────
+
+SAMPLE_WITH_NARRATIVE = """PATIENT: Ali Omrani, DOB 1987-03-25
+LABS(96): Hemoglobin A1c:4.8 %(ref:<5.7) 2025-07-11@Stanford Health Care (Stanford Health Care and Stanford Medicine Partners)[totalrecords:9] | Glucose, Ser/Plas:98 mg/dL(ref:70-100 mg/dL) 2025-07-11@Stanford Health Care (Stanford Health Care and Stanford Medicine Partners)[totalrecords:11,OutOfRange:5] | HDL Cholesterol:60 mg/dL(ref:>40) 2025-07-11@Stanford Health Care (Stanford Health Care and Stanford Medicine Partners)[totalrecords:10] | WBC:4.6 K/uL 2023-12-13@Stanford Health Care (Stanford Health Care and Stanford Medicine Partners)[totalrecords:5] | Narrative:Falsely decreased cholestero ...[Truncated] 2025-07-11@Stanford Health Care (Stanford Health Care and Stanford Medicine Partners)
+ALLERGIES(1): No Known Allergies 2015-07-21@Stanford"""
+
+
+class TestParseLabsFromSummary:
+    def test_narrative_skipped(self):
+        labs = parse_labs_from_summary(SAMPLE_WITH_NARRATIVE)
+        names = [l["test_name"] for l in labs]
+        assert not any("Narrative" in n for n in names)
+
+    def test_correct_count(self):
+        labs = parse_labs_from_summary(SAMPLE_WITH_NARRATIVE)
+        assert len(labs) == 4
+
+    def test_a1c_values(self):
+        labs = parse_labs_from_summary(SAMPLE_WITH_NARRATIVE)
+        a1c = next(l for l in labs if l["test_name"] == "Hemoglobin A1c")
+        assert a1c["result_value"] == "4.8"
+        assert a1c["result_unit"] == "%"
+        assert a1c["ref_range"] == "<5.7"
+        assert a1c["effective_date"] == "2025-07-11"
+        assert a1c["flag"] == ""
+        assert "raw_value" not in a1c
+
+    def test_glucose_out_of_range(self):
+        labs = parse_labs_from_summary(SAMPLE_WITH_NARRATIVE)
+        glu = next(l for l in labs if "Glucose" in l["test_name"])
+        assert glu["result_value"] == "98"
+        assert glu["result_unit"] == "mg/dL"
+        assert glu["ref_range"] == "70-100 mg/dL"
+        assert glu["flag"] == "out_of_range"
+
+    def test_wbc_2023(self):
+        labs = parse_labs_from_summary(SAMPLE_WITH_NARRATIVE)
+        wbc = next(l for l in labs if l["test_name"] == "WBC")
+        assert wbc["result_value"] == "4.6"
+        assert wbc["result_unit"] == "K/uL"
+        assert wbc["effective_date"] == "2023-12-13"
+
+    def test_backward_compat_aliases(self):
+        labs = parse_labs_from_summary(SAMPLE_WITH_NARRATIVE)
+        a1c = next(l for l in labs if l["test_name"] == "Hemoglobin A1c")
+        assert a1c["value"] == "4.8"
+        assert a1c["unit"] == "%"
+        assert a1c["name"] == "Hemoglobin A1c"
+
+    def test_no_labs_section(self):
+        assert parse_labs_from_summary("PATIENT: Test\nALLERGIES(1): None") == []
 
 
 # ── Format B: Compressed Dictionary Table ────────────────────────────────────

@@ -303,19 +303,27 @@ def _native_to_fhir_observations(items: list[dict]) -> list[dict]:
     cannot be parsed as a float, it is stored as 0.0 with the original text
     preserved in the display field. This fixes the "1 blob" bug where
     labs with string values (e.g. "Positive", "Normal") were silently dropped.
+
+    Accepts both canonical field names (result_value, result_unit, effective_date)
+    and legacy aliases (value, unit, date) for backward compatibility.
     """
     out = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        code = item.get("loinc") or item.get("code") or ""
+        code = item.get("loinc") or item.get("loinc_code") or item.get("code") or ""
         display = item.get("name") or item.get("display") or item.get("test_name") or ""
-        unit = item.get("unit") or item.get("units") or ""
-        date = (item.get("date") or item.get("effectiveDateTime")
+        # Accept new canonical field names and legacy aliases
+        unit = (item.get("result_unit") or item.get("unit")
+                or item.get("units") or "")
+        date = (item.get("effective_date") or item.get("date")
+                or item.get("effectiveDateTime")
                 or item.get("collected_date") or item.get("resulted_date") or "")
-        raw_val = item.get("value") or item.get("result") or item.get("numeric_value")
+        raw_val = (item.get("result_value") or item.get("value")
+                   or item.get("result") or item.get("numeric_value"))
         if raw_val is None:
             raw_val = ""
+        is_abnormal = item.get("flag") == "out_of_range" or item.get("status") == "out_of_range"
 
         # Try numeric conversion; fall back to 0.0 with original in unit
         try:
@@ -330,6 +338,7 @@ def _native_to_fhir_observations(items: list[dict]) -> list[dict]:
             "code": {"coding": [{"code": code, "display": display}]},
             "valueQuantity": {"value": numeric, "unit": unit},
             "effectiveDateTime": date,
+            "_is_abnormal": is_abnormal,
         })
     return out
 
@@ -428,16 +437,25 @@ async def _write_lab_rows(conn, records: list[dict]) -> int:
     n = 0
     for rec in records:
         try:
+            raw_mt = rec.get("metric_type", "")
+            metric_type = raw_mt.lower().replace(" ", "_")
             await conn.execute(
                 """INSERT INTO biometric_readings
                        (id, patient_id, metric_type, value, unit,
-                        measured_at, data_source)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7)
-                   ON CONFLICT DO NOTHING""",
+                        measured_at, is_abnormal, data_source)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                   ON CONFLICT (patient_id, metric_type, measured_at)
+                   DO UPDATE SET
+                       value       = EXCLUDED.value,
+                       unit        = EXCLUDED.unit,
+                       is_abnormal = EXCLUDED.is_abnormal,
+                       data_source = EXCLUDED.data_source""",
                 rec.get("id", str(_uuid_mod.uuid4())),
-                rec["patient_id"], rec.get("metric_type", ""),
+                rec["patient_id"], metric_type,
                 rec.get("value"), rec.get("unit", ""),
-                rec.get("measured_at"), "healthex",
+                rec.get("measured_at"),
+                rec.get("is_abnormal", False),
+                "healthex",
             )
             n += 1
         except Exception as e:

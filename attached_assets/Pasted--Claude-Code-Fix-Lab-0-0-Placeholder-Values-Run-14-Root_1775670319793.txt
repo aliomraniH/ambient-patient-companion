@@ -1,0 +1,443 @@
+# Claude Code: Fix Lab 0.0 Placeholder Values (Run 14)
+
+## Root Cause — Two-Level Bug, Precisely Diagnosed
+
+The deliberation engine correctly self-diagnosed this in Run 13:
+> "All recent labs (2025-07-11) report value=0.0 with missing units/flags;
+>  data_inventory summary contradicts with A1c 4.8%, glucose 98 mg/dL"
+
+The contradiction exists because the `insights_summary` is generated from the
+ingestion plan's LLM planner (which reads the raw text and summarizes it
+correctly), while the DB rows come from `format_a_parser.py` which parses the
+text into dicts — and gets the field names wrong.
+
+**Bug 1 — Wrong field mapping in format_a_parser.py labs section.**
+
+The Format A LABS line format is:
+```
+"Hemoglobin A1c:4.8 %(ref:<5.7) 2025-07-11@Stanford Health Care...[totalrecords:9]"
+"Glucose, Ser/Plas:98 mg/dL(ref:70-100 mg/dL) 2025-07-11@Stanford...[OutOfRange:5]"
+"Narrative:Falsely decreased cholesterol... 2025-07-11@Stanford..."  ← skip this
+"ECG Impression:- NORMAL ECG... 2017-03-31@Stanford..."              ← skip this
+```
+
+The current parser regex captures:
+```python
+m = re.match(r'(.+?):(.+?)\s+(\d{4}-\d{2}-\d{2})@(.+?)(?:\[|$)', item.strip())
+# -> name="Hemoglobin A1c", value_unit="4.8 %(ref:<5.7)", date="2025-07-11"
+```
+
+Then writes the row as:
+```python
+{"test_name": "Hemoglobin A1c", "raw_value": "4.8 %(ref:<5.7)", "date": "2025-07-11"}
+```
+
+But the `patient_health_records` warehouse table expects:
+```
+result_value   VARCHAR  — the numeric part: "4.8"
+result_unit    VARCHAR  — the unit part: "%"
+ref_range      VARCHAR  — the reference range: "<5.7"
+effective_date DATE     — not "date"
+flag           VARCHAR  — "" or "out_of_range"
+loinc_code     VARCHAR  — not extracted at all from Format A
+```
+
+Because the parser writes `date` but the table column is `effective_date`, the
+upsert either silently ignores it or maps to NULL. Similarly `result_value` is
+NULL/0.0 because it was never extracted — only `raw_value` was set, which is
+not a column in the table.
+
+**Bug 2 — write_and_verify conflict key uses "date", table uses "effective_date".**
+
+The upsert conflict keys for labs are `["patient_id", "test_name", "date"]` but
+the actual unique constraint is on `(patient_id, test_name, effective_date)`.
+This means every upsert hits "no conflict key found" and either inserts a new
+row or fails silently, writing 0.0/NULL into `result_value`.
+
+---
+
+## Step 1 — Find the Files
+
+```bash
+# Format A parser
+grep -rn "raw_value\|test_name.*date\|LABS.*section\|parse_plain_text" . \
+  --include="*.py" -l | grep -v __pycache__
+
+# write_and_verify conflict key mapping
+grep -rn "upsert_key\|conflict_key.*lab\|test_name.*date" . \
+  --include="*.py" | grep -v __pycache__
+
+# Confirm actual DB column names for patient_health_records
+grep -rn "effective_date\|result_value\|result_unit\|loinc" . \
+  --include="*.sql" --include="*.py" | grep -v __pycache__ | head -30
+```
+
+---
+
+## Step 2 — Rewrite the Labs Section of `format_a_parser.py`
+
+Replace the existing labs block entirely. The key changes:
+
+1. Split `raw_value` into `result_value` + `result_unit` + `ref_range`
+2. Rename `date` → `effective_date`
+3. Skip narrative/free-text rows (no numeric value)
+4. Handle the `[OutOfRange]` flag correctly
+
+```python
+import re
+
+# Rows whose test name starts with these are pure narrative — skip them
+NARRATIVE_PREFIXES = {
+    "Narrative", "Interpretation", "Comment", "Quantiferon Criteria",
+    "QuantiFERON Incubation", "Alb/Creat Interp", "ECG Impression",
+    "Fasting",  # boolean field, not a quantitative result
+}
+
+
+def _parse_lab_value(raw: str) -> tuple[str, str, str]:
+    """
+    Split a lab value+unit+ref string into (result_value, result_unit, ref_range).
+
+    Input examples:
+      "4.8 %(ref:<5.7)"          -> ("4.8", "%", "<5.7")
+      "98 mg/dL(ref:70-100)"     -> ("98", "mg/dL", "70-100")
+      "Negative"                 -> ("Negative", "", "")
+      "9.1 mIU/mL"               -> ("9.1", "mIU/mL", "")
+      "108 mL/min/1.73 m2(ref:>60)" -> ("108", "mL/min/1.73 m2", ">60")
+      "<30"                      -> ("<30", "", "")
+      "Non Reactive"             -> ("Non Reactive", "", "")
+    """
+    raw = raw.strip()
+
+    # Extract ref range if present: (ref:...) or (ref:<...) etc.
+    ref_range = ""
+    ref_match = re.search(r'\(ref:([^)]+)\)', raw)
+    if ref_match:
+        ref_range = ref_match.group(1).strip()
+        raw = raw[:ref_match.start()].strip()  # remove ref block from raw
+
+    # Now raw is like "4.8 %" or "98 mg/dL" or "Negative" or "108 mL/min/1.73 m2"
+    # Split on first whitespace after numeric prefix
+    # Numeric prefix: digits, optional decimal, optional leading < or >
+    num_match = re.match(r'^([<>]?[\d.]+)\s*(.*)', raw)
+    if num_match:
+        result_value = num_match.group(1).strip()
+        result_unit = num_match.group(2).strip()
+    else:
+        # Non-numeric result (Negative, Non Reactive, Comment, etc.)
+        result_value = raw
+        result_unit = ""
+
+    return result_value, result_unit, ref_range
+
+
+def _is_numeric(value: str) -> bool:
+    """True if value is a numeric result (possibly prefixed with < or >)."""
+    return bool(re.match(r'^[<>]?[\d.]+$', value.strip()))
+
+
+def parse_labs_from_summary(raw: str) -> list[dict]:
+    """
+    Parse the LABS section from a Format A plain text summary.
+
+    Format A LABS line:
+      "Test Name:value unit(ref:range) date@Provider[totalrecords:N,OutOfRange:M]"
+    Items are pipe-separated (| ).
+    """
+    rows = []
+
+    # Extract the LABS section — everything between LABS(N): and next section header
+    match = re.search(
+        r'LABS\(\d+\):\s*(.+?)(?:\nALLERGIES|\nIMMUNIZATIONS|\nCLINICAL VISITS|$)',
+        raw,
+        re.DOTALL
+    )
+    if not match:
+        return rows
+
+    items = match.group(1).strip().split(" | ")
+
+    for item in items:
+        item = item.strip()
+        if not item:
+            continue
+
+        # Outer parse: "Test Name:value_block date@Provider[...]"
+        # The date is YYYY-MM-DD, optionally preceded by (ref:...) block
+        outer = re.match(
+            r'(.+?):'           # test name (greedy up to first colon)
+            r'(.+?)'            # value+unit+ref block (non-greedy)
+            r'\s+(\d{4}-\d{2}-\d{2})'  # date
+            r'@(.+?)'           # provider
+            r'(?:\[.*)?$',      # optional [totalrecords:...] suffix
+            item,
+            re.DOTALL
+        )
+        if not outer:
+            continue
+
+        test_name = outer.group(1).strip()
+        raw_value_block = outer.group(2).strip()
+        effective_date = outer.group(3).strip()
+        # provider = outer.group(4) — available but not needed for now
+
+        # Skip known narrative / non-quantitative rows
+        if any(test_name.startswith(p) for p in NARRATIVE_PREFIXES):
+            continue
+
+        # Skip rows where the value block is a long sentence (free text)
+        # Heuristic: if raw_value_block contains more than 8 words, it's narrative
+        if len(raw_value_block.split()) > 8:
+            continue
+
+        # Parse the value block
+        result_value, result_unit, ref_range = _parse_lab_value(raw_value_block)
+
+        # Determine out_of_range flag from the [OutOfRange] suffix
+        flag = "out_of_range" if "[OutOfRange]" in item else ""
+
+        rows.append({
+            "test_name":     test_name,
+            "result_value":  result_value,   # ← was "raw_value", now correct field
+            "result_unit":   result_unit,    # ← new — was missing entirely
+            "ref_range":     ref_range,      # ← new — was missing entirely
+            "effective_date": effective_date, # ← was "date", now correct field
+            "flag":          flag,
+            "loinc_code":    "",             # Format A doesn't include LOINC
+            "source":        "healthex_summary",
+        })
+
+    return rows
+```
+
+---
+
+## Step 3 — Fix the Conflict Keys in `write_and_verify` (or ingest_adapter)
+
+Find where the upsert conflict keys for labs are defined. Search:
+
+```bash
+grep -rn "test_name.*date\|conflict.*lab\|upsert_key.*lab" . \
+  --include="*.py" | grep -v __pycache__
+```
+
+Change from:
+```python
+UPSERT_KEYS = {
+    "labs": ["patient_id", "test_name", "date"],   # ← WRONG: "date" not a column
+    ...
+}
+```
+
+To:
+```python
+UPSERT_KEYS = {
+    "labs": ["patient_id", "test_name", "effective_date"],  # ← CORRECT
+    ...
+}
+```
+
+Also check the TABLE_MAP — confirm labs write to the right table:
+```bash
+grep -rn "TABLE_MAP\|lab_results\|patient_health_records" . \
+  --include="*.py" | grep -v __pycache__
+```
+
+If labs write to `patient_health_records`, confirm `result_value`, `result_unit`,
+`ref_range`, `effective_date` are actual columns in that table. If not, run:
+
+```sql
+-- Check actual columns
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = 'patient_health_records'
+ORDER BY ordinal_position;
+```
+
+---
+
+## Step 4 — Wire the Fixed Parser into `ingest_adapter.py`
+
+Find the labs handling in `parse_plain_text_summary` (Format A branch):
+
+```bash
+grep -rn "parse_plain_text_summary\|resource_type.*labs\|elif.*labs" . \
+  --include="*.py" | grep -v __pycache__
+```
+
+Replace the old labs extraction call with the new function:
+
+```python
+# BEFORE (in the Format A branch of ingest_adapter.py or format_a_parser.py):
+elif resource_type == "labs":
+    match = re.search(r'LABS\(\d+\): (.+?)(?:\nALLERGIES|$)', raw, re.DOTALL)
+    if match:
+        items = match.group(1).strip().split(" | ")
+        for item in items:
+            m = re.match(r'(.+?):(.+?)\s+(\d{4}-\d{2}-\d{2})@(.+?)(?:\[|$)', item)
+            if m:
+                name, value_unit, date, provider = m.groups()
+                rows.append({
+                    "test_name": name.strip(),
+                    "raw_value": value_unit.strip(),   # ← WRONG field name
+                    "date": date,                       # ← WRONG field name
+                    ...
+                })
+
+# AFTER: use the new function
+elif resource_type == "labs":
+    from .parsers.format_a_parser import parse_labs_from_summary
+    rows = parse_labs_from_summary(raw)
+```
+
+OR if `format_a_parser.py` handles all resource types in one function, update
+the labs branch inside `parse_plain_text_summary` by replacing the inner loop
+with a call to `parse_labs_from_summary(raw)`.
+
+For the summary resource type (resource_type="summary"), which is what Run 13
+used, the parser also needs to call `parse_labs_from_summary` for the labs
+sub-section. Find where summary ingestion dispatches to labs parsing and ensure
+it calls the fixed function.
+
+---
+
+## Step 5 — Verification Tests
+
+```python
+# Test 1: parse_lab_value correctly splits all known formats
+from ingestion.adapters.healthex.parsers.format_a_parser import _parse_lab_value
+
+assert _parse_lab_value("4.8 %(ref:<5.7)") == ("4.8", "%", "<5.7")
+assert _parse_lab_value("98 mg/dL(ref:70-100 mg/dL)") == ("98", "mg/dL", "70-100 mg/dL")
+assert _parse_lab_value("60 mg/dL(ref:>40)") == ("60", "mg/dL", ">40")
+assert _parse_lab_value("108 mL/min/1.73 m2(ref:>60)") == ("108", "mL/min/1.73 m2", ">60")
+assert _parse_lab_value("Negative") == ("Negative", "", "")
+assert _parse_lab_value("Non Reactive") == ("Non Reactive", "", "")
+assert _parse_lab_value("9.1 mIU/mL") == ("9.1", "mIU/mL", "")
+assert _parse_lab_value("<30") == ("<30", "", "")
+print("_parse_lab_value: all assertions passed")
+
+# Test 2: parse_labs_from_summary extracts real values from the actual HealthEx text
+sample_format_a = """PATIENT: Ali Omrani, DOB 1987-03-25
+LABS(96): Hemoglobin A1c:4.8 %(ref:<5.7) 2025-07-11@Stanford Health Care (Stanford Health Care and Stanford Medicine Partners)[totalrecords:9] | Glucose, Ser/Plas:98 mg/dL(ref:70-100 mg/dL) 2025-07-11@Stanford Health Care (Stanford Health Care and Stanford Medicine Partners)[totalrecords:11,OutOfRange:5] | HDL Cholesterol:60 mg/dL(ref:>40) 2025-07-11@Stanford Health Care (Stanford Health Care and Stanford Medicine Partners)[totalrecords:10] | Narrative:Falsely decreased cholesterol... 2025-07-11@Stanford Health Care (Stanford Health Care and Stanford Medicine Partners)[totalrecords:15] | WBC:4.6 K/uL(ref:4.0-11.0 K/uL) 2023-12-13@Stanford Health Care (Stanford Health Care and Stanford Medicine Partners)[totalrecords:6,OutOfRange:2]
+ALLERGIES(1): No Known Allergies 2015-07-21"""
+
+from ingestion.adapters.healthex.parsers.format_a_parser import parse_labs_from_summary
+labs = parse_labs_from_summary(sample_format_a)
+
+# Check count — Narrative row should be skipped
+assert len(labs) == 4, f"Expected 4 non-narrative labs, got {len(labs)}"
+
+# Check A1c
+a1c = next(l for l in labs if l["test_name"] == "Hemoglobin A1c")
+assert a1c["result_value"] == "4.8",    f"A1c value: {a1c['result_value']}"
+assert a1c["result_unit"] == "%",       f"A1c unit: {a1c['result_unit']}"
+assert a1c["ref_range"] == "<5.7",      f"A1c ref: {a1c['ref_range']}"
+assert a1c["effective_date"] == "2025-07-11"
+assert a1c["flag"] == ""
+assert "raw_value" not in a1c          # old field must not exist
+assert "date" not in a1c               # old field name must not exist
+print("A1c: OK", a1c)
+
+# Check Glucose — OutOfRange
+glu = next(l for l in labs if "Glucose" in l["test_name"])
+assert glu["result_value"] == "98"
+assert glu["result_unit"] == "mg/dL"
+assert glu["ref_range"] == "70-100 mg/dL"
+assert glu["flag"] == "out_of_range"
+print("Glucose: OK", glu)
+
+# Check WBC — from 2023
+wbc = next(l for l in labs if l["test_name"] == "WBC")
+assert wbc["result_value"] == "4.6"
+assert wbc["result_unit"] == "K/uL"
+assert wbc["effective_date"] == "2023-12-13"
+print("WBC: OK", wbc)
+
+print("All parse_labs_from_summary tests passed")
+
+# Test 3: After a full ingest, A1c row in DB has the real value
+result = ingest_from_healthex(
+    db, "2cfaa9f2-3f47-44be-84e2-16f3a5dc0bbb", "summary", sample_format_a
+)
+assert result["records_written"]["labs"] >= 4
+
+# Query back the actual A1c row
+a1c_row = db.query_one("""
+    SELECT result_value, result_unit, ref_range, effective_date, flag
+    FROM patient_health_records
+    WHERE patient_id = '2cfaa9f2-3f47-44be-84e2-16f3a5dc0bbb'
+      AND test_name = 'Hemoglobin A1c'
+    ORDER BY effective_date DESC LIMIT 1
+""")
+assert a1c_row is not None, "A1c row not found in DB"
+assert a1c_row["result_value"] != "0.0", f"A1c still 0.0: {a1c_row}"
+assert a1c_row["result_value"] == "4.8",  f"A1c wrong value: {a1c_row}"
+assert a1c_row["result_unit"] == "%",     f"A1c wrong unit: {a1c_row}"
+print(f"DB A1c row: {a1c_row} — CONFIRMED")
+
+# Test 4: Deliberation sees real values (not 0.0 placeholders)
+# After the fix, Tier 1 context should contain actual lab values from DB
+from agents.deliberation.tiered_context_loader import TieredContextLoader
+loader = TieredContextLoader(db, "2cfaa9f2-3f47-44be-84e2-16f3a5dc0bbb")
+ctx = loader.load_tier1()
+# Find A1c in recent_labs
+a1c_in_ctx = next(
+    (l for l in ctx.get("recent_labs", []) if "A1c" in l.get("test", "")),
+    None
+)
+assert a1c_in_ctx is not None, "A1c not in Tier 1 context"
+assert a1c_in_ctx["value"] != "0.0", f"A1c still 0.0 in context: {a1c_in_ctx}"
+assert a1c_in_ctx["value"] == "4.8",  f"A1c wrong in context: {a1c_in_ctx}"
+print(f"Tier 1 context A1c: {a1c_in_ctx} — CONFIRMED")
+print("All tests passed. Lab 0.0 issue fully resolved.")
+```
+
+---
+
+## What Changes End-to-End
+
+### Before (broken):
+```
+Format A text: "Hemoglobin A1c:4.8 %(ref:<5.7) 2025-07-11@Stanford..."
+         ↓ parser
+Row written:   {"test_name": "Hemoglobin A1c", "raw_value": "4.8 %(ref:<5.7)", "date": "2025-07-11"}
+         ↓ upsert (field name "date" not a column, "raw_value" not a column)
+DB row:        {"test_name": "Hemoglobin A1c", "result_value": 0.0, "effective_date": NULL}
+         ↓ Tier 1 context loader
+Context:       {"test": "Hemoglobin A1c", "value": "0.0", "unit": ""}
+         ↓ deliberation engine
+Output:        "Current labs show 0.0 placeholders — cannot assess metabolic status"
+```
+
+### After (fixed):
+```
+Format A text: "Hemoglobin A1c:4.8 %(ref:<5.7) 2025-07-11@Stanford..."
+         ↓ parse_labs_from_summary()
+Row written:   {"test_name": "Hemoglobin A1c", "result_value": "4.8", "result_unit": "%",
+                "ref_range": "<5.7", "effective_date": "2025-07-11", "flag": ""}
+         ↓ upsert with correct conflict keys: (patient_id, test_name, effective_date)
+DB row:        {"test_name": "Hemoglobin A1c", "result_value": "4.8", "result_unit": "%",
+                "ref_range": "<5.7", "effective_date": "2025-07-11"}
+         ↓ Tier 1 context loader
+Context:       {"test": "Hemoglobin A1c", "value": "4.8", "unit": "%", "date": "2025-07-11"}
+         ↓ deliberation engine
+Output:        "A1c 4.8% (below prediabetes threshold) — glycemic control excellent"
+```
+
+---
+
+## Expected Scorecard After This Fix
+
+| Item | Before | After |
+|------|--------|-------|
+| A1c in DB | 0.0 | 4.8 ✅ |
+| Glucose in DB | 0.0 | 98 mg/dL ✅ |
+| LDL in DB | 0.0 | 104 mg/dL ✅ |
+| HDL in DB | 0.0 | 60 mg/dL ✅ |
+| Triglycerides in DB | 0.0 | 41 mg/dL ✅ |
+| ALT/AST in DB | 0.0 | 18 / 25 U/L ✅ |
+| Deliberation data flag | "critical: 0.0 placeholders" | Gone ✅ |
+| Deliberation quality | Infers from summaries | Reasons from real values ✅ |
+| Upsert conflict | Silent fail (wrong key) | Correct dedup ✅ |
+| Narrative rows | Written as lab rows | Skipped ✅ |

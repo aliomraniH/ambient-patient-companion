@@ -61,10 +61,15 @@ def _native_to_fhir_one(resource_type: str, item: dict) -> dict | None:
         code = item.get("loinc") or item.get("loinc_code") or item.get("code") or ""
         display = (item.get("name") or item.get("test_name")
                    or item.get("display") or "")
-        unit = item.get("unit") or item.get("units") or ""
-        date = (item.get("date") or item.get("effectiveDateTime")
+        # Accept both new canonical field names and legacy aliases
+        unit = (item.get("result_unit") or item.get("unit")
+                or item.get("units") or "")
+        date = (item.get("effective_date") or item.get("date")
+                or item.get("effectiveDateTime")
                 or item.get("collected_date") or item.get("resulted_date") or "")
-        raw_val = item.get("value") or item.get("result") or item.get("numeric_value") or ""
+        raw_val = (item.get("result_value") or item.get("value")
+                   or item.get("result") or item.get("numeric_value") or "")
+        is_abnormal = item.get("flag") == "out_of_range" or item.get("status") == "out_of_range"
         try:
             numeric = float(str(raw_val).split()[0])
         except (ValueError, TypeError, IndexError):
@@ -76,6 +81,7 @@ def _native_to_fhir_one(resource_type: str, item: dict) -> dict | None:
             "code": {"coding": [{"code": code, "display": display}]},
             "valueQuantity": {"value": numeric, "unit": unit},
             "effectiveDateTime": date,
+            "_is_abnormal": is_abnormal,
         }
 
     elif resource_type == "conditions":
@@ -135,13 +141,18 @@ def _fhir_to_db_one(resource_type: str, fhir: dict,
             measured_at = _dt.fromisoformat(str(dt_str)) if dt_str else _dt.utcnow()
         except (ValueError, TypeError):
             measured_at = _dt.utcnow()
+        raw_display = coding.get("display", "") or coding.get("code", "")
+        # Normalize: lowercase + spaces→underscores so metric_type is consistent
+        metric_type = raw_display.lower().replace(" ", "_")
+        is_abnormal = bool(fhir.get("_is_abnormal", False))
         return {
             "id": str(_uuid_mod.uuid4()),
             "patient_id": patient_id,
-            "metric_type": coding.get("display", "") or coding.get("code", ""),
+            "metric_type": metric_type,
             "value": vq.get("value"),
             "unit": vq.get("unit", ""),
             "measured_at": measured_at,
+            "is_abnormal": is_abnormal,
             "data_source": "healthex",
         }
 
@@ -272,14 +283,20 @@ async def _write_one_record(conn, resource_type: str, db_rec: dict) -> bool:
             await conn.execute(
                 """INSERT INTO biometric_readings
                        (id, patient_id, metric_type, value, unit,
-                        measured_at, data_source)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7)
-                   ON CONFLICT DO NOTHING""",
+                        measured_at, is_abnormal, data_source)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                   ON CONFLICT (patient_id, metric_type, measured_at)
+                   DO UPDATE SET
+                       value      = EXCLUDED.value,
+                       unit       = EXCLUDED.unit,
+                       is_abnormal = EXCLUDED.is_abnormal,
+                       data_source = EXCLUDED.data_source""",
                 db_rec["id"], db_rec["patient_id"],
                 db_rec.get("metric_type", ""),
                 db_rec.get("value"),
                 db_rec.get("unit", ""),
                 db_rec.get("measured_at") or _dt.utcnow(),
+                db_rec.get("is_abnormal", False),
                 "healthex",
             )
         elif resource_type == "conditions":
