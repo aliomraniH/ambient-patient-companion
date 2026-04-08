@@ -1,8 +1,14 @@
 """
 engine.py — Orchestrates all 5 phases of the Dual-LLM Deliberation Engine.
 This is the single entry point for triggering a deliberation.
+
+Supports two modes:
+  run()             — original full dual-LLM pipeline (loads all context upfront)
+  run_progressive() — progressive context loading with tiered demand-fetch loop
 """
 import asyncio
+import json
+import logging
 import time
 import uuid
 from datetime import datetime
@@ -17,6 +23,11 @@ from .critic import run_critique_rounds
 from .synthesizer import synthesize
 from .behavioral_adapter import adapt_nudges
 from .knowledge_store import commit_deliberation
+from .tiered_context_loader import TieredContextLoader, TOTAL_BUDGET
+from .data_request_parser import parse_data_requests
+from .json_utils import strip_markdown_fences
+
+log = logging.getLogger(__name__)
 
 
 _anthropic_client: anthropic.AsyncAnthropic | None = None
@@ -143,3 +154,397 @@ class DeliberationEngine:
         )
 
         return result
+
+    # ── Progressive Context Loading Mode ──────────────────────────────────
+
+    async def run_progressive(
+        self,
+        request: DeliberationRequest,
+    ) -> dict:
+        """
+        Progressive deliberation loop. Loads data lazily based on agent signals.
+        Never exceeds TOTAL_BUDGET chars in context.
+
+        Phase 0:  Load Tier 1 (~1,500 chars) + patient demographics
+        Round loop (max_rounds):
+          - Run single deliberation round (Claude haiku, fast)
+          - Parse output for data_requests via DataRequestParser
+          - If no requests → break
+          - Load Tier 2 / on-demand data, merge into context
+        Final: Synthesize all round outputs → commit to DB
+        """
+        deliberation_id = str(uuid.uuid4())
+        start_time = time.monotonic()
+        loader = TieredContextLoader(self.db_pool, request.patient_id)
+        all_outputs: list[dict] = []
+        rounds_completed = 0
+
+        # ── Phase 0: Static metadata (patient demographics) ──────────────
+        static_ctx = await self._build_static_context(request.patient_id)
+
+        # ── Phase 0b: Always load Tier 1 ─────────────────────────────────
+        tier1_ctx = await loader.load_tier1()
+        context = {**static_ctx, **tier1_ctx}
+
+        for round_num in range(1, request.max_rounds + 1):
+            rounds_completed = round_num
+
+            # ── Run one deliberation round ────────────────────────────────
+            context_json = json.dumps(context)
+
+            if len(context_json) > TOTAL_BUDGET:
+                log.warning(
+                    f"Round {round_num}: context {len(context_json)} chars "
+                    f"exceeds budget {TOTAL_BUDGET}"
+                )
+
+            round_output = await self._run_one_deliberation_round(
+                context_json=context_json,
+                round_number=round_num,
+                trigger_type=request.trigger_type,
+                prior_outputs=all_outputs,
+            )
+
+            if round_output.get("status") == "error":
+                log.error(f"Round {round_num} failed: {round_output.get('error')}")
+                break
+
+            all_outputs.append(round_output)
+
+            # ── Parse output for data requests ────────────────────────────
+            parsed_requests = parse_data_requests(round_output)
+
+            if not parsed_requests["has_requests"]:
+                log.info(f"Round {round_num}: no data requests — deliberation complete")
+                break
+
+            if round_num >= request.max_rounds:
+                log.info(f"Round {round_num}: max_rounds reached — stopping")
+                break
+
+            # ── Load additional data based on requests ────────────────────
+            context_additions: dict = {}
+
+            if parsed_requests["load_tier2"] and 2 not in loader._loaded_tiers:
+                tier2_ctx = await loader.load_tier2(
+                    requested_tests=parsed_requests["requested_tests"] or None
+                )
+                context_additions.update(tier2_ctx)
+
+            for req in parsed_requests["on_demand_requests"]:
+                # Record the request in DB
+                try:
+                    async with self.db_pool.acquire() as conn:
+                        await conn.execute(
+                            """INSERT INTO deliberation_data_requests
+                                (deliberation_id, round_number, request_type,
+                                 resource_id, reason, fulfilled)
+                               VALUES ($1, $2, $3, $4, $5, false)""",
+                            deliberation_id,
+                            round_num,
+                            req.get("type", "unknown"),
+                            req.get("resource_id", ""),
+                            req.get("reason", ""),
+                        )
+                except Exception as e:
+                    # Table may not exist yet — don't block deliberation
+                    log.warning(f"Failed to log data request: {e}")
+
+                fetched = await loader.load_on_demand(req)
+                if fetched:
+                    context_additions.update(fetched)
+                    # Mark fulfilled
+                    try:
+                        async with self.db_pool.acquire() as conn:
+                            await conn.execute(
+                                """UPDATE deliberation_data_requests
+                                   SET fulfilled = true,
+                                       fulfilled_chars = $1,
+                                       fulfilled_at = NOW()
+                                   WHERE deliberation_id = $2
+                                     AND round_number = $3
+                                     AND request_type = $4
+                                     AND resource_id = $5""",
+                                len(json.dumps(fetched)),
+                                deliberation_id,
+                                round_num,
+                                req.get("type", ""),
+                                req.get("resource_id", ""),
+                            )
+                    except Exception as e:
+                        log.warning(f"Failed to update data request: {e}")
+
+            if not context_additions:
+                log.info(
+                    f"Round {round_num}: data requested but nothing new fetched — stopping"
+                )
+                break
+
+            # Merge additions into context for next round
+            context = {**context, **context_additions}
+            context["_context_stats"] = loader.context_summary()
+
+        # ── Synthesize and commit ─────────────────────────────────────────
+        total_latency_ms = int((time.monotonic() - start_time) * 1000)
+        final_output = self._synthesize_round_outputs(all_outputs)
+
+        # Commit deliberation session
+        try:
+            async with self.db_pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        """INSERT INTO deliberations
+                           (id, patient_id, trigger_type, completed_at, status,
+                            rounds_completed, convergence_score,
+                            model_claude, model_gpt4, synthesizer_model,
+                            total_tokens, total_latency_ms, transcript)
+                           VALUES ($1,$2,$3,$4,'complete',$5,$6,$7,$8,$9,$10,$11,$12)""",
+                        deliberation_id,
+                        request.patient_id,
+                        request.trigger_type,
+                        datetime.utcnow(),
+                        rounds_completed,
+                        0.0,  # no convergence score in progressive mode
+                        "claude-haiku-4-5-20251001",
+                        "n/a",  # no GPT-4 in progressive mode
+                        "claude-haiku-4-5-20251001",
+                        0,
+                        total_latency_ms,
+                        json.dumps({"rounds": all_outputs}),
+                    )
+
+                    # Insert outputs into deliberation_outputs
+                    for output_type in (
+                        "anticipatory_scenario",
+                        "predicted_patient_question",
+                        "missing_data_flag",
+                        "patient_nudge",
+                        "care_team_nudge",
+                    ):
+                        items = final_output.get(f"{output_type}s", [])
+                        if output_type == "missing_data_flag":
+                            items = final_output.get("missing_data_flags", [])
+                        for item in items:
+                            if not isinstance(item, dict):
+                                continue
+                            await conn.execute(
+                                """INSERT INTO deliberation_outputs
+                                   (deliberation_id, output_type, output_data,
+                                    priority, confidence)
+                                   VALUES ($1, $2, $3, $4, $5)""",
+                                deliberation_id,
+                                output_type,
+                                json.dumps(item),
+                                item.get("priority"),
+                                item.get("confidence") or item.get("probability"),
+                            )
+        except Exception as e:
+            log.error(f"Failed to commit deliberation: {e}")
+            return {
+                "deliberation_id": deliberation_id,
+                "status": "error",
+                "error": str(e),
+                "patient_id": request.patient_id,
+                "rounds_completed": rounds_completed,
+                "context_stats": loader.context_summary(),
+            }
+
+        return {
+            "deliberation_id": deliberation_id,
+            "status": "complete",
+            "patient_id": request.patient_id,
+            "rounds_completed": rounds_completed,
+            "context_stats": loader.context_summary(),
+            "summary": self._summarize_output(final_output),
+        }
+
+    async def _build_static_context(self, patient_id: str) -> dict:
+        """Build minimal static context: patient demographics + trigger metadata."""
+        async with self.db_pool.acquire() as conn:
+            import re
+            _UUID_RE = re.compile(
+                r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                re.IGNORECASE,
+            )
+            row = await conn.fetchrow(
+                """SELECT first_name, last_name, birth_date, gender, mrn
+                   FROM patients WHERE mrn = $1""",
+                patient_id,
+            )
+            if row is None and _UUID_RE.match(patient_id):
+                row = await conn.fetchrow(
+                    """SELECT first_name, last_name, birth_date, gender, mrn
+                       FROM patients WHERE id = $1::uuid""",
+                    patient_id,
+                )
+            if row is None:
+                row = await conn.fetchrow(
+                    """SELECT first_name, last_name, birth_date, gender, mrn
+                       FROM patients WHERE mrn LIKE $1""",
+                    f"%{patient_id}%",
+                )
+            if row is None:
+                return {"patient_name": "Unknown", "age": 0, "sex": "unknown"}
+
+            from datetime import date
+            age = 0
+            if row["birth_date"]:
+                bd = row["birth_date"]
+                today = date.today()
+                age = today.year - bd.year - (
+                    (today.month, today.day) < (bd.month, bd.day)
+                )
+
+            return {
+                "patient_name": f"{row['first_name']} {row['last_name']}",
+                "age": age,
+                "sex": row["gender"] or "unknown",
+                "mrn": row["mrn"],
+                "current_date": date.today().isoformat(),
+            }
+
+    async def _run_one_deliberation_round(
+        self,
+        context_json: str,
+        round_number: int,
+        trigger_type: str,
+        prior_outputs: list,
+    ) -> dict:
+        """
+        Single LLM deliberation call. Returns structured output dict.
+        The system prompt instructs the model to emit data_requests when it
+        needs more information.
+        """
+        prior_text = ""
+        if prior_outputs:
+            prior_text = (
+                "\n\nPRIOR ROUND OUTPUTS (for context, do not repeat):\n"
+                + json.dumps(prior_outputs[-1], indent=2)[:2000]
+            )
+
+        system = f"""You are a clinical AI deliberation agent performing round {round_number} of analysis.
+
+Trigger: {trigger_type}
+Round: {round_number}
+
+CRITICAL OUTPUT RULES:
+1. Respond ONLY with a single valid JSON object. No markdown, no preamble.
+2. All string values must be properly escaped. No raw quotes inside strings.
+3. If you need more patient data to complete your analysis, include a "data_requests" array.
+
+JSON SCHEMA:
+{{
+  "anticipatory_scenarios": [...],
+  "predicted_patient_questions": [...],
+  "missing_data_flags": [...],
+  "patient_nudges": [...],
+  "care_team_nudge": {{...}},
+  "data_requests": [
+    {{
+      "type": "lab_trend | clinical_note | encounter_detail | imaging_report",
+      "resource_id": "optional specific ID",
+      "test": "lab test name if type=lab_trend",
+      "reason": "one sentence: what question this data will help answer"
+    }}
+  ]
+}}
+
+{_DATA_REQUEST_SCHEMA}
+
+Keep all text values compact. Avoid long narratives inside JSON strings.{prior_text}
+"""
+
+        try:
+            response = await _get_anthropic_client().messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=2000,
+                system=system,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Patient context:\n{context_json}\n\n"
+                        f"Provide your round {round_number} deliberation analysis."
+                    ),
+                }],
+            )
+
+            raw = response.content[0].text.strip()
+            raw = strip_markdown_fences(raw)
+
+            return json.loads(raw)
+
+        except json.JSONDecodeError as e:
+            log.error(
+                f"Round {round_number} JSON parse failed: {e} | preview: {raw[:300]}"
+            )
+            return {"status": "error", "error": str(e), "preview": raw[:300]}
+        except Exception as e:
+            log.error(f"Round {round_number} API call failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+    def _synthesize_round_outputs(self, all_outputs: list[dict]) -> dict:
+        """Merge all round outputs into a single consolidated output."""
+        merged: dict = {
+            "anticipatory_scenarios": [],
+            "predicted_patient_questions": [],
+            "missing_data_flags": [],
+            "patient_nudges": [],
+            "care_team_nudges": [],
+            "knowledge_updates": [],
+        }
+
+        for output in all_outputs:
+            if output.get("status") == "error":
+                continue
+            for key in merged:
+                items = output.get(key, [])
+                if isinstance(items, list):
+                    merged[key].extend(items)
+                elif isinstance(items, dict):
+                    merged[key].append(items)
+            # Handle singular care_team_nudge key
+            nudge = output.get("care_team_nudge")
+            if isinstance(nudge, dict) and nudge:
+                merged["care_team_nudges"].append(nudge)
+
+        return merged
+
+    def _summarize_output(self, final_output: dict) -> dict:
+        """Produce a compact summary dict of the final output for the MCP response."""
+        return {
+            "anticipatory_scenarios": len(final_output.get("anticipatory_scenarios", [])),
+            "predicted_questions": len(final_output.get("predicted_patient_questions", [])),
+            "missing_data_flags": len(final_output.get("missing_data_flags", [])),
+            "nudges_generated": (
+                len(final_output.get("patient_nudges", []))
+                + len(final_output.get("care_team_nudges", []))
+            ),
+            "knowledge_updates": len(final_output.get("knowledge_updates", [])),
+        }
+
+
+# System prompt fragment for data request instructions
+_DATA_REQUEST_SCHEMA = """
+When you identify a missing_data_flag with priority "critical" or "high",
+you may request specific additional data by including "data_requests" in your output:
+
+"data_requests": [
+  {
+    "type": "lab_trend",
+    "test": "HbA1c",
+    "reason": "Need full A1c history to assess progression from prediabetes"
+  },
+  {
+    "type": "imaging_report",
+    "resource_id": "fyEZI5WFE3",
+    "reason": "Need ultrasound findings to assess hepatic steatosis severity"
+  },
+  {
+    "type": "clinical_note",
+    "reason": "Need most recent visit note to understand medication decisions"
+  }
+]
+
+The system will fetch this data and provide it in the next round.
+Limit data_requests to 3 per round. Omit entirely if you have sufficient data.
+"""
