@@ -150,48 +150,29 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
                 )
             return {"plan_id": plan_id, "status": "complete", "rows_written": 0, "parser_used": parser_used}
 
-        # Import FHIR transforms
-        _mcp_server_dir = str(Path(__file__).resolve().parent.parent.parent.parent / "mcp-server")
-        if _mcp_server_dir not in sys.path:
-            sys.path.insert(0, _mcp_server_dir)
+        # Build transfer plan (size-aware chunking, assigns batch_id + chunk IDs)
+        from .transfer_planner import plan_transfer
+        from .traced_writer import execute_transfer_plan_async
 
-        from transforms.fhir_to_schema import (
-            transform_conditions,
-            transform_medications,
-            transform_clinical_observations,
-            transform_encounters,
+        payload_bytes = len(raw.encode("utf-8", errors="replace"))
+        transfer_plan = plan_transfer(
+            patient_id=patient_id,
+            resource_type=resource_type,
+            records=native_items,
+            payload_bytes=payload_bytes,
+            format_detected=format_detected,
+            source="healthex",
         )
 
-        # Normalize native items to FHIR resources
-        fhir_resources = _normalize_to_fhir(resource_type, native_items)
+        # Execute with per-record audit trail written to transfer_log
+        tw_result = await execute_transfer_plan_async(pool, transfer_plan, patient_id)
 
-        # Transform and write
+        rows_written = tw_result.get("records_written", 0)
+        rows_verified = tw_result.get("records_verified", 0)
+        duration_ms = int(time.time() * 1000) - start_ms
+        status = "complete" if rows_written > 0 else "failed"
+
         async with pool.acquire() as conn:
-            rows_written = await _transform_and_write_rows(
-                conn, resource_type, fhir_resources, patient_id,
-                transform_conditions, transform_medications,
-                transform_clinical_observations, transform_encounters,
-            )
-
-            # Verify
-            table_map = {
-                "conditions": "patient_conditions",
-                "medications": "patient_medications",
-                "labs": "biometric_readings",
-                "encounters": "clinical_events",
-            }
-            rows_verified = 0
-            tbl = table_map.get(resource_type)
-            if tbl and rows_written > 0:
-                rows_verified = await conn.fetchval(
-                    f"SELECT COUNT(*) FROM {tbl} "
-                    f"WHERE patient_id = $1::uuid AND data_source = 'healthex'",
-                    patient_id,
-                )
-
-            duration_ms = int(time.time() * 1000) - start_ms
-            status = "complete" if rows_written > 0 else "failed"
-
             await conn.execute(
                 """UPDATE ingestion_plans
                    SET status = $1, rows_written = $2, rows_verified = $3,
@@ -209,6 +190,8 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
             "format_detected": format_detected,
             "parser_used": parser_used,
             "duration_ms": duration_ms,
+            "batch_id": tw_result.get("batch_id", ""),
+            "strategy": tw_result.get("strategy", ""),
         }
 
     except Exception as e:

@@ -52,6 +52,7 @@ async def healthex_patient(db_pool):
         )
     yield pid
     async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM transfer_log WHERE patient_id = $1::uuid", pid)
         await conn.execute("DELETE FROM ingestion_plans WHERE patient_id = $1::uuid", pid)
         await conn.execute("DELETE FROM raw_fhir_cache WHERE patient_id = $1::uuid", pid)
         await conn.execute("DELETE FROM biometric_readings WHERE patient_id = $1::uuid", pid)

@@ -20,7 +20,7 @@ ambient-patient-companion/
 │   ├── components/      ← React UI components
 │   └── lib/db.ts        ← PostgreSQL pool (pg)
 ├── server/              ← Phase 1 Clinical Intelligence FastMCP server (port 8001)
-│   ├── mcp_server.py    ← FastMCP server: 17 tools + REST wrappers + guardrails
+│   ├── mcp_server.py    ← FastMCP server: 18 tools + REST wrappers + guardrails
 │   ├── guardrails/      ← input_validator, output_validator, clinical_rules
 │   └── deliberation/
 │       ├── json_utils.py  ← strip_markdown_fences() — handles LLM code-fence wrapping
@@ -34,10 +34,14 @@ ambient-patient-companion/
 │   └── tests/           ← pytest test suite (87 backend tests)
 ├── ingestion/           ← Adaptive HealthEx ingest pipeline
 │   ├── adapters/healthex/
-│   │   ├── format_detector.py  ← detect_format() → 5 formats (A/B/C/D/JSON-dict)
-│   │   ├── ingest.py           ← adaptive_parse(): detect → parse → LLM fallback
-│   │   ├── llm_fallback.py     ← Claude fallback for unrecognised payloads
-│   │   └── parsers/            ← format_a/b/c/d + json_dict parsers
+│   │   ├── format_detector.py   ← detect_format() → 5 formats (A/B/C/D/JSON-dict)
+│   │   ├── ingest.py            ← adaptive_parse(): detect → parse → LLM fallback
+│   │   ├── llm_fallback.py      ← Claude fallback for unrecognised payloads
+│   │   ├── planner.py           ← Two-phase ingest planner (ingestion_plans table)
+│   │   ├── executor.py          ← Phase 2 worker — calls TracedWriter
+│   │   ├── transfer_planner.py  ← Size-aware TransferPlan + TransferRecord dataclasses
+│   │   ├── traced_writer.py     ← Per-record async writer + transfer_log audit trail
+│   │   └── parsers/             ← format_a/b/c/d + json_dict parsers
 │   └── tests/                  ← 69 ingestion tests (format detection, parsers, pipeline)
 ├── docs/                ← Planning documents (mcp_use_cases.md — story line + action plan)
 ├── tests/e2e/           ← End-to-end use-case suite (18 tests, all tools)
@@ -51,7 +55,7 @@ ambient-patient-companion/
 ├── shared/              ← Shared JS client (claude-client.js)
 ├── prototypes/          ← 4 HTML proof-of-concept prototypes
 ├── config/system_prompts/ ← Role-based system prompts (pcp, care_manager, patient)
-├── tests/phase1/        ← 124 Phase 1 integration tests
+├── tests/phase1/        ← 153 Phase 1 integration tests (incl. 21 transfer pipeline)
 ├── tests/phase2/        ← 57 Phase 2 deliberation feature tests
 ├── CLAUDE.md            ← Full implementation guide for Claude Code agents
 └── requirements.txt     ← Root Python dependencies (pytest-asyncio==0.21.2)
@@ -71,7 +75,7 @@ ambient-patient-companion/
 
 | Server | Port | Public Path | Tools | Claude Web Name |
 |--------|------|-------------|-------|-----------------|
-| ClinicalIntelligence | 8001 | `/mcp` | 17 | `ambient-clinical-intelligence` |
+| ClinicalIntelligence | 8001 | `/mcp` | 18 | `ambient-clinical-intelligence` |
 | PatientCompanion (Skills) | 8002 | `/mcp-skills` | 17 | `ambient-skills-companion` |
 | PatientIngestion | 8003 | `/mcp-ingestion` | 1 | `ambient-ingestion` |
 
@@ -79,7 +83,7 @@ All three are proxied through Next.js (port 5000) — no port number in public U
 
 ### Server 1 — ClinicalIntelligence (`server/mcp_server.py`)
 
-Seventeen tools at `https://[domain]/mcp` (9 Phase 1 + 8 HealthEx/Deliberation/Ingestion):
+Eighteen tools at `https://[domain]/mcp` (9 Phase 1 + 9 HealthEx/Deliberation/Ingestion/Audit):
 
 | Tool | Description |
 |------|-------------|
@@ -96,6 +100,7 @@ Seventeen tools at `https://[domain]/mcp` (9 Phase 1 + 8 HealthEx/Deliberation/I
 | `ingest_from_healthex` | Two-phase ingest: plan (fast) + execute (write rows) |
 | `execute_pending_plans` | Re-execute failed/pending ingestion plans from cache |
 | `get_ingestion_plans` | Read plan summaries + insights_summary for a patient |
+| `get_transfer_audit` | Per-record transfer_log audit trail (status, timing, errors) |
 | `run_deliberation` | Trigger full dual-LLM deliberation for a patient |
 | `get_deliberation_results` | Retrieve stored deliberation outputs |
 | `get_patient_knowledge` | Fetch accumulated patient-specific knowledge |
@@ -104,7 +109,7 @@ Seventeen tools at `https://[domain]/mcp` (9 Phase 1 + 8 HealthEx/Deliberation/I
 Also has REST wrappers at `/tools/<name>` and liveness check at `/health`.
 
 **HealthEx two-phase pipeline** (all on `/mcp`, port 8001):
-`use_healthex` → `register_healthex_patient` → `ingest_from_healthex` (plan) → `execute_pending_plans` (write) → `get_ingestion_plans` (status) → `run_deliberation` → `get_deliberation_results` → `get_pending_nudges`
+`use_healthex` → `register_healthex_patient` → `ingest_from_healthex` (plan) → `execute_pending_plans` (write+audit) → `get_ingestion_plans` (batch status) → `get_transfer_audit` (per-record audit) → `run_deliberation` → `get_deliberation_results` → `get_pending_nudges`
 
 ### Server 2 — PatientCompanion (`mcp-server/server.py`)
 
@@ -146,7 +151,8 @@ server/deliberation/
 ├── knowledge_store.py  ← Phase 5: atomic DB commit
 ├── prompts/            ← 5 XML prompt templates
 ├── migrations/001_deliberation_tables.sql  ← 4 new tables
-└── migrations/002_ingestion_plans.sql     ← ingestion_plans table + raw_fhir_cache columns
+├── migrations/002_ingestion_plans.sql     ← ingestion_plans table + raw_fhir_cache columns
+└── migrations/003_transfer_log.sql        ← transfer_log table (28 cols, 4 indexes, FK→patients)
 ```
 
 4 new DB tables: `deliberations`, `deliberation_outputs`, `patient_knowledge`, `core_knowledge_updates`
@@ -156,7 +162,7 @@ UI: `prototypes/pcp-encounter.html` has 2 tabs — **Clinical Workspace** and **
 ## Database
 
 - **Provider**: Replit built-in PostgreSQL
-- **Schema**: `mcp-server/db/schema.sql` (22 core tables) + `server/deliberation/migrations/001_deliberation_tables.sql` (4 deliberation tables) + `server/migrations/002_ingestion_plans.sql` (1 ingestion_plans table = 27 total)
+- **Schema**: `mcp-server/db/schema.sql` (22 core tables) + `server/deliberation/migrations/001_deliberation_tables.sql` (4 deliberation tables) + `server/migrations/002_ingestion_plans.sql` (1 ingestion_plans table) + `server/migrations/003_transfer_log.sql` (1 transfer_log table = **28 total**)
 - **Connection**: `DATABASE_URL` environment variable (auto-set by Replit)
 - **Key constraints**:
   - `is_stale` in `source_freshness` is a regular boolean (not generated — PostgreSQL requires immutable expressions for generated columns)
@@ -303,6 +309,8 @@ cd replit_dashboard && python -m pytest tests/ -v
 21. **Fix — Text payloads routed through adaptive_parse** (`mcp-server/skills/ingestion_tools.py` — branch `claude/fix-ingestion-pipeline-7qQy4`, commit `f6047ab`): Previously `ingest_from_healthex` short-circuited all `#`-prefixed text payloads (Format A/B/C) with `records_written: 0`, caching raw text but never parsing it. Now the text-payload branch calls `adaptive_parse()`, maps results through new `_native_to_warehouse_rows()` helper (labs→`biometric_readings`, conditions→`patient_conditions`, medications→`patient_medications`, encounters→`clinical_events`), and feeds rows into the existing per-table INSERT loop. Also added `_parse_lab_value()` to extract floats from strings like `"34.0-34.9"` or `">60"`. Verified live: Format B conditions=3 rows, labs=3 rows, encounters=2 rows (all previously 0).
 22. **Fix — `safe_json_loads()` in deliberation engine** (`server/deliberation/json_utils.py`): Added `safe_json_loads(text)` — strips markdown fences first, returns `{}` for empty/None input, raises `ValueError` with a 200-char preview on `JSONDecodeError` instead of propagating raw exception. Prevents synthesizer crash when Claude wraps its output in ` ```json ``` ` fences.
 23. **Fix — synthesizer uses `safe_json_loads`** (`server/deliberation/synthesizer.py`): Replaced bare `json.loads(raw)` with `safe_json_loads(raw)` — prevents `Unterminated string` / `JSONDecodeError` crash when the synthesizer receives fence-wrapped output from Claude.
+25. **Fix — Traceable Transfer Pipeline** (`ingestion/adapters/healthex/transfer_planner.py` + `traced_writer.py` — migration `003_transfer_log.sql`): Five confirmed failures addressed: (a) bulk-blob writes (all rows → 1 DB record) fixed by per-record loop; (b) no audit trail fixed by `transfer_log` table (28 columns, 4 status transitions: planned→sanitized→written→verified); (c) double-quote blob escaping fixed by `sanitize_text_field()` called before any DB write; (d) size-aware chunking via `plan_transfer()` selecting single/chunked_small/chunked_medium/chunked_large strategy; (e) each `TransferRecord` carries `record_key`, `record_hash`, LOINC/ICD-10 code, batch/chunk UUIDs. `executor.py` updated to call `execute_transfer_plan_async()` instead of bulk `_transform_and_write_rows()`. New MCP tool `get_transfer_audit` (18th tool) + REST wrapper at `/tools/get_transfer_audit`. 21 new phase1 tests (`test_transfer_pipeline.py` TP-01→TP-20+). Total: 153 phase1 tests.
+
 24. **Fix — Two-phase async ingestion architecture** (`ingestion/adapters/healthex/planner.py` + `executor.py` — branch `claude/fix-ingestion-blob-loop-2A6H2`, commit `3609e7e`): Large HealthEx blobs previously wrote only 1 row instead of 34+ due to timeout in the single-pass loop. Phase 1 (fast, <500ms): `ingest_from_healthex` caches raw blob in `raw_fhir_cache` (with new `raw_text` + `detected_format` columns), runs LLM planner → creates `ingestion_plans` row. Phase 2 (inline or async): `execute_pending_plans` reads plan → adaptive_parse → writes rows one-at-a-time → updates plan status. Non-numeric lab values (Negative, Positive, No growth) are now preserved (previously dropped silently). Added 2 new MCP tools (`execute_pending_plans`, `get_ingestion_plans`) + migration `002_ingestion_plans.sql` (18-column table). 16 new unit tests (PL-1–PL-8 + EX-1–EX-8) + 8 IP integration tests + 3 REST smoke tests.
 25. **Fix — REST wrappers for execute_pending_plans + get_ingestion_plans** (`server/mcp_server.py`): Added `@mcp.custom_route("/tools/execute_pending_plans")` and `@mcp.custom_route("/tools/get_ingestion_plans")` so the new tools are reachable from HTML prototypes and smoke tests via the same `/tools/<name>` REST pattern as all other tools.
 

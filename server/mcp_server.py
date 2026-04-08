@@ -1807,6 +1807,97 @@ async def get_ingestion_plans(
         return json.dumps({"status": "error", "error": str(e)})
 
 
+@mcp.tool()
+async def get_transfer_audit(
+    patient_id: str,
+    resource_type: str = "",
+    status: str = "",
+    batch_id: str = "",
+    limit: int = 50,
+) -> str:
+    """Query the per-record transfer_log audit trail for HealthEx ingest operations.
+
+    Provides record-level visibility into every data transfer: which records were
+    planned, sanitized, written, verified, or failed — with timestamps for each
+    stage.  Useful for debugging ingest quality, auditing blob escaping fixes,
+    and confirming per-record write success.
+
+    Args:
+        patient_id:    UUID of the patient (required)
+        resource_type: Filter by resource type: labs | conditions | medications | encounters
+        status:        Filter by record status: planned | sanitized | written | verified |
+                       written_unverified | failed
+        batch_id:      UUID of a specific ingest batch to inspect
+        limit:         Max records to return (default 50, max 200)
+    """
+    pool = await _get_db_pool()
+    try:
+        limit = min(int(limit), 200)
+        async with pool.acquire() as conn:
+            conditions = ["patient_id = $1::uuid"]
+            params: list = [patient_id]
+            p = 2
+
+            if resource_type:
+                conditions.append(f"resource_type = ${p}")
+                params.append(resource_type)
+                p += 1
+            if status:
+                conditions.append(f"status = ${p}")
+                params.append(status)
+                p += 1
+            if batch_id:
+                conditions.append(f"batch_id = ${p}::uuid")
+                params.append(batch_id)
+                p += 1
+
+            where = " AND ".join(conditions)
+
+            total = await conn.fetchval(
+                f"SELECT COUNT(*) FROM transfer_log WHERE {where}",
+                *params,
+            )
+
+            summary_rows = await conn.fetch(
+                f"""SELECT resource_type, strategy, status, COUNT(*) AS cnt
+                    FROM transfer_log
+                    WHERE {where}
+                    GROUP BY resource_type, strategy, status
+                    ORDER BY resource_type, strategy, cnt DESC""",
+                *params,
+            )
+
+            records = await conn.fetch(
+                f"""SELECT id, resource_type, source, record_key, loinc_code,
+                           icd10_code, batch_id, chunk_id, batch_sequence,
+                           batch_total, strategy, format_detected, status,
+                           planned_at, sanitized_at, written_at, verified_at,
+                           failed_at, error_stage, error_message, payload_size_bytes
+                    FROM transfer_log
+                    WHERE {where}
+                    ORDER BY planned_at DESC
+                    LIMIT ${p}""",
+                *params, limit,
+            )
+
+            return json.dumps({
+                "patient_id": patient_id,
+                "total_records": total,
+                "summary": [dict(r) for r in summary_rows],
+                "records": [dict(r) for r in records],
+                "verified_count": sum(
+                    r["cnt"] for r in summary_rows if r["status"] == "verified"
+                ),
+                "failed_count": sum(
+                    r["cnt"] for r in summary_rows if r["status"] == "failed"
+                ),
+            }, indent=2, default=str)
+
+    except Exception as e:
+        logger.error("get_transfer_audit failed: %s", e, exc_info=True)
+        return json.dumps({"status": "error", "error": str(e)})
+
+
 # ---------------------------------------------------------------------------
 # REST wrapper routes (for HTML prototypes via claude-client.js)
 # ---------------------------------------------------------------------------
@@ -2205,6 +2296,24 @@ async def rest_get_ingestion_plans(request: Request) -> JSONResponse:
     except Exception as e:
         import sys as _sys
         print(f"[get_ingestion_plans] error: {e}", file=_sys.stderr)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
+@mcp.custom_route("/tools/get_transfer_audit", methods=["POST"])
+async def rest_get_transfer_audit(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await get_transfer_audit(
+            patient_id=body.get("patient_id", ""),
+            resource_type=body.get("resource_type", ""),
+            status=body.get("status", ""),
+            batch_id=body.get("batch_id", ""),
+            limit=int(body.get("limit", 50)),
+        )
+        return JSONResponse(json.loads(result) if isinstance(result, str) else result)
+    except Exception as e:
+        import sys as _sys
+        print(f"[get_transfer_audit] error: {e}", file=_sys.stderr)
         return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
 
 
