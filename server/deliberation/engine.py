@@ -294,7 +294,7 @@ class DeliberationEngine:
                     """INSERT INTO deliberations
                        (id, patient_id, trigger_type, started_at, status,
                         rounds_completed, convergence_score,
-                        synthesizer_model, claude_model, gpt4_model,
+                        synthesizer_model, model_claude, model_gpt4,
                         total_tokens, total_latency_ms, transcript)
                        VALUES ($1,$2,$3,$4,'complete',$5,$6,$7,$8,$9,$10,$11,$12)""",
                     deliberation_id,
