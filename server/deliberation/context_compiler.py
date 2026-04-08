@@ -135,13 +135,27 @@ async def compile_patient_context(
         )
 
         # 4. Recent biometric readings — vitals + labs (biometric_readings)
-        biometrics = await conn.fetch(
-            """SELECT metric_type, value, unit, measured_at, is_abnormal
-               FROM biometric_readings
-               WHERE patient_id = $1 AND measured_at >= $2
-               ORDER BY metric_type, measured_at DESC""",
-            internal_id, cutoff
-        )
+        # Try query with new structured columns first; fall back to legacy
+        # columns if migration 005 hasn't been applied yet.
+        try:
+            biometrics = await conn.fetch(
+                """SELECT metric_type, value, unit, measured_at, is_abnormal,
+                          result_text, result_numeric, result_unit,
+                          reference_text, loinc_code, is_out_of_range
+                   FROM biometric_readings
+                   WHERE patient_id = $1 AND measured_at >= $2
+                   ORDER BY metric_type, measured_at DESC""",
+                internal_id, cutoff
+            )
+        except Exception:
+            # Migration 005 not yet applied — use legacy columns only
+            biometrics = await conn.fetch(
+                """SELECT metric_type, value, unit, measured_at, is_abnormal
+                   FROM biometric_readings
+                   WHERE patient_id = $1 AND measured_at >= $2
+                   ORDER BY metric_type, measured_at DESC""",
+                internal_id, cutoff
+            )
 
         # Split biometrics into labs vs vitals by metric_type convention
         LAB_PREFIXES = ("hba1c", "glucose", "creatinine", "cholesterol",
@@ -151,17 +165,28 @@ async def compile_patient_context(
         vital_dict: dict = {}
         for b in biometrics:
             mtype = (b["metric_type"] or "").lower()
-            if any(mtype.startswith(p) for p in LAB_PREFIXES):
-                recent_labs.append({
+            # Also treat any record with a loinc_code as a lab result
+            has_loinc = bool(b.get("loinc_code"))
+            if has_loinc or any(mtype.startswith(p) for p in LAB_PREFIXES):
+                # Prefer new structured fields, fall back to legacy columns
+                display_value = b.get("result_text") or b.get("result_numeric") or b["value"]
+                display_unit = b.get("result_unit") or b.get("unit") or ""
+                is_abnormal = b.get("is_out_of_range") if b.get("is_out_of_range") is not None else b["is_abnormal"]
+                lab_entry = {
                     "name": b["metric_type"],
-                    "value": b["value"],
-                    "unit": b["unit"],
+                    "value": display_value,
+                    "unit": display_unit,
                     "result_date": b["measured_at"].isoformat() if b["measured_at"] else None,
-                    "in_range": not bool(b["is_abnormal"])
-                })
+                    "in_range": not bool(is_abnormal),
+                }
+                if b.get("reference_text"):
+                    lab_entry["reference_range"] = b["reference_text"]
+                if b.get("loinc_code"):
+                    lab_entry["loinc_code"] = b["loinc_code"]
+                recent_labs.append(lab_entry)
             else:
                 vital_dict.setdefault(b["metric_type"], []).append({
-                    "value": b["value"],
+                    "value": b.get("result_numeric") or b["value"],
                     "date": b["measured_at"].isoformat() if b["measured_at"] else None
                 })
 
