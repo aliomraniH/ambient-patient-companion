@@ -2005,25 +2005,40 @@ async def get_deliberation_engine() -> DeliberationEngine:
 async def run_deliberation(
     patient_id: str,
     trigger_type: str = "manual",
-    max_rounds: int = 3
+    max_rounds: int = 3,
+    mode: str = "progressive",
 ) -> dict:
     """
-    Trigger a full Dual-LLM deliberation session for a patient.
+    Trigger a deliberation session for a patient.
 
-    Runs all 5 phases: context compilation, parallel analysis (Claude + GPT-4),
-    cross-critique, synthesis, and knowledge commit.
+    Supports two modes:
+      - "progressive" (default): Tiered context loading — starts with minimal
+        data and fetches more on demand. Prevents context overflow crashes.
+      - "full": Original dual-LLM pipeline (Claude + GPT-4 cross-critique).
 
     Args:
         patient_id: Patient MRN or internal ID
         trigger_type: One of: scheduled_pre_encounter, lab_result_received,
                       medication_change, missed_appointment, temporal_threshold, manual
-        max_rounds: Maximum critique rounds (1-5, default 3)
+        max_rounds: Maximum deliberation rounds (1-5, default 3)
+        mode: "progressive" (tiered loading) or "full" (dual-LLM pipeline)
 
     Returns:
         deliberation_id, status, summary of five output categories,
-        convergence_score, total_tokens, latency_ms
+        context_stats (progressive mode), convergence_score (full mode)
     """
     engine = await get_deliberation_engine()
+
+    if mode == "progressive":
+        return await engine.run_progressive(
+            DeliberationRequest(
+                patient_id=patient_id,
+                trigger_type=trigger_type,
+                max_rounds=max_rounds,
+            )
+        )
+
+    # Full dual-LLM mode (original pipeline)
     result = await engine.run(
         DeliberationRequest(
             patient_id=patient_id,
@@ -2224,6 +2239,7 @@ async def rest_run_deliberation(request: Request) -> JSONResponse:
             patient_id=body.get("patient_id", ""),
             trigger_type=body.get("trigger_type", "manual"),
             max_rounds=body.get("max_rounds", 3),
+            mode=body.get("mode", "progressive"),
         )
         return JSONResponse(result)
     except ValueError as e:
