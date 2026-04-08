@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS patient_conditions (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     code            VARCHAR(50),
-    display         VARCHAR(500),
+    display         TEXT,
     system          VARCHAR(200),
     onset_date      DATE,
     clinical_status VARCHAR(50) DEFAULT 'active',
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS patient_medications (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     code            VARCHAR(50),
-    display         VARCHAR(500),
+    display         TEXT,
     system          VARCHAR(200),
     status          VARCHAR(50) DEFAULT 'active',
     authored_on     DATE,
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS patient_sdoh_flags (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     domain          VARCHAR(100) NOT NULL,
-    flag_code       VARCHAR(20),
+    flag_code       TEXT,
     description     TEXT,
     severity        VARCHAR(20) DEFAULT 'moderate',
     screening_date  DATE,
@@ -81,20 +81,45 @@ CREATE TABLE IF NOT EXISTS patient_sdoh_flags (
 CREATE TABLE IF NOT EXISTS biometric_readings (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
-    metric_type     VARCHAR(50) NOT NULL,
+    metric_type     TEXT NOT NULL,
     value           DOUBLE PRECISION NOT NULL,
-    unit            VARCHAR(20),
+    unit            TEXT,
     measured_at     TIMESTAMPTZ NOT NULL,
     device_source   VARCHAR(100),
     context         VARCHAR(50),
     is_abnormal     BOOLEAN DEFAULT false,
     day_of_month    INT,
+    -- Structured lab result fields (added migration 005)
+    result_text     TEXT,                    -- qualitative: "Reactive", "Positive"
+    result_numeric  NUMERIC,                 -- exact numeric (not FLOAT)
+    result_unit     TEXT,                    -- proper UCUM unit code
+    reference_text  TEXT,                    -- original range text
+    reference_low   NUMERIC,                 -- parsed lower bound
+    reference_high  NUMERIC,                 -- parsed upper bound
+    loinc_code      VARCHAR(10),             -- LOINC code (NNNNN-N)
+    interpretation  VARCHAR(10),             -- H, L, N, HH, LL, A, AA
+    source_record_id UUID,                   -- FK to raw_fhir_cache
+    fhir_extensions JSONB DEFAULT '{}',      -- FHIR extension overflow
+    is_out_of_range BOOLEAN GENERATED ALWAYS AS (
+        CASE
+            WHEN result_numeric IS NULL THEN NULL
+            WHEN reference_low IS NOT NULL AND result_numeric < reference_low THEN true
+            WHEN reference_high IS NOT NULL AND result_numeric > reference_high THEN true
+            ELSE false
+        END
+    ) STORED,
     data_source     VARCHAR(50) NOT NULL DEFAULT 'synthea'
 );
 CREATE INDEX IF NOT EXISTS idx_biometric_patient_metric_time
     ON biometric_readings(patient_id, metric_type, measured_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_biometric_readings_unique
     ON biometric_readings(patient_id, metric_type, measured_at);
+CREATE INDEX IF NOT EXISTS idx_biometric_loinc
+    ON biometric_readings(loinc_code, measured_at DESC)
+    WHERE loinc_code IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_biometric_out_of_range
+    ON biometric_readings(patient_id)
+    WHERE is_out_of_range = true;
 
 -- ============================================================
 -- 6. daily_checkins
