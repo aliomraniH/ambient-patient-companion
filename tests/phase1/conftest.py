@@ -55,6 +55,8 @@ async def healthex_patient(db_pool):
         await conn.execute("DELETE FROM transfer_log WHERE patient_id = $1::uuid", pid)
         await conn.execute("DELETE FROM ingestion_plans WHERE patient_id = $1::uuid", pid)
         await conn.execute("DELETE FROM raw_fhir_cache WHERE patient_id = $1::uuid", pid)
+        await conn.execute("DELETE FROM clinical_notes WHERE patient_id = $1::uuid", pid)
+        await conn.execute("DELETE FROM media_references WHERE patient_id = $1::uuid", pid)
         await conn.execute("DELETE FROM biometric_readings WHERE patient_id = $1::uuid", pid)
         await conn.execute("DELETE FROM patient_conditions WHERE patient_id = $1::uuid", pid)
         await conn.execute("DELETE FROM clinical_events WHERE patient_id = $1::uuid", pid)

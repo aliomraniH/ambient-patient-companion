@@ -37,6 +37,10 @@ class PatientContextPackage(BaseModel):
     deliberation_trigger: str
     # Ingestion plan summaries (from ingestion_plans table)
     data_inventory: list[dict] = []     # [{resource_type, summary, rows}]
+    # Clinical notes extracted from Binary/Observation resources (clinical_notes table)
+    clinical_notes: list[dict] = []     # [{type, text, date, author, source}]
+    # Media inventory — URL references to non-text assets (media_references table)
+    available_media: list[dict] = []    # [{type, url, date}]
 
 
 class DeliberationRequest(BaseModel):

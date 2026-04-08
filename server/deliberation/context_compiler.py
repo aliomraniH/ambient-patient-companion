@@ -22,6 +22,27 @@ from datetime import datetime, timedelta, date
 from typing import Optional
 from .schemas import PatientContextPackage
 
+try:
+    from ingestion.adapters.healthex.content_router import sanitize_for_context, _deep_sanitize
+except ImportError:
+    def sanitize_for_context(value) -> str:
+        import json
+        if value is None:
+            return ""
+        try:
+            return json.loads(json.dumps(str(value)))
+        except Exception:
+            return str(value).encode("ascii", errors="replace").decode("ascii")
+
+    def _deep_sanitize(obj):
+        if isinstance(obj, dict):
+            return {k: _deep_sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_deep_sanitize(item) for item in obj]
+        if isinstance(obj, str):
+            return sanitize_for_context(obj)
+        return obj
+
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -209,7 +230,53 @@ async def compile_patient_context(
             # Table may not exist yet — graceful fallback
             pass
 
-    # 10. Applicable guidelines from vector store (placeholder returns [] gracefully)
+        # 10. Clinical notes extracted from Binary/Observation resources
+        clinical_notes_rows = []
+        try:
+            cn_rows = await conn.fetch(
+                """SELECT note_type, note_text, note_date, author, source
+                   FROM clinical_notes
+                   WHERE patient_id = $1
+                   ORDER BY note_date DESC NULLS LAST
+                   LIMIT 20""",
+                internal_id,
+            )
+            clinical_notes_rows = [
+                {
+                    "type":   sanitize_for_context(r["note_type"] or ""),
+                    "text":   sanitize_for_context(r["note_text"] or ""),
+                    "date":   r["note_date"].isoformat() if r["note_date"] else "",
+                    "author": sanitize_for_context(r["author"] or ""),
+                    "source": r["source"] or "",
+                }
+                for r in cn_rows
+            ]
+        except Exception:
+            pass
+
+        # 11. Media inventory — URL references, never raw payload
+        available_media_rows = []
+        try:
+            mr_rows = await conn.fetch(
+                """SELECT resource_type, content_type, doc_type, reference_url, doc_date
+                   FROM media_references
+                   WHERE patient_id = $1
+                   ORDER BY doc_date DESC NULLS LAST
+                   LIMIT 10""",
+                internal_id,
+            )
+            available_media_rows = [
+                {
+                    "type": sanitize_for_context(r["doc_type"] or r["content_type"] or ""),
+                    "url":  r["reference_url"] or "",
+                    "date": r["doc_date"].isoformat() if r["doc_date"] else "",
+                }
+                for r in mr_rows
+            ]
+        except Exception:
+            pass
+
+    # 12. Applicable guidelines from vector store (placeholder returns [] gracefully)
     try:
         condition_terms = " ".join([c["display"] or "" for c in conditions if c["display"]])
         med_terms = " ".join([m["display"] or "" for m in medications if m["display"]])
@@ -274,4 +341,6 @@ async def compile_patient_context(
         days_since_last_encounter=days_since,
         deliberation_trigger="compiled_by_context_compiler",
         data_inventory=data_inventory,
+        clinical_notes=clinical_notes_rows,
+        available_media=available_media_rows,
     )

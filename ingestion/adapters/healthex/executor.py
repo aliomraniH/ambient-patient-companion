@@ -172,6 +172,25 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
         duration_ms = int(time.time() * 1000) - start_ms
         status = "complete" if rows_written > 0 else "failed"
 
+        # Supplemental: route any Binary/DocumentReference/Observation resources
+        # through the content router → clinical_notes / media_references
+        media_result = {}
+        try:
+            from .content_router import route_and_write_resources
+            fhir_resources = _extract_routable_resources(raw)
+            if fhir_resources:
+                async with pool.acquire() as conn:
+                    media_result = await route_and_write_resources(
+                        conn, fhir_resources, patient_id
+                    )
+                notes_n = media_result.get("notes_written", 0)
+                refs_n  = media_result.get("refs_written", 0)
+                if notes_n or refs_n:
+                    rows_written += notes_n + refs_n
+                    status = "complete"
+        except Exception as e:
+            log.warning("content router supplemental step failed: %s", e)
+
         async with pool.acquire() as conn:
             await conn.execute(
                 """UPDATE ingestion_plans
@@ -192,6 +211,8 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
             "duration_ms": duration_ms,
             "batch_id": tw_result.get("batch_id", ""),
             "strategy": tw_result.get("strategy", ""),
+            "notes_written": media_result.get("notes_written", 0),
+            "refs_written": media_result.get("refs_written", 0),
         }
 
     except Exception as e:
@@ -452,3 +473,50 @@ _WRITER_MAP = {
     "labs": _write_lab_rows,
     "encounters": _write_encounter_rows,
 }
+
+_ROUTABLE_TYPES = {"Binary", "DocumentReference", "Observation", "Practitioner"}
+
+
+def _extract_routable_resources(raw: str) -> list[dict]:
+    """
+    Parse raw JSON text and extract FHIR resources that the content router
+    can handle (Binary, DocumentReference, Observation with valueString,
+    Practitioner with photo).
+
+    Returns a list of FHIR resource dicts, or [] if parsing fails.
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return []
+
+    resources = []
+
+    if isinstance(parsed, dict):
+        rtype = parsed.get("resourceType", "")
+        if rtype in _ROUTABLE_TYPES:
+            resources.append(parsed)
+        elif rtype == "Bundle" and "entry" in parsed:
+            for entry in parsed.get("entry", []):
+                res = entry.get("resource", {})
+                if res.get("resourceType") in _ROUTABLE_TYPES:
+                    resources.append(res)
+    elif isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict) and item.get("resourceType") in _ROUTABLE_TYPES:
+                resources.append(item)
+
+    # Only keep Observation resources that have valueString
+    # (numeric Observations are handled by the structured path)
+    filtered = []
+    for r in resources:
+        rtype = r.get("resourceType", "")
+        if rtype == "Observation":
+            if r.get("valueString"):
+                filtered.append(r)
+        else:
+            filtered.append(r)
+
+    return filtered
