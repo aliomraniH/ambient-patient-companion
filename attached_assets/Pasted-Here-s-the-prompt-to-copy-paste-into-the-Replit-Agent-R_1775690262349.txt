@@ -1,0 +1,194 @@
+Here's the prompt to copy-paste into the Replit Agent:
+
+---
+
+# Replit Agent: Deploy Clinical Data Storage Fix (Migration 005)
+
+## What to do
+
+Pull branch `claude/fix-clinical-data-storage-AXjlb` and deploy the clinical data storage fix. This branch has two commits:
+- `a94433d` — Code changes: widens VARCHAR(20) columns, adds 11 structured lab result columns, fixes 3 write paths and 1 read path
+- `e27039a` — Deployment guide + edge-case test data script
+
+### The problem being fixed
+
+`VARCHAR(20)` on `biometric_readings.unit` was silently truncating clinical data. Real medical units like `%{HemoglobinSaturation}` (23 chars) and reference ranges like `Male: 13.5-17.5 g/dL; Female: 12.0-16.0 g/dL` (45 chars) exceed the 20-char limit. Non-numeric lab results like "Reactive (Confirmed)" were being crammed into the unit field because there was no proper text column. `DOUBLE PRECISION` for `value` introduced floating-point imprecision for clinical threshold comparisons (e.g., 126 mg/dL glucose cutoff).
+
+### 10 files changed
+
+| File | Change |
+|------|--------|
+| `server/migrations/005_clinical_data_storage.sql` | **NEW** — SQL migration |
+| `mcp-server/db/schema.sql` | Updated master schema |
+| `server/mcp_server.py` | Fixed write path #1 |
+| `ingestion/adapters/healthex/traced_writer.py` | Fixed write path #2 |
+| `mcp-server/transforms/fhir_to_schema.py` | Fixed write path #3 |
+| `server/deliberation/context_compiler.py` | Fixed read path |
+| `ingestion/adapters/healthex/parsers/format_b_parser.py` | Pass ref_range/loinc |
+| `ingestion/adapters/healthex/parsers/format_d_parser.py` | Extract ref range/LOINC from FHIR |
+| `attached_assets/replit-agent-deploy-migration-005.md` | Full deployment guide |
+| `attached_assets/replit-agent-migration-005-test-data.py` | Edge-case test data creator |
+
+---
+
+## Step 1: Pull the branch
+
+```bash
+git fetch origin claude/fix-clinical-data-storage-AXjlb
+git checkout claude/fix-clinical-data-storage-AXjlb
+```
+
+## Step 2: Apply the database migration
+
+```bash
+psql $DATABASE_URL -f server/migrations/005_clinical_data_storage.sql
+```
+
+This is safe to run on production — all `ALTER COLUMN TYPE TEXT` operations are metadata-only on PostgreSQL (~30ms, no table rewrite). All `ADD COLUMN` with NULL defaults are instant.
+
+### Verify the migration applied:
+
+```bash
+psql $DATABASE_URL -c "
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = 'biometric_readings'
+  AND column_name IN ('result_text','result_numeric','result_unit',
+                       'reference_text','reference_low','reference_high',
+                       'loinc_code','interpretation','is_out_of_range',
+                       'source_record_id','fhir_extensions')
+ORDER BY column_name;
+"
+```
+
+Expected: **11 rows**. If you see fewer, re-run the migration.
+
+Also verify the unit column is now TEXT:
+
+```bash
+psql $DATABASE_URL -c "
+SELECT column_name, data_type, character_maximum_length
+FROM information_schema.columns
+WHERE table_name = 'biometric_readings' AND column_name = 'unit';
+"
+```
+
+Expected: `data_type = text`, `character_maximum_length = NULL`
+
+## Step 3: Restart MCP servers
+
+```bash
+pkill -f "server.mcp_server" || true
+pkill -f "mcp-server.*server.py" || true
+
+MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server &
+sleep 2
+cd mcp-server && MCP_TRANSPORT=streamable-http MCP_PORT=8002 python server.py &
+cd ..
+sleep 2
+```
+
+## Step 4: Run regression tests
+
+```bash
+# Core MCP server tests
+pytest mcp-server/tests/ -v --ignore=mcp-server/tests/test_generators.py --tb=short
+
+# Deliberation engine tests
+pytest server/deliberation/tests/ -v --ignore=server/deliberation/tests/test_analyst.py --tb=short
+
+# Ingestion pipeline tests
+pytest ingestion/tests/ -v --tb=short
+```
+
+**Expected:** All previously-passing tests still pass. The pre-existing failures (numpy, anthropic, skills.ingestion_tools module import errors) are NOT caused by this branch.
+
+## Step 5: Run the edge-case test data script
+
+```bash
+python attached_assets/replit-agent-migration-005-test-data.py
+```
+
+This creates a stress-test patient (`MRN: STRESS-TEST-005`) with 7 categories of edge-case data:
+
+1. **Long UCUM unit codes** — `%{HemoglobinSaturation}` (23 chars), `{BoneCollagen}eq/mmol{Cre}` (26 chars)
+2. **Qualitative lab results** — "Reactive (Confirmed)", "Moderate growth of Staphylococcus aureus", "Too numerous to count", "Positive", "Negative"
+3. **Long reference ranges** — "Male: 13.5-17.5 g/dL; Female: 12.0-16.0 g/dL" (45 chars)
+4. **Diabetes threshold precision** — Glucose at 125.9, 126.0, 126.1 mg/dL; HbA1c at 6.49, 6.50, 6.51%; eGFR at 59.9, 60.0, 60.1
+5. **Multi-format ingest payloads** — Prints Format A/B/C/D/E payloads for testing via `ingest_from_healthex`
+6. **Missing fields** — Labs with no unit, no ref range, no LOINC, no date
+7. **Long display names** — Conditions >100 chars, medications >100 chars
+
+The script prints verification counts at the end. Expected output includes rows with long units, qualitative results in `result_text`, and `is_out_of_range = true` for out-of-bounds values.
+
+## Step 6: Verify edge cases with SQL
+
+```bash
+psql $DATABASE_URL -c "
+-- Long units stored without truncation
+SELECT metric_type, result_unit, length(result_unit) as len
+FROM biometric_readings
+WHERE patient_id = 'b2c3d4e5-f6a7-8901-bcde-f12345678901'
+  AND length(result_unit) > 20
+ORDER BY len DESC;
+"
+```
+
+```bash
+psql $DATABASE_URL -c "
+-- Qualitative results in result_text (NOT in unit)
+SELECT metric_type, result_text, unit
+FROM biometric_readings
+WHERE patient_id = 'b2c3d4e5-f6a7-8901-bcde-f12345678901'
+  AND result_text IS NOT NULL;
+"
+```
+
+```bash
+psql $DATABASE_URL -c "
+-- Exact NUMERIC precision at diabetes threshold
+SELECT metric_type, result_numeric, result_numeric = 126.0 as exact_match
+FROM biometric_readings
+WHERE patient_id = 'b2c3d4e5-f6a7-8901-bcde-f12345678901'
+  AND metric_type LIKE '%glucose%'
+  AND result_numeric BETWEEN 125 AND 127;
+"
+```
+
+```bash
+psql $DATABASE_URL -c "
+-- Generated is_out_of_range column works
+SELECT metric_type, result_numeric, reference_low, reference_high, is_out_of_range
+FROM biometric_readings
+WHERE patient_id = 'b2c3d4e5-f6a7-8901-bcde-f12345678901'
+  AND is_out_of_range = true;
+"
+```
+
+## Step 7: Test multi-format ingest (optional, requires MCP server)
+
+The test data script prints 5 payloads (Formats A through E) that can be ingested via the `ingest_from_healthex` MCP tool. Use the patient_id `b2c3d4e5-f6a7-8901-bcde-f12345678901` and resource_type `labs` for each. This tests the full adaptive pipeline with:
+- Format A: non-numeric labs ("Non Reactive", "Moderate growth of E. coli"), complex units
+- Format B: LOINC codes, reference ranges through compressed table columns
+- Format D: FHIR Bundle with `referenceRange`, `valueCodeableConcept`, component BP
+- Format E: JSON dicts with long UCUM units, comparison values (`<20`), qualitative ("Trace")
+- Format C: Flat FHIR text
+
+## Expected Scorecard
+
+| Edge Case | Before | After |
+|-----------|--------|-------|
+| `%{HemoglobinSaturation}` (23 chars) | Truncated | Stored fully |
+| "Reactive (Confirmed)" | Crammed into unit | In `result_text` |
+| Glucose 126.0 mg/dL | 125.99999... (FLOAT) | Exact 126.0 (NUMERIC) |
+| "Male: 13.5-17.5 g/dL; Female: 12.0-16.0 g/dL" | Truncated | Full text in `reference_text` |
+| LOINC code 4548-4 | Not stored | In `loinc_code` column |
+| HbA1c 6.5% threshold | Float comparison unreliable | NUMERIC exact |
+| `is_out_of_range` auto-flag | Manual only | Auto-computed from bounds |
+| valueCodeableConcept (qualitative FHIR) | Silently dropped | Stored in `result_text` |
+| Long condition display (>500 chars) | VARCHAR(500) truncation | TEXT unlimited |
+| Long medication name (>500 chars) | VARCHAR(500) truncation | TEXT unlimited |
+
+## Full deployment guide
+
+For additional details, see `attached_assets/replit-agent-deploy-migration-005.md` in the repo.
