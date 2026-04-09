@@ -221,6 +221,8 @@ def _to_native(row: dict[str, str], resource_type: str) -> Optional[dict]:
             "value": row.get("Value", ""),
             "unit": row.get("Unit", ""),
             "date": row.get("EffectiveDate") or row.get("Date", ""),
+            "ref_range": row.get("ReferenceRange", ""),
+            "loinc_code": row.get("LOINC", ""),
         }
     elif resource_type == "encounters":
         enc_type = row.get("Type", "") or row.get("Description", "")
