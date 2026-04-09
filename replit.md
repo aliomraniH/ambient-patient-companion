@@ -78,7 +78,7 @@ ambient-patient-companion/
 
 | Server | Port | Public Path | Tools | Claude Web Name |
 |--------|------|-------------|-------|-----------------|
-| ClinicalIntelligence | 8001 | `/mcp` | 18 | `ambient-clinical-intelligence` |
+| ClinicalIntelligence | 8001 | `/mcp` | 19 | `ambient-clinical-intelligence` |
 | PatientCompanion (Skills) | 8002 | `/mcp-skills` | 17 | `ambient-skills-companion` |
 | PatientIngestion | 8003 | `/mcp-ingestion` | 1 | `ambient-ingestion` |
 
@@ -86,7 +86,7 @@ All three are proxied through Next.js (port 5000) — no port number in public U
 
 ### Server 1 — ClinicalIntelligence (`server/mcp_server.py`)
 
-Eighteen tools at `https://[domain]/mcp` (9 Phase 1 + 9 HealthEx/Deliberation/Ingestion/Audit):
+Nineteen tools at `https://[domain]/mcp` (9 Phase 1 + 10 HealthEx/Deliberation/Ingestion/Audit/Flags):
 
 | Tool | Description |
 |------|-------------|
@@ -108,11 +108,12 @@ Eighteen tools at `https://[domain]/mcp` (9 Phase 1 + 9 HealthEx/Deliberation/In
 | `get_deliberation_results` | Retrieve stored deliberation outputs |
 | `get_patient_knowledge` | Fetch accumulated patient-specific knowledge |
 | `get_pending_nudges` | List undelivered nudges for patient or care team |
+| `get_flag_review_status` | Current flag lifecycle status (open/retracted/pending human review) |
 
 Also has REST wrappers at `/tools/<name>` and liveness check at `/health`.
 
 **HealthEx two-phase pipeline** (all on `/mcp`, port 8001):
-`use_healthex` → `register_healthex_patient` → `ingest_from_healthex` (plan) → `execute_pending_plans` (write+audit) → `get_ingestion_plans` (batch status) → `get_transfer_audit` (per-record audit) → `run_deliberation` → `get_deliberation_results` → `get_pending_nudges`
+`use_healthex` → `register_healthex_patient` → `ingest_from_healthex` (plan + auto flag review) → `execute_pending_plans` (write+audit) → `get_ingestion_plans` (batch status) → `get_transfer_audit` (per-record audit) → `run_deliberation` (+ auto flag write) → `get_deliberation_results` → `get_flag_review_status` → `get_pending_nudges`
 
 ### Server 2 — PatientCompanion (`mcp-server/server.py`)
 
@@ -166,7 +167,7 @@ UI: `prototypes/pcp-encounter.html` has 2 tabs — **Clinical Workspace** and **
 ## Database
 
 - **Provider**: Replit built-in PostgreSQL
-- **Schema**: `mcp-server/db/schema.sql` (22 core tables) + `server/deliberation/migrations/001_deliberation_tables.sql` (4 deliberation tables) + `server/migrations/002_ingestion_plans.sql` (1 ingestion_plans table) + `server/migrations/003_transfer_log.sql` (1 transfer_log table) + `server/migrations/004_content_router_tables.sql` (2 tables: clinical_notes + media_references = **30 total**)
+- **Schema**: `mcp-server/db/schema.sql` (22 core tables) + `server/deliberation/migrations/001_deliberation_tables.sql` (4 deliberation tables) + `server/migrations/002_ingestion_plans.sql` (1 ingestion_plans table) + `server/migrations/003_transfer_log.sql` (1 transfer_log table) + `server/migrations/004_content_router_tables.sql` (2 tables: clinical_notes + media_references) + `server/deliberation/migrations/004_flag_lifecycle.sql` (3 tables: deliberation_flags + flag_review_runs + flag_corrections = **33 total**)
 - **Connection**: `DATABASE_URL` environment variable (auto-set by Replit)
 - **Key constraints**:
   - `is_stale` in `source_freshness` is a regular boolean (not generated — PostgreSQL requires immutable expressions for generated columns)
@@ -205,10 +206,10 @@ Each suite runs independently (conftest scoping keeps them isolated).
 python -m pytest tests/phase1/ -v
 ```
 
-### Phase 2 Deliberation Engine — 40 unit tests + 57 feature tests
+### Phase 2 Deliberation Engine — 40 unit tests + 94 feature tests (incl. 30 flag lifecycle + 7 integration)
 ```bash
-python -m pytest server/deliberation/tests/ -v   # 40 passed, 1 skipped
-python -m pytest tests/phase2/ -v                # 57 passed
+python -m pytest server/deliberation/tests/ -v   # 108 passed, 1 skipped
+python -m pytest tests/phase2/ -v                # 94 passed (57 deliberation + 30 flag unit + 7 flag integration)
 ```
 
 ### End-to-end MCP use-case suite — 21 tests (5 skipped without live servers)
@@ -236,14 +237,14 @@ cd replit-app && npm test
 cd replit_dashboard && python -m pytest tests/ -v
 ```
 
-**Total: 586 tests (549 Python + 37 Jest), all passing**
+**Total: 623 tests (586 Python + 37 Jest), all passing**
 | Suite | Count |
 |-------|-------|
 | Phase 1 clinical intelligence (incl. 18 DB format integration + 8 ingestion-plans IP tests) | 132 |
-| Phase 2 deliberation (unit + features + fence-stripping) | 119 |
+| Phase 2 deliberation (unit + features + fence-stripping + flag lifecycle) | 202 (108 unit + 94 feature) |
 | E2E use-case suite (UC-01→UC-18 + 3 ingestion-tool smoke tests) | 21 |
 | Skills MCP backend (incl. 27 fix verification tests) | 87 |
-| Adaptive ingestion pipeline (parsers + edge cases + perf + planner PL-1–8 + executor EX-1–8) | 136 |
+| Adaptive ingestion pipeline (parsers + edge cases + perf + planner PL-1–8 + executor EX-1–8) | 152 |
 | MCP tool registration + REST smoke tests | 24 |
 | Next.js frontend (Jest) | 37 |
 | Config dashboard | 30 |

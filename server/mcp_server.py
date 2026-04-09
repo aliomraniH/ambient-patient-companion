@@ -1762,8 +1762,24 @@ async def ingest_from_healthex(
                 except Exception:
                     pass  # ingestion_plans table may not exist yet
 
+        # ── Post-ingest flag review (non-blocking) ────────────────
+        flag_review_result = None
+        if total_written > 0:
+            try:
+                from server.deliberation.flag_reviewer import run_flag_review
+                _new_data_summary = (
+                    f"Ingested {total_written} rows: {written_by_table}. "
+                    f"Format: {format_detected}."
+                )
+                flag_review_result = await run_flag_review(
+                    pool, patient_id, "post_ingest",
+                    plan_id or "", _new_data_summary,
+                )
+            except Exception as _flag_err:
+                logger.warning("Post-ingest flag review failed (non-fatal): %s", _flag_err)
+
         duration_ms = int((_time.time() - start) * 1000)
-        return json.dumps({
+        result_dict = {
             "status": "ok",
             "patient_id": patient_id,
             "resource_type": resource_type,
@@ -1775,7 +1791,16 @@ async def ingest_from_healthex(
             "duration_ms": duration_ms,
             "plan_id": plan_id,
             "insights_summary": insights_summary,
-        }, indent=2)
+        }
+        if flag_review_result:
+            result_dict["flag_review"] = {
+                "review_id": flag_review_result.get("review_id"),
+                "flags_reviewed": flag_review_result.get("flags_reviewed", 0),
+                "retracted": flag_review_result.get("stats", {}).get("retracted", 0),
+                "escalated": flag_review_result.get("stats", {}).get("escalated", 0),
+                "summary": flag_review_result.get("summary", ""),
+            }
+        return json.dumps(result_dict, indent=2)
 
     except Exception as e:
         logger.error("ingest_from_healthex failed: %s", e, exc_info=True)
@@ -2194,6 +2219,72 @@ async def get_deliberation_results(
             })
 
         return {"patient_id": patient_id, "deliberations": results}
+
+
+@mcp.tool()
+async def get_flag_review_status(patient_id: str) -> dict:
+    """
+    Get current flag lifecycle status for a patient.
+
+    Returns open flags, recently retracted flags (with reasons), and
+    flags needing human review with clarification questions.
+    Agents should read this instead of raw deliberation_outputs to get
+    the current truth about a patient's flags.
+
+    Args:
+        patient_id: Patient UUID or MRN
+
+    Returns:
+        open_flags, recently_retracted, needs_human_review counts and details.
+    """
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        open_flags = await conn.fetch(
+            """SELECT title, description, priority::text, flag_basis::text,
+                      flagged_at, requires_human, had_zero_values
+               FROM deliberation_flags
+               WHERE patient_id = $1::uuid AND lifecycle_state = 'open'
+               ORDER BY
+                   CASE priority::text
+                       WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                       WHEN 'medium-high' THEN 3 WHEN 'medium' THEN 4
+                       WHEN 'low' THEN 5 ELSE 6 END,
+                   flagged_at DESC""",
+            patient_id,
+        )
+
+        retracted = await conn.fetch(
+            """SELECT title, priority::text, flag_basis::text,
+                      retraction_reason, reviewed_at
+               FROM deliberation_flags
+               WHERE patient_id = $1::uuid
+                 AND lifecycle_state = 'retracted'
+                 AND reviewed_at >= NOW() - INTERVAL '7 days'
+               ORDER BY reviewed_at DESC LIMIT 10""",
+            patient_id,
+        )
+
+        human_needed = await conn.fetch(
+            """SELECT f.title, f.description, f.priority::text,
+                      c.clarification_question, c.clarification_options
+               FROM deliberation_flags f
+               JOIN flag_corrections c ON c.flag_id = f.id
+               WHERE f.patient_id = $1::uuid
+                 AND f.requires_human = true
+                 AND f.lifecycle_state = 'open'
+                 AND c.applied = false
+               ORDER BY f.flagged_at DESC""",
+            patient_id,
+        )
+
+        return {
+            "patient_id": patient_id,
+            "open_flags": len(open_flags),
+            "open": [dict(r) for r in open_flags],
+            "recently_retracted": [dict(r) for r in retracted],
+            "needs_human_review": [dict(r) for r in human_needed],
+            "has_pending_clarifications": len(human_needed) > 0,
+        }
 
 
 @mcp.tool()
