@@ -12,8 +12,20 @@ achieves 100% resource identification and ~70% attribute-level mapping.
 import json
 import logging
 import os
+import sys
 
 log = logging.getLogger(__name__)
+
+# Import guardrail for PHI scanning — guarded so ingestion never crashes
+# if the guardrail module is unavailable.
+try:
+    _server_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "server")
+    if _server_dir not in sys.path:
+        sys.path.insert(0, os.path.abspath(_server_dir))
+    from server.guardrails.output_validator import validate_output as _guardrail_validate
+    _GUARDRAIL_AVAILABLE = True
+except ImportError:
+    _GUARDRAIL_AVAILABLE = False
 
 # Warehouse target schemas per resource type — included in the LLM prompt
 # so the model knows exactly what fields to extract.
@@ -70,6 +82,27 @@ WAREHOUSE_SCHEMAS = {
         },
     },
 }
+
+
+def _phi_scan_rows(rows: list[dict]) -> list[dict]:
+    """Scan extracted rows for PHI leakage and redact flagged field values."""
+    if not _GUARDRAIL_AVAILABLE or not rows:
+        return rows
+    scanned = []
+    for row in rows:
+        clean_row = {}
+        for key, value in row.items():
+            if not isinstance(value, str) or not value.strip():
+                clean_row[key] = value
+                continue
+            try:
+                result = _guardrail_validate(response=value)
+                has_phi = any(f.startswith("PHI_LEAKAGE") for f in result.flags)
+                clean_row[key] = "[REDACTED]" if has_phi else value
+            except Exception:
+                clean_row[key] = value
+        scanned.append(clean_row)
+    return scanned
 
 
 def llm_normalise(raw: str, resource_type: str) -> list[dict]:
@@ -139,7 +172,7 @@ RULES:
             if all(row.get(f) for f in schema["required"]):
                 validated.append(row)
 
-        return validated
+        return _phi_scan_rows(validated)
 
     except Exception as e:
         log.error("LLM normaliser failed for %s: %s", resource_type, e)

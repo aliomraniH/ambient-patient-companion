@@ -26,6 +26,13 @@ from .knowledge_store import commit_deliberation
 from .tiered_context_loader import TieredContextLoader, TOTAL_BUDGET
 from .data_request_parser import parse_data_requests
 from .json_utils import strip_markdown_fences
+from .output_safety import (
+    validate_deliberation_output,
+    validate_nudge_batch,
+    validate_nudge_dicts,
+)
+from .planner import build_deliberation_agenda
+from .synthesis_reviewer import review_synthesis
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +114,22 @@ class DeliberationEngine:
         )
         context.deliberation_trigger = request.trigger_type
 
+        # ── Phase 0.5: Build deliberation agenda ─────────────────────────────
+        agenda = None
+        try:
+            agenda = await build_deliberation_agenda(
+                patient_context=context,
+                deliberation_id=deliberation_id,
+            )
+            if agenda:
+                agenda_text = agenda.to_prompt_context()
+                context.applicable_guidelines.append({
+                    "source": "deliberation_agenda",
+                    "content": agenda_text,
+                })
+        except Exception as e:
+            log.warning("Agenda build failed — continuing without: %s", e)
+
         # ── Phase 1: Parallel Independent Analysis ─────────────────────────────
         claude_analysis, gpt4_analysis = await run_parallel_analysis(context)
         total_tokens += getattr(claude_analysis, "_token_count", 0)
@@ -131,6 +154,74 @@ class DeliberationEngine:
             load_prompt_fn=_load_prompt,
             call_claude_fn=_call_claude
         )
+
+        # ── Phase 3.25: Post-synthesis domain review ─────────────────────────
+        if not getattr(self, "_re_deliberation_done", False):
+            try:
+                synthesis_summary = json.dumps(
+                    result.model_dump(), default=str
+                )[:3000]
+                context_summary = (
+                    f"Patient: {context.patient_name}, {context.age}{context.sex}, "
+                    f"MRN {context.mrn}. "
+                    f"Conditions: {', '.join(c.get('display', '') for c in context.active_conditions)}."
+                )
+                review_result = await review_synthesis(
+                    synthesis_text=synthesis_summary,
+                    patient_context_text=context_summary,
+                    agenda=agenda,
+                    deliberation_id=deliberation_id,
+                )
+                if review_result.re_deliberation_needed:
+                    log.info(
+                        "Re-deliberation triggered deliberation_id=%s focus=%s",
+                        deliberation_id, review_result.re_deliberation_focus,
+                    )
+                    self._re_deliberation_done = True
+                    # Inject focus into context and re-run Phases 1-3
+                    context.applicable_guidelines.append({
+                        "source": "re_deliberation_focus",
+                        "content": review_result.re_deliberation_focus,
+                    })
+                    claude_analysis, gpt4_analysis = await run_parallel_analysis(context)
+                    critique_result = await run_critique_rounds(
+                        claude_analysis=claude_analysis,
+                        gpt4_analysis=gpt4_analysis,
+                        context=context,
+                        max_rounds=request.max_rounds,
+                        load_prompt_fn=_load_prompt,
+                        call_claude_fn=_call_claude,
+                        call_gpt4_fn=_call_gpt4,
+                    )
+                    result = await synthesize(
+                        transcript=critique_result["transcript"],
+                        context=context,
+                        deliberation_id=deliberation_id,
+                        load_prompt_fn=_load_prompt,
+                        call_claude_fn=_call_claude,
+                    )
+            except Exception as e:
+                log.warning(
+                    "Synthesis review failed — continuing with unreviewed result: %s", e
+                )
+            finally:
+                self._re_deliberation_done = False
+
+        # ── Phase 3.5: Guardrail validation on patient-facing outputs ────────
+        result.nudge_content = validate_nudge_batch(
+            nudges=result.nudge_content,
+            patient_id=context.patient_id,
+            deliberation_id=deliberation_id,
+        )
+        for scenario in result.anticipatory_scenarios:
+            safety = validate_deliberation_output(
+                content=scenario.description,
+                output_type="anticipatory_scenarios",
+                patient_id=context.patient_id,
+                deliberation_id=deliberation_id,
+            )
+            if safety["violations"]:
+                scenario.description = safety["content"]
 
         # ── Phase 4: Behavioral Adaptation ────────────────────────────────────
         result.nudge_content = adapt_nudges(result.nudge_content)
@@ -185,6 +276,18 @@ class DeliberationEngine:
         # ── Phase 0b: Always load Tier 1 ─────────────────────────────────
         tier1_ctx = await loader.load_tier1()
         context = {**static_ctx, **tier1_ctx}
+
+        # ── Phase 0.5: Build deliberation agenda ─────────────────────────
+        prog_agenda = None
+        try:
+            prog_agenda = await build_deliberation_agenda(
+                patient_context=context,
+                deliberation_id=deliberation_id,
+            )
+            if prog_agenda:
+                context["_deliberation_agenda"] = prog_agenda.to_prompt_context()
+        except Exception as e:
+            log.warning("Progressive agenda build failed — continuing without: %s", e)
 
         for round_num in range(1, request.max_rounds + 1):
             rounds_completed = round_num
@@ -286,6 +389,68 @@ class DeliberationEngine:
 
         # ── Synthesize and commit ─────────────────────────────────────────
         final_output = self._synthesize_round_outputs(all_outputs)
+
+        # ── Guardrail validation on patient-facing outputs ────────────────
+        final_output["patient_nudges"] = validate_nudge_dicts(
+            nudges=final_output.get("patient_nudges", []),
+            patient_id=request.patient_id,
+            deliberation_id=deliberation_id,
+        )
+        validated_scenarios = []
+        for s in final_output.get("anticipatory_scenarios", []):
+            if isinstance(s, dict):
+                desc = s.get("description", "")
+                if desc:
+                    safety = validate_deliberation_output(
+                        content=desc,
+                        output_type="anticipatory_scenarios",
+                        patient_id=request.patient_id,
+                        deliberation_id=deliberation_id,
+                    )
+                    if safety["violations"]:
+                        s["description"] = safety["content"]
+            validated_scenarios.append(s)
+        final_output["anticipatory_scenarios"] = validated_scenarios
+
+        # ── Post-synthesis domain review ──────────────────────────────────
+        try:
+            synthesis_summary = json.dumps(final_output, default=str)[:3000]
+            context_text = json.dumps(context, default=str)[:2000]
+            prog_review = await review_synthesis(
+                synthesis_text=synthesis_summary,
+                patient_context_text=context_text,
+                agenda=prog_agenda,
+                deliberation_id=deliberation_id,
+            )
+            if prog_review.re_deliberation_needed and rounds_completed < request.max_rounds:
+                log.info(
+                    "Progressive re-deliberation triggered deliberation_id=%s "
+                    "focus=%s",
+                    deliberation_id, prog_review.re_deliberation_focus,
+                )
+                # Run one additional focused round
+                context["_re_deliberation_focus"] = prog_review.re_deliberation_focus
+                extra_output = await self._run_one_deliberation_round(
+                    context_json=json.dumps(context),
+                    round_number=rounds_completed + 1,
+                    trigger_type=request.trigger_type,
+                    prior_outputs=all_outputs,
+                )
+                if extra_output.get("status") != "error":
+                    all_outputs.append(extra_output)
+                    rounds_completed += 1
+                    final_output = self._synthesize_round_outputs(all_outputs)
+                    # Re-validate after extra round
+                    final_output["patient_nudges"] = validate_nudge_dicts(
+                        nudges=final_output.get("patient_nudges", []),
+                        patient_id=request.patient_id,
+                        deliberation_id=deliberation_id,
+                    )
+        except Exception as e:
+            log.warning(
+                "Progressive synthesis review failed — continuing: %s", e
+            )
+
         total_latency_ms = int((time.monotonic() - start_time) * 1000)
 
         try:
