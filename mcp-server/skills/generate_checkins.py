@@ -10,115 +10,120 @@ from fastmcp import FastMCP
 
 from db.connection import get_pool
 from generators.behavioral_model import generate_checkins, generate_adherence_records
-from skills.base import log_skill_execution
+from skills.base import get_data_track, log_skill_execution
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 
-def register(mcp: FastMCP):
-    @mcp.tool
-    async def generate_daily_checkins(
-        patient_id: str,
-        target_date: str = "",
-        scenario: str = "normal",
-    ) -> str:
-        """Generate a daily check-in and medication adherence records.
+async def generate_daily_checkins(
+    patient_id: str,
+    target_date: str = "",
+    scenario: str = "normal",
+) -> str:
+    """Generate a daily check-in and medication adherence records.
 
-        Args:
-            patient_id: UUID of the patient
-            target_date: Date in YYYY-MM-DD format (defaults to today)
-            scenario: Behavior scenario (normal | caregiver_stress)
-        """
-        pool = await get_pool()
-        try:
-            if target_date:
-                day = date.fromisoformat(target_date)
-            else:
-                day = date.today()
+    Args:
+        patient_id: UUID of the patient
+        target_date: Date in YYYY-MM-DD format (defaults to today)
+        scenario: Behavior scenario (normal | caregiver_stress)
+    """
+    pool = await get_pool()
+    try:
+        if target_date:
+            day = date.fromisoformat(target_date)
+        else:
+            day = date.today()
 
-            seed = int(day.toordinal())
-            crisis_months = set()
-            if scenario == "caregiver_stress":
-                crisis_months = {(day.year, day.month)}
+        seed = int(day.toordinal())
+        crisis_months = set()
+        if scenario == "caregiver_stress":
+            crisis_months = {(day.year, day.month)}
 
-            checkins = generate_checkins(
-                patient_id, day, day, seed, crisis_months=crisis_months
+        checkins = generate_checkins(
+            patient_id, day, day, seed, crisis_months=crisis_months
+        )
+
+        checkin_inserted = 0
+        adherence_inserted = 0
+
+        async with pool.acquire() as conn:
+            data_track = await get_data_track(conn)
+
+            # Insert check-in
+            for ci in checkins:
+                result = await conn.execute(
+                    """
+                    INSERT INTO daily_checkins
+                        (id, patient_id, checkin_date, mood, mood_numeric,
+                         energy, stress_level, sleep_hours, notes, data_source)
+                    VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9)
+                    ON CONFLICT (patient_id, checkin_date) DO NOTHING
+                    """,
+                    ci["patient_id"], ci["checkin_date"], ci["mood"],
+                    ci["mood_numeric"], ci["energy"], ci["stress_level"],
+                    ci["sleep_hours"], ci["notes"], "manual",
+                )
+                if "INSERT" in result:
+                    checkin_inserted += 1
+
+            # Get patient medications for adherence records
+            med_rows = await conn.fetch(
+                "SELECT id FROM patient_medications WHERE patient_id = $1",
+                patient_id,
             )
+            med_ids = [str(row["id"]) for row in med_rows]
 
-            checkin_inserted = 0
-            adherence_inserted = 0
-
-            async with pool.acquire() as conn:
-                # Insert check-in
-                for ci in checkins:
+            if med_ids:
+                adherence_recs = generate_adherence_records(
+                    patient_id, med_ids, day, day, seed,
+                    crisis_months=crisis_months,
+                )
+                for ar in adherence_recs:
                     result = await conn.execute(
                         """
-                        INSERT INTO daily_checkins
-                            (id, patient_id, checkin_date, mood, mood_numeric,
-                             energy, stress_level, sleep_hours, notes, data_source)
-                        VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9)
-                        ON CONFLICT (patient_id, checkin_date) DO NOTHING
+                        INSERT INTO medication_adherence
+                            (id, patient_id, medication_id, adherence_date,
+                             taken, notes, data_source)
+                        VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6)
+                        ON CONFLICT (patient_id, medication_id, adherence_date)
+                            DO NOTHING
                         """,
-                        ci["patient_id"], ci["checkin_date"], ci["mood"],
-                        ci["mood_numeric"], ci["energy"], ci["stress_level"],
-                        ci["sleep_hours"], ci["notes"], "manual",
+                        ar["patient_id"], ar["medication_id"],
+                        ar["adherence_date"], ar["taken"], ar["notes"],
+                        data_track,
                     )
                     if "INSERT" in result:
-                        checkin_inserted += 1
+                        adherence_inserted += 1
 
-                # Get patient medications for adherence records
-                med_rows = await conn.fetch(
-                    "SELECT id FROM patient_medications WHERE patient_id = $1",
-                    patient_id,
-                )
-                med_ids = [str(row["id"]) for row in med_rows]
-
-                if med_ids:
-                    adherence_recs = generate_adherence_records(
-                        patient_id, med_ids, day, day, seed,
-                        crisis_months=crisis_months,
-                    )
-                    for ar in adherence_recs:
-                        result = await conn.execute(
-                            """
-                            INSERT INTO medication_adherence
-                                (id, patient_id, medication_id, adherence_date,
-                                 taken, notes, data_source)
-                            VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6)
-                            ON CONFLICT (patient_id, medication_id, adherence_date)
-                                DO NOTHING
-                            """,
-                            ar["patient_id"], ar["medication_id"],
-                            ar["adherence_date"], ar["taken"], ar["notes"],
-                            "synthea",
-                        )
-                        if "INSERT" in result:
-                            adherence_inserted += 1
-
-                await log_skill_execution(
-                    conn, "generate_daily_checkins", patient_id, "completed",
-                    output_data={
-                        "date": str(day),
-                        "checkins": checkin_inserted,
-                        "adherence_records": adherence_inserted,
-                    },
-                )
-
-            return (
-                f"OK Generated {checkin_inserted} check-in(s) and "
-                f"{adherence_inserted} adherence records "
-                f"for patient {patient_id} on {day}"
+            await log_skill_execution(
+                conn, "generate_daily_checkins", patient_id, "completed",
+                output_data={
+                    "date": str(day),
+                    "checkins": checkin_inserted,
+                    "adherence_records": adherence_inserted,
+                },
+                data_source=data_track,
             )
 
-        except Exception as e:
-            logger.error("generate_daily_checkins failed: %s", e)
-            try:
-                async with pool.acquire() as conn:
-                    await log_skill_execution(
-                        conn, "generate_daily_checkins", patient_id, "failed",
-                        error_message=str(e),
-                    )
-            except Exception:
-                logger.error("Failed to log skill execution error")
-            return f"Error: {e}"
+        return (
+            f"OK Generated {checkin_inserted} check-in(s) and "
+            f"{adherence_inserted} adherence records "
+            f"for patient {patient_id} on {day}"
+        )
+
+    except Exception as e:
+        logger.error("generate_daily_checkins failed: %s", e)
+        try:
+            async with pool.acquire() as conn:
+                await log_skill_execution(
+                    conn, "generate_daily_checkins", patient_id, "failed",
+                    error_message=str(e),
+                )
+        except Exception:
+            logger.error("Failed to log skill execution error")
+        return f"Error: {e}"
+
+
+def register(mcp: FastMCP):
+    mcp.tool(generate_daily_checkins)

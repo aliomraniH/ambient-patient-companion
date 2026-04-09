@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import json
 from datetime import datetime, date
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
+
+
+async def get_data_track(conn) -> str:
+    """Read active DATA_TRACK from system_config, falling back to env var."""
+    try:
+        row = await conn.fetchrow(
+            "SELECT value FROM system_config WHERE key = 'DATA_TRACK'"
+        )
+        if row:
+            return row["value"]
+    except Exception:
+        pass
+    return os.environ.get("DATA_TRACK", "synthea")
 
 
 async def log_skill_execution(

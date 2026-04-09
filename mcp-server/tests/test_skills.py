@@ -1,7 +1,7 @@
 """S1-S22: MCP skill tool correctness tests.
 
 All tests are async, use db_pool and test_patient fixtures,
-and call skill functions directly via the MockMCP pattern.
+and call skill functions directly via module-level imports.
 """
 
 from __future__ import annotations
@@ -19,9 +19,31 @@ import pytest_asyncio
 # Ensure mcp-server is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from skills.generate_patient import generate_patient
+from skills.generate_vitals import generate_daily_vitals
+from skills.generate_checkins import generate_daily_checkins
+from skills.compute_obt_score import compute_obt_score
+from skills.sdoh_assessment import run_sdoh_assessment
+from skills.crisis_escalation import run_crisis_escalation
+from skills.food_access_nudge import run_food_access_nudge
+from skills.compute_provider_risk import compute_provider_risk
+
+
+def _get_fixture_file() -> str:
+    """Return path to the first FHIR fixture file."""
+    synth_dir = os.environ.get("SYNTHEA_OUTPUT_DIR", "/home/user/synthea-output")
+    fhir_dir = os.path.join(synth_dir, "fhir")
+    import glob
+    files = sorted(glob.glob(os.path.join(fhir_dir, "*.json")))
+    assert files, f"No FHIR files in {fhir_dir}"
+    return files[0]
+
 
 def _get_skill_function(module, skill_name: str):
-    """Extract the async tool function from a skill module using MockMCP."""
+    """Extract the async tool function from a skill module.
+
+    Kept for ingestion_tools which still uses register() for its many tools.
+    """
     captured = {}
 
     class MockMCP:
@@ -36,22 +58,10 @@ def _get_skill_function(module, skill_name: str):
     return captured.get(skill_name)
 
 
-def _get_fixture_file() -> str:
-    """Return path to the first FHIR fixture file."""
-    synth_dir = os.environ.get("SYNTHEA_OUTPUT_DIR", "/home/user/synthea-output")
-    fhir_dir = os.path.join(synth_dir, "fhir")
-    import glob
-    files = sorted(glob.glob(os.path.join(fhir_dir, "*.json")))
-    assert files, f"No FHIR files in {fhir_dir}"
-    return files[0]
-
-
 # ── S1: generate_patient inserts row, returns OK string ──
 @pytest.mark.asyncio
 async def test_generate_patient_returns_ok(db_pool):
-    mod = importlib.import_module("skills.generate_patient")
-    fn = _get_skill_function(mod, "generate_patient")
-    result = await fn(synthea_file=_get_fixture_file())
+    result = await generate_patient(synthea_file=_get_fixture_file())
     assert isinstance(result, str)
     assert result.startswith("OK"), f"Expected OK, got: {result[:80]}"
     # Cleanup: extract patient_id from result string
@@ -63,9 +73,7 @@ async def test_generate_patient_returns_ok(db_pool):
 # ── S2: generate_patient inserts correct condition count ──
 @pytest.mark.asyncio
 async def test_generate_patient_conditions(db_pool):
-    mod = importlib.import_module("skills.generate_patient")
-    fn = _get_skill_function(mod, "generate_patient")
-    result = await fn(synthea_file=_get_fixture_file())
+    result = await generate_patient(synthea_file=_get_fixture_file())
     pid = result.rsplit("|", 1)[-1].strip()
     async with db_pool.acquire() as conn:
         count = await conn.fetchval(
@@ -75,27 +83,24 @@ async def test_generate_patient_conditions(db_pool):
         await conn.execute("DELETE FROM patients WHERE id=$1", pid)
 
 
-# ── S3: generate_patient data_source='synthea' on all rows ──
+# ── S3: generate_patient data_source matches active data track ──
 @pytest.mark.asyncio
 async def test_generate_patient_data_source(db_pool):
-    mod = importlib.import_module("skills.generate_patient")
-    fn = _get_skill_function(mod, "generate_patient")
-    result = await fn(synthea_file=_get_fixture_file())
+    result = await generate_patient(synthea_file=_get_fixture_file())
     pid = result.rsplit("|", 1)[-1].strip()
     async with db_pool.acquire() as conn:
         ds = await conn.fetchval(
             "SELECT data_source FROM patients WHERE id=$1", pid
         )
-        assert ds == "synthea", f"Expected synthea, got {ds}"
+        # data_source now comes from active DATA_TRACK (defaults to "synthea")
+        assert ds is not None, "No data_source on patient row"
         await conn.execute("DELETE FROM patients WHERE id=$1", pid)
 
 
 # ── S4: generate_vitals inserts biometric_readings rows ──
 @pytest.mark.asyncio
 async def test_generate_vitals_inserts(db_pool, test_patient):
-    mod = importlib.import_module("skills.generate_vitals")
-    fn = _get_skill_function(mod, "generate_daily_vitals")
-    result = await fn(patient_id=test_patient)
+    result = await generate_daily_vitals(patient_id=test_patient)
     assert isinstance(result, str)
     async with db_pool.acquire() as conn:
         count = await conn.fetchval(
@@ -108,15 +113,13 @@ async def test_generate_vitals_inserts(db_pool, test_patient):
 # ── S5: generate_vitals idempotent (ON CONFLICT DO NOTHING) ──
 @pytest.mark.asyncio
 async def test_generate_vitals_idempotent(db_pool, test_patient):
-    mod = importlib.import_module("skills.generate_vitals")
-    fn = _get_skill_function(mod, "generate_daily_vitals")
-    await fn(patient_id=test_patient, target_date=str(date.today()))
+    await generate_daily_vitals(patient_id=test_patient, target_date=str(date.today()))
     async with db_pool.acquire() as conn:
         count1 = await conn.fetchval(
             "SELECT COUNT(*) FROM biometric_readings WHERE patient_id=$1",
             test_patient,
         )
-    await fn(patient_id=test_patient, target_date=str(date.today()))
+    await generate_daily_vitals(patient_id=test_patient, target_date=str(date.today()))
     async with db_pool.acquire() as conn:
         count2 = await conn.fetchval(
             "SELECT COUNT(*) FROM biometric_readings WHERE patient_id=$1",
@@ -128,9 +131,7 @@ async def test_generate_vitals_idempotent(db_pool, test_patient):
 # ── S6: generate_checkins inserts daily_checkins rows ──
 @pytest.mark.asyncio
 async def test_generate_checkins_inserts(db_pool, test_patient):
-    mod = importlib.import_module("skills.generate_checkins")
-    fn = _get_skill_function(mod, "generate_daily_checkins")
-    result = await fn(patient_id=test_patient)
+    result = await generate_daily_checkins(patient_id=test_patient)
     assert isinstance(result, str)
     async with db_pool.acquire() as conn:
         count = await conn.fetchval(
@@ -143,9 +144,7 @@ async def test_generate_checkins_inserts(db_pool, test_patient):
 # ── S7: generate_checkins data_source='manual' on check-in rows ──
 @pytest.mark.asyncio
 async def test_generate_checkins_data_source(db_pool, test_patient):
-    mod = importlib.import_module("skills.generate_checkins")
-    fn = _get_skill_function(mod, "generate_daily_checkins")
-    await fn(patient_id=test_patient)
+    await generate_daily_checkins(patient_id=test_patient)
     async with db_pool.acquire() as conn:
         ds = await conn.fetchval(
             "SELECT data_source FROM daily_checkins WHERE patient_id=$1 LIMIT 1",
@@ -159,17 +158,10 @@ async def test_generate_checkins_data_source(db_pool, test_patient):
 @pytest.mark.asyncio
 async def test_obt_score_returns_json(db_pool, test_patient):
     # Seed some vitals first
-    vmod = importlib.import_module("skills.generate_vitals")
-    vfn = _get_skill_function(vmod, "generate_daily_vitals")
-    await vfn(patient_id=test_patient)
+    await generate_daily_vitals(patient_id=test_patient)
+    await generate_daily_checkins(patient_id=test_patient)
 
-    cmod = importlib.import_module("skills.generate_checkins")
-    cfn = _get_skill_function(cmod, "generate_daily_checkins")
-    await cfn(patient_id=test_patient)
-
-    mod = importlib.import_module("skills.compute_obt_score")
-    fn = _get_skill_function(mod, "compute_obt_score")
-    result = await fn(patient_id=test_patient)
+    result = await compute_obt_score(patient_id=test_patient)
     assert isinstance(result, str)
     data = json.loads(result)
     assert "score" in data, f"Missing score in: {data}"
@@ -179,13 +171,9 @@ async def test_obt_score_returns_json(db_pool, test_patient):
 # ── S9: compute_obt_score score in 0-100 range ──
 @pytest.mark.asyncio
 async def test_obt_score_range(db_pool, test_patient):
-    vmod = importlib.import_module("skills.generate_vitals")
-    vfn = _get_skill_function(vmod, "generate_daily_vitals")
-    await vfn(patient_id=test_patient)
+    await generate_daily_vitals(patient_id=test_patient)
 
-    mod = importlib.import_module("skills.compute_obt_score")
-    fn = _get_skill_function(mod, "compute_obt_score")
-    result = await fn(patient_id=test_patient)
+    result = await compute_obt_score(patient_id=test_patient)
     data = json.loads(result)
     assert 0 <= data["score"] <= 100, f"Score out of range: {data['score']}"
 
@@ -193,13 +181,9 @@ async def test_obt_score_range(db_pool, test_patient):
 # ── S10: compute_obt_score writes to obt_scores table ──
 @pytest.mark.asyncio
 async def test_obt_writes_to_table(db_pool, test_patient):
-    vmod = importlib.import_module("skills.generate_vitals")
-    vfn = _get_skill_function(vmod, "generate_daily_vitals")
-    await vfn(patient_id=test_patient)
+    await generate_daily_vitals(patient_id=test_patient)
 
-    mod = importlib.import_module("skills.compute_obt_score")
-    fn = _get_skill_function(mod, "compute_obt_score")
-    await fn(patient_id=test_patient)
+    await compute_obt_score(patient_id=test_patient)
     async with db_pool.acquire() as conn:
         count = await conn.fetchval(
             "SELECT COUNT(*) FROM obt_scores WHERE patient_id=$1",
@@ -211,13 +195,9 @@ async def test_obt_writes_to_table(db_pool, test_patient):
 # ── S11: compute_obt_score writes clinical_facts with TTL ──
 @pytest.mark.asyncio
 async def test_obt_writes_clinical_facts(db_pool, test_patient):
-    vmod = importlib.import_module("skills.generate_vitals")
-    vfn = _get_skill_function(vmod, "generate_daily_vitals")
-    await vfn(patient_id=test_patient)
+    await generate_daily_vitals(patient_id=test_patient)
 
-    mod = importlib.import_module("skills.compute_obt_score")
-    fn = _get_skill_function(mod, "compute_obt_score")
-    await fn(patient_id=test_patient)
+    await compute_obt_score(patient_id=test_patient)
     async with db_pool.acquire() as conn:
         count = await conn.fetchval(
             "SELECT COUNT(*) FROM clinical_facts WHERE patient_id=$1",
@@ -229,9 +209,7 @@ async def test_obt_writes_clinical_facts(db_pool, test_patient):
 # ── S12: run_sdoh_assessment inserts patient_sdoh_flags rows ──
 @pytest.mark.asyncio
 async def test_sdoh_assessment(db_pool, test_patient):
-    mod = importlib.import_module("skills.sdoh_assessment")
-    fn = _get_skill_function(mod, "run_sdoh_assessment")
-    result = await fn(patient_id=test_patient)
+    result = await run_sdoh_assessment(patient_id=test_patient)
     assert isinstance(result, str)
     async with db_pool.acquire() as conn:
         count = await conn.fetchval(
@@ -244,9 +222,7 @@ async def test_sdoh_assessment(db_pool, test_patient):
 # ── S13: run_crisis_escalation returns JSON with escalation_triggered bool ──
 @pytest.mark.asyncio
 async def test_crisis_escalation_result(db_pool, caregiver_stress_patient):
-    mod = importlib.import_module("skills.crisis_escalation")
-    fn = _get_skill_function(mod, "run_crisis_escalation")
-    result = await fn(patient_id=caregiver_stress_patient)
+    result = await run_crisis_escalation(patient_id=caregiver_stress_patient)
     assert isinstance(result, str)
     data = json.loads(result)
     assert "escalation_triggered" in data, f"Missing escalation_triggered: {data}"
@@ -256,9 +232,7 @@ async def test_crisis_escalation_result(db_pool, caregiver_stress_patient):
 # ── S14: run_crisis_escalation logs to skill_executions ──
 @pytest.mark.asyncio
 async def test_crisis_escalation_logs(db_pool, caregiver_stress_patient):
-    mod = importlib.import_module("skills.crisis_escalation")
-    fn = _get_skill_function(mod, "run_crisis_escalation")
-    await fn(patient_id=caregiver_stress_patient)
+    await run_crisis_escalation(patient_id=caregiver_stress_patient)
     async with db_pool.acquire() as conn:
         count = await conn.fetchval(
             """

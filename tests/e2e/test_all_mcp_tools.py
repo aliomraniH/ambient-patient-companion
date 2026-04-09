@@ -8,7 +8,7 @@ hospitalised): BP spiked past 170, sleep dropped below 5 h, mood 1/5 for four
 consecutive days.  By March 2026 she is recovering.  A pre-visit brief was
 generated for her Feb 14 appointment, and a food-access nudge fires at month end.
 
-Group A: mcp-server skills  (UC-01 → UC-10)  — called via MockMCP pattern
+Group A: mcp-server skills  (UC-01 → UC-10)  — called via direct imports
 Group B: Phase 1 Clinical Intelligence server (UC-11 → UC-15) — called via HTTP
 """
 
@@ -35,6 +35,14 @@ _p = _mcp_server_path()
 if _p not in sys.path:
     sys.path.insert(0, _p)
 
+from skills.generate_vitals import generate_daily_vitals
+from skills.generate_checkins import generate_daily_checkins
+from skills.compute_obt_score import compute_obt_score
+from skills.sdoh_assessment import run_sdoh_assessment
+from skills.crisis_escalation import run_crisis_escalation
+from skills.food_access_nudge import run_food_access_nudge
+from skills.compute_provider_risk import compute_provider_risk
+
 # ---- shared helpers ---------------------------------------------------------
 
 PHASE1_BASE = os.environ.get("MCP_CLINICAL_INTELLIGENCE_URL", "http://localhost:8000")
@@ -47,9 +55,10 @@ PROVIDER_RISK_DATE = "2026-03-31"
 
 
 def _get_skill_fn(module_path: str, skill_name: str):
-    """Extract the async tool function from a skill module using MockMCP.
+    """Extract the async tool function from a skill module.
 
-    Mirrors the pattern in mcp-server/tests/test_skills.py.
+    Kept for modules that still use register() internally (e.g. ingestion_tools,
+    previsit_brief).
     """
     captured: dict = {}
 
@@ -106,8 +115,7 @@ async def test_uc02_generate_daily_vitals(maria_chen):
     """
     pid = maria_chen["patient_id"]
 
-    fn = _get_skill_fn("skills.generate_vitals", "generate_daily_vitals")
-    result = await fn(patient_id=pid, target_date="2026-04-05")
+    result = await generate_daily_vitals(patient_id=pid, target_date="2026-04-05")
 
     assert result.startswith("OK"), f"Unexpected result: {result}"
     assert "vital readings" in result
@@ -122,8 +130,7 @@ async def test_uc03_generate_daily_checkins(maria_chen):
     """
     pid = maria_chen["patient_id"]
 
-    fn = _get_skill_fn("skills.generate_checkins", "generate_daily_checkins")
-    result = await fn(patient_id=pid, target_date="2026-04-05", scenario="normal")
+    result = await generate_daily_checkins(patient_id=pid, target_date="2026-04-05", scenario="normal")
 
     assert result.startswith("OK"), f"Unexpected: {result}"
     assert "check-in" in result
@@ -139,8 +146,7 @@ async def test_uc04_compute_obt_score(maria_chen):
     """
     pid = maria_chen["patient_id"]
 
-    fn = _get_skill_fn("skills.compute_obt_score", "compute_obt_score")
-    raw = await fn(patient_id=pid, score_date=OBT_DATE)
+    raw = await compute_obt_score(patient_id=pid, score_date=OBT_DATE)
 
     assert not raw.startswith("Error"), f"OBT error: {raw}"
     data = json.loads(raw)
@@ -165,8 +171,7 @@ async def test_uc05_run_crisis_escalation(maria_chen):
     """
     pid = maria_chen["patient_id"]
 
-    fn = _get_skill_fn("skills.crisis_escalation", "run_crisis_escalation")
-    raw = await fn(patient_id=pid, check_date=CRISIS_DATE)
+    raw = await run_crisis_escalation(patient_id=pid, check_date=CRISIS_DATE)
 
     assert not raw.startswith("Error"), f"Crisis error: {raw}"
     data = json.loads(raw)
@@ -189,8 +194,7 @@ async def test_uc06_run_sdoh_assessment(maria_chen):
     """
     pid = maria_chen["patient_id"]
 
-    fn = _get_skill_fn("skills.sdoh_assessment", "run_sdoh_assessment")
-    raw = await fn(patient_id=pid, screening_date="2025-10-05")
+    raw = await run_sdoh_assessment(patient_id=pid, screening_date="2025-10-05")
 
     assert not raw.startswith("Error"), f"SDOH error: {raw}"
     assert pid in raw or "flag" in raw.lower(), (
@@ -272,8 +276,7 @@ async def test_uc09_run_food_access_nudge(maria_chen):
     """
     pid = maria_chen["patient_id"]
 
-    fn = _get_skill_fn("skills.food_access_nudge", "run_food_access_nudge")
-    raw = await fn(patient_id=pid, current_date=FOOD_NUDGE_DATE)
+    raw = await run_food_access_nudge(patient_id=pid, current_date=FOOD_NUDGE_DATE)
 
     assert not raw.startswith("Error"), f"Food nudge error: {raw}"
     data = json.loads(raw)
@@ -295,8 +298,7 @@ async def test_uc10_compute_provider_risk(maria_chen):
     """
     pid = maria_chen["patient_id"]
 
-    fn = _get_skill_fn("skills.compute_provider_risk", "compute_provider_risk")
-    raw = await fn(patient_id=pid, score_date=PROVIDER_RISK_DATE)
+    raw = await compute_provider_risk(patient_id=pid, score_date=PROVIDER_RISK_DATE)
 
     assert not raw.startswith("Error"), f"Provider risk error: {raw}"
     data = json.loads(raw)

@@ -17,6 +17,16 @@ from datetime import date, datetime, timedelta
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
+from skills.base import get_data_track
+from skills.generate_vitals import generate_daily_vitals
+from skills.generate_checkins import generate_daily_checkins
+from skills.compute_obt_score import compute_obt_score
+from skills.sdoh_assessment import run_sdoh_assessment
+from skills.crisis_escalation import run_crisis_escalation
+from skills.food_access_nudge import run_food_access_nudge
+from skills.compute_provider_risk import compute_provider_risk
+from skills.generate_patient import generate_patient
+
 
 async def run_daily_pipeline(
     patient_id: str,
@@ -46,74 +56,51 @@ async def run_daily_pipeline(
         "errors": [],
     }
 
-    # Step 1: Freshness check
+    # Step 1: Freshness check + ingestion if stale
     try:
         async with pool.acquire() as conn:
+            data_track = await get_data_track(conn)
             freshness = await conn.fetchrow(
                 """
                 SELECT is_stale FROM source_freshness
                 WHERE patient_id = $1 AND source_name = $2
                 """,
                 patient_id,
-                os.environ.get("DATA_TRACK", "synthea"),
+                data_track,
             )
             if freshness and freshness["is_stale"]:
                 logger.info("Data stale for %s, running ingestion", patient_id)
-                # Ingestion would run here; for Phase 1 with Synthea
-                # data is seeded once, so freshness is typically not stale.
+                from ingestion.pipeline import IngestionPipeline
+                pipeline = IngestionPipeline(adapter_name=data_track, pool=pool)
+                ing_result = await pipeline.run(
+                    patient_id=patient_id,
+                    triggered_by="orchestrator_freshness",
+                )
+                logger.info(
+                    "Ingestion result for %s: %s", patient_id, ing_result.status
+                )
     except Exception as e:
         logger.error("Freshness check failed for %s: %s", patient_id, e)
 
     # Step 2: Run skills in order
     skill_sequence = [
-        ("generate_daily_vitals", {"patient_id": patient_id, "target_date": today_str}),
-        ("generate_daily_checkins", {"patient_id": patient_id, "target_date": today_str}),
-        ("compute_obt_score", {"patient_id": patient_id, "score_date": today_str}),
-        ("run_sdoh_assessment", {"patient_id": patient_id}),
-        ("run_crisis_escalation", {"patient_id": patient_id, "check_date": today_str}),
-        ("run_food_access_nudge", {"patient_id": patient_id, "current_date": today_str}),
-        ("compute_provider_risk", {"patient_id": patient_id, "score_date": today_str}),
+        ("generate_daily_vitals", generate_daily_vitals, {"patient_id": patient_id, "target_date": today_str}),
+        ("generate_daily_checkins", generate_daily_checkins, {"patient_id": patient_id, "target_date": today_str}),
+        ("compute_obt_score", compute_obt_score, {"patient_id": patient_id, "score_date": today_str}),
+        ("run_sdoh_assessment", run_sdoh_assessment, {"patient_id": patient_id}),
+        ("run_crisis_escalation", run_crisis_escalation, {"patient_id": patient_id, "check_date": today_str}),
+        ("run_food_access_nudge", run_food_access_nudge, {"patient_id": patient_id, "current_date": today_str}),
+        ("compute_provider_risk", compute_provider_risk, {"patient_id": patient_id, "score_date": today_str}),
     ]
 
-    # Import skill modules dynamically
-    import importlib
-
-    for skill_name, kwargs in skill_sequence:
+    for skill_name, skill_fn, kwargs in skill_sequence:
         try:
             if force_fail_skill and skill_name == force_fail_skill:
                 raise Exception(f"Forced failure for testing: {skill_name}")
 
-            # Map skill tool names to module names
-            module_map = {
-                "generate_daily_vitals": "skills.generate_vitals",
-                "generate_daily_checkins": "skills.generate_checkins",
-                "compute_obt_score": "skills.compute_obt_score",
-                "run_sdoh_assessment": "skills.sdoh_assessment",
-                "run_crisis_escalation": "skills.crisis_escalation",
-                "run_food_access_nudge": "skills.food_access_nudge",
-                "compute_provider_risk": "skills.compute_provider_risk",
-            }
-
-            # For the orchestrator, we call the skill functions directly
-            # rather than through MCP, since we're running server-side.
-            module = importlib.import_module(module_map[skill_name])
-
-            # Each skill module has a register() that creates the tool.
-            # We need to call the inner async function directly.
-            # The tool functions are defined inside register() so we
-            # re-import and call them through a helper pattern.
-            from db.connection import get_pool as _get_pool
-            _pool = await _get_pool()
-
-            # Build a simple FastMCP mock to capture the tool function
-            tool_fn = _get_skill_function(module, skill_name)
-            if tool_fn:
-                result = await tool_fn(**kwargs)
-                logger.info("Skill %s: %s", skill_name, result[:100] if result else "OK")
-                results["skills_succeeded"] += 1
-            else:
-                logger.warning("Could not find tool function for %s", skill_name)
-                results["skills_failed"] += 1
+            result = await skill_fn(**kwargs)
+            logger.info("Skill %s: %s", skill_name, result[:100] if result else "OK")
+            results["skills_succeeded"] += 1
 
         except Exception as e:
             logger.error("Skill %s failed: %s", skill_name, e)
@@ -123,6 +110,7 @@ async def run_daily_pipeline(
     # Log pipeline run
     try:
         async with pool.acquire() as conn:
+            data_track = await get_data_track(conn)
             await conn.execute(
                 """
                 INSERT INTO pipeline_runs
@@ -132,33 +120,12 @@ async def run_daily_pipeline(
                 """,
                 str(uuid.uuid4()), datetime.utcnow(), 1,
                 results["skills_succeeded"], results["skills_failed"],
-                json.dumps(results), "synthea",
+                json.dumps(results), data_track,
             )
     except Exception as e:
         logger.error("Failed to log pipeline run: %s", e)
 
     return results
-
-
-def _get_skill_function(module, skill_name: str):
-    """Extract the async tool function from a skill module.
-
-    Skill modules define their tool inside register(mcp). We use a
-    lightweight capture approach to get the function reference.
-    """
-    captured = {}
-
-    class MockMCP:
-        def tool(self, fn):
-            captured[fn.__name__] = fn
-            return fn
-
-    try:
-        module.register(MockMCP())
-    except Exception:
-        pass
-
-    return captured.get(skill_name)
 
 
 async def run_seed_pipeline(
@@ -198,21 +165,6 @@ async def run_seed_pipeline(
 
     logger.info("Seeding %d patients with %d months of data", len(files), months)
 
-    # Get skill functions
-    import skills.generate_patient as gp_mod
-    import skills.generate_vitals as gv_mod
-    import skills.generate_checkins as gc_mod
-    import skills.compute_obt_score as obt_mod
-    import skills.sdoh_assessment as sdoh_mod
-    import skills.compute_provider_risk as pr_mod
-
-    generate_patient_fn = _get_skill_function(gp_mod, "generate_patient")
-    generate_vitals_fn = _get_skill_function(gv_mod, "generate_daily_vitals")
-    generate_checkins_fn = _get_skill_function(gc_mod, "generate_daily_checkins")
-    compute_obt_fn = _get_skill_function(obt_mod, "compute_obt_score")
-    sdoh_fn = _get_skill_function(sdoh_mod, "run_sdoh_assessment")
-    provider_risk_fn = _get_skill_function(pr_mod, "compute_provider_risk")
-
     summary = {
         "patients_imported": 0,
         "vitals_days": 0,
@@ -227,7 +179,7 @@ async def run_seed_pipeline(
     for filepath in files:
         try:
             # Step 1: Import patient
-            result = await generate_patient_fn(synthea_file=filepath)
+            result = await generate_patient(synthea_file=filepath)
             if result.startswith("Error"):
                 logger.error("Patient import failed: %s", result)
                 summary["errors"].append(result)
@@ -244,13 +196,13 @@ async def run_seed_pipeline(
             while current <= today:
                 day_str = str(current)
                 try:
-                    await generate_vitals_fn(patient_id=patient_id, target_date=day_str)
+                    await generate_daily_vitals(patient_id=patient_id, target_date=day_str)
                     summary["vitals_days"] += 1
                 except Exception as e:
                     logger.error("Vitals failed for %s on %s: %s", patient_id, day_str, e)
 
                 try:
-                    await generate_checkins_fn(patient_id=patient_id, target_date=day_str)
+                    await generate_daily_checkins(patient_id=patient_id, target_date=day_str)
                     summary["checkin_days"] += 1
                 except Exception as e:
                     logger.error("Checkins failed for %s on %s: %s", patient_id, day_str, e)
@@ -261,7 +213,7 @@ async def run_seed_pipeline(
             current = start_date
             while current <= today:
                 try:
-                    await compute_obt_fn(patient_id=patient_id, score_date=str(current))
+                    await compute_obt_score(patient_id=patient_id, score_date=str(current))
                     summary["obt_scores"] += 1
                 except Exception as e:
                     logger.error("OBT failed for %s on %s: %s", patient_id, current, e)
@@ -269,26 +221,27 @@ async def run_seed_pipeline(
 
             # Always compute today's OBT
             try:
-                await compute_obt_fn(patient_id=patient_id, score_date=str(today))
+                await compute_obt_score(patient_id=patient_id, score_date=str(today))
                 summary["obt_scores"] += 1
             except Exception:
                 pass
 
             # Step 4: SDoH assessment
             try:
-                await sdoh_fn(patient_id=patient_id)
+                await run_sdoh_assessment(patient_id=patient_id)
             except Exception as e:
                 logger.error("SDoH failed for %s: %s", patient_id, e)
 
             # Step 5: Provider risk
             try:
-                await provider_risk_fn(patient_id=patient_id, score_date=str(today))
+                await compute_provider_risk(patient_id=patient_id, score_date=str(today))
             except Exception as e:
                 logger.error("Provider risk failed for %s: %s", patient_id, e)
 
             # Step 6: Update source_freshness
             try:
                 async with pool.acquire() as conn:
+                    data_track = await get_data_track(conn)
                     await conn.execute(
                         """
                         INSERT INTO source_freshness
@@ -299,8 +252,8 @@ async def run_seed_pipeline(
                             last_ingested_at = EXCLUDED.last_ingested_at,
                             records_count = EXCLUDED.records_count
                         """,
-                        str(uuid.uuid4()), patient_id, "synthea",
-                        datetime.utcnow(), summary["vitals_days"], 8760, "synthea",
+                        str(uuid.uuid4()), patient_id, data_track,
+                        datetime.utcnow(), summary["vitals_days"], 8760, data_track,
                     )
             except Exception as e:
                 logger.error("Freshness update failed for %s: %s", patient_id, e)
