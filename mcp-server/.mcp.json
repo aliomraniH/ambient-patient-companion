@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "patient-companion": {
+    "ambient-skills-companion": {
       "command": "python",
       "args": ["server.py"],
       "env": {

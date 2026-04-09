@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 # Server instance
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("ClinicalIntelligence")
+mcp = FastMCP("ambient-clinical-intelligence")
 
 # ---------------------------------------------------------------------------
 # Guidelines loader
@@ -1929,7 +1929,7 @@ async def get_transfer_audit(
 
 @mcp.custom_route("/health", methods=["GET"])
 async def rest_health(request: Request) -> JSONResponse:
-    return JSONResponse({"ok": True, "server": "ClinicalIntelligence", "version": "1.0.0"})
+    return JSONResponse({"ok": True, "server": "ambient-clinical-intelligence", "version": "1.0.0"})
 
 
 @mcp.custom_route("/tools/clinical_query", methods=["POST"])

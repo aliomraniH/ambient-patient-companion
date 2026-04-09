@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 from fastmcp import FastMCP
 
-mcp = FastMCP("PatientIngestion")
+mcp = FastMCP("ambient-ingestion")
 
 
 @mcp.tool
