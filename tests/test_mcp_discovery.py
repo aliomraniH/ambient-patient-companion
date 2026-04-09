@@ -296,3 +296,48 @@ class TestCrossServerConsistency:
             f"submission/README.md must reference '{CLINICAL_NAME}' "
             "(e.g. in the GET /health response documentation)"
         )
+
+
+# ── Class 5: TestOAuthDiscovery (DN-24 to DN-26) ─────────────────────────────
+
+class TestOAuthDiscovery:
+    """OAuth 2.0 discovery layer required by Claude before connecting to remote MCP servers.
+
+    Without these endpoints, Claude reports 'server appears to be sleeping'.
+    """
+
+    def test_oauth_route_files_exist(self):
+        """DN-24: All 5 OAuth route files must exist under replit-app/app/."""
+        routes = [
+            "replit-app/app/.well-known/oauth-protected-resource/[[...slug]]/route.ts",
+            "replit-app/app/.well-known/oauth-authorization-server/route.ts",
+            "replit-app/app/register/route.ts",
+            "replit-app/app/authorize/route.ts",
+            "replit-app/app/token/route.ts",
+        ]
+        for path in routes:
+            assert Path(path).exists(), (
+                f"Missing OAuth route: {path}\n"
+                "Claude requires OAuth discovery endpoints before it can connect to a remote MCP server."
+            )
+
+    def test_oauth_store_lib_exists(self):
+        """DN-25: replit-app/lib/oauth-store.ts must exist (shared in-memory OAuth state)."""
+        assert Path("replit-app/lib/oauth-store.ts").exists(), (
+            "replit-app/lib/oauth-store.ts is missing — it stores registered clients, "
+            "auth codes, and access tokens for the OAuth layer."
+        )
+
+    def test_oauth_protected_resource_declares_auth_server(self):
+        """DN-26: /.well-known/oauth-protected-resource route must declare authorization_servers."""
+        src = Path(
+            "replit-app/app/.well-known/oauth-protected-resource/[[...slug]]/route.ts"
+        ).read_text()
+        assert "authorization_servers" in src, (
+            "oauth-protected-resource route must include 'authorization_servers' in its response — "
+            "this tells Claude where to find the OAuth authorization server."
+        )
+        assert "REPLIT_DEV_DOMAIN" in src, (
+            "oauth-protected-resource route must use REPLIT_DEV_DOMAIN env var so the "
+            "URL is always correct for the current deployment."
+        )
