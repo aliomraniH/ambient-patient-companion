@@ -335,6 +335,30 @@ class DeliberationEngine:
                             item.get("priority"),
                             item.get("confidence") or item.get("probability"),
                         )
+
+                # ── Flag lifecycle: write flags to registry + review ──
+                try:
+                    from .flag_writer import write_flag
+                    from .flag_reviewer import run_flag_review
+
+                    for item in final_output.get("missing_data_flags", []):
+                        if isinstance(item, dict):
+                            await write_flag(
+                                conn, request.patient_id,
+                                deliberation_id, item,
+                            )
+
+                    await run_flag_review(
+                        self.db_pool, request.patient_id,
+                        "post_deliberation", deliberation_id,
+                        f"New deliberation {deliberation_id}",
+                    )
+                except Exception as flag_err:
+                    log.warning(
+                        "Post-deliberation flag lifecycle failed (non-fatal): %s",
+                        flag_err,
+                    )
+
         except Exception as e:
             log.error("Failed to commit deliberation: %s", e)
             return {
