@@ -190,7 +190,7 @@ async function getGuideline(recommendationId) {
 /**
  * Fetch synthetic patient data by MRN.
  *
- * @param {string} mrn - Medical record number (e.g., '4829341' for Maria Chen)
+ * @param {string} mrn - Medical record number to look up in the database
  * @returns {Promise<Object>} The patient data or error object
  */
 async function getSyntheticPatient(mrn) {

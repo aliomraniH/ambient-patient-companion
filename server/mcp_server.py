@@ -5,7 +5,7 @@ Provides 15 tools:
 2.  get_guideline               — Fetch specific guideline by recommendation ID
 3.  check_screening_due         — Return overdue USPSTF screenings for a patient
 4.  flag_drug_interaction       — Return known drug interactions
-5.  get_synthetic_patient       — Return canonical demo patient (Maria Chen)
+5.  get_synthetic_patient       — Return patient record by MRN from the database
 6.  use_healthex                — Switch data track to HealthEx real records
 7.  use_demo_data               — Switch data track to Synthea demo data
 8.  switch_data_track           — Switch data track to a named source
@@ -555,175 +555,102 @@ async def flag_drug_interaction(medications: list[str]) -> list[dict]:
 # Tool 5: get_synthetic_patient
 # ---------------------------------------------------------------------------
 
-# Canonical demo patient — Maria Chen, MRN 4829341
-_MARIA_CHEN: dict = {
-    "mrn": "4829341",
-    "first_name": "Maria",
-    "last_name": "Chen",
-    "date_of_birth": "1972-03-15",
-    "age": 54,
-    "sex": "female",
-    "gender": "female",
-    "race": "Asian",
-    "ethnicity": "Chinese American",
-    "preferred_language": "English",
-    "address": {
-        "line": "742 Maple Drive",
-        "city": "Riverside",
-        "state": "CA",
-        "zip": "92501",
-    },
-    "insurance": {
-        "type": "commercial",
-        "plan": "Blue Cross PPO",
-        "member_id": "BCX892741",
-    },
-    "primary_care_provider": {
-        "name": "Dr. Rahul Patel",
-        "practice": "Patel Family Medicine",
-        "npi": "1234567890",
-    },
-    "conditions": [
-        {
-            "code": "E11.9",
-            "display": "Type 2 diabetes mellitus without complications",
-            "clinical_status": "active",
-            "onset_date": "2019-06-15",
-        },
-        {
-            "code": "I10",
-            "display": "Essential hypertension",
-            "clinical_status": "active",
-            "onset_date": "2018-03-22",
-        },
-        {
-            "code": "E78.5",
-            "display": "Hyperlipidemia, unspecified",
-            "clinical_status": "active",
-            "onset_date": "2018-09-10",
-        },
-        {
-            "code": "E66.01",
-            "display": "Morbid (severe) obesity due to excess calories",
-            "clinical_status": "active",
-            "onset_date": "2017-01-08",
-        },
-    ],
-    "medications": [
-        {
-            "name": "metformin",
-            "dose": "1000 mg",
-            "frequency": "twice daily",
-            "status": "active",
-            "start_date": "2019-07-01",
-        },
-        {
-            "name": "lisinopril",
-            "dose": "20 mg",
-            "frequency": "once daily",
-            "status": "active",
-            "start_date": "2018-04-15",
-        },
-        {
-            "name": "atorvastatin",
-            "dose": "40 mg",
-            "frequency": "once daily at bedtime",
-            "status": "active",
-            "start_date": "2018-10-01",
-        },
-    ],
-    "labs": {
-        "hba1c": {"value": 7.8, "unit": "%", "date": "2026-02-15", "reference_range": "<7.0"},
-        "egfr": {"value": 62, "unit": "mL/min/1.73m2", "date": "2026-02-15", "reference_range": ">60"},
-        "ldl": {"value": 128, "unit": "mg/dL", "date": "2026-02-15", "reference_range": "<100"},
-        "creatinine": {"value": 1.2, "unit": "mg/dL", "date": "2026-02-15", "reference_range": "0.6-1.2"},
-        "uacr": {"value": 45, "unit": "mg/g", "date": "2026-02-15", "reference_range": "<30"},
-        "fasting_glucose": {"value": 156, "unit": "mg/dL", "date": "2026-03-01", "reference_range": "70-100"},
-        "total_cholesterol": {"value": 218, "unit": "mg/dL", "date": "2026-02-15", "reference_range": "<200"},
-        "triglycerides": {"value": 185, "unit": "mg/dL", "date": "2026-02-15", "reference_range": "<150"},
-        "potassium": {"value": 4.2, "unit": "mEq/L", "date": "2026-02-15", "reference_range": "3.5-5.0"},
-    },
-    "vitals": {
-        "blood_pressure": {"systolic": 142, "diastolic": 88, "date": "2026-03-20"},
-        "heart_rate": {"value": 78, "unit": "bpm", "date": "2026-03-20"},
-        "bmi": {"value": 33.2, "unit": "kg/m2", "date": "2026-03-20"},
-        "weight": {"value": 89.5, "unit": "kg", "date": "2026-03-20"},
-        "height": {"value": 164, "unit": "cm", "date": "2026-03-20"},
-    },
-    "care_gaps": [
-        {
-            "type": "screening",
-            "description": "Colorectal cancer screening overdue — last colonoscopy 2015",
-            "uspstf_grade": "A",
-            "status": "open",
-        },
-        {
-            "type": "screening",
-            "description": "Depression screening (PHQ-9) not completed in past 12 months",
-            "uspstf_grade": "B",
-            "status": "open",
-        },
-        {
-            "type": "monitoring",
-            "description": "Diabetic retinopathy exam overdue — last exam 2024-01",
-            "status": "open",
-        },
-        {
-            "type": "monitoring",
-            "description": "Podiatry referral for annual diabetic foot exam — not completed",
-            "status": "open",
-        },
-    ],
-    "sdoh_flags": [
-        {
-            "domain": "food_access",
-            "severity": "moderate",
-            "detail": "Reports difficulty affording fresh produce; relies on processed foods",
-        },
-        {
-            "domain": "transportation",
-            "severity": "low",
-            "detail": "Occasional difficulty getting to appointments; depends on family for rides",
-        },
-    ],
-    "family_history": [
-        {"condition": "Type 2 diabetes", "relation": "mother"},
-        {"condition": "Coronary artery disease", "relation": "father", "age_of_onset": 58},
-        {"condition": "Breast cancer", "relation": "maternal aunt", "age_of_onset": 62},
-    ],
-    "social_history": {
-        "tobacco": "never",
-        "alcohol": "occasional — 1-2 glasses wine per week",
-        "exercise": "walks 20 min 3x/week",
-        "occupation": "administrative assistant",
-        "marital_status": "married",
-    },
-    "allergies": [
-        {"substance": "sulfa drugs", "reaction": "rash", "severity": "moderate"},
-    ],
-}
-
-
 @mcp.tool()
 async def get_synthetic_patient(mrn: str) -> dict:
-    """Return synthetic patient data for the given MRN.
+    """Return patient record for the given MRN from the database.
 
-    Maria Chen (MRN 4829341) is the canonical demo patient with conditions
-    appropriate for demonstrating diabetes management, cardiovascular risk,
-    and preventive care gaps.
+    Queries the live patients table plus related conditions, medications,
+    recent labs, and care gaps. Works for any MRN in the system.
 
     Args:
-        mrn: Medical record number (e.g., '4829341').
+        mrn: Medical record number to look up.
 
     Returns:
-        Full synthetic patient record dict, or error dict if MRN not found.
+        Patient record dict, or error dict if MRN not found.
     """
-    if mrn == "4829341":
-        return _MARIA_CHEN
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        patient = await conn.fetchrow(
+            """SELECT id, mrn, first_name, last_name, birth_date, gender,
+                      race, ethnicity, address_line, city, state, zip_code,
+                      insurance_type, is_synthetic, data_source, created_at
+               FROM patients WHERE mrn = $1""",
+            mrn,
+        )
+        if not patient:
+            return {
+                "error": f"Patient with MRN '{mrn}' not found.",
+                "hint": "Pass a valid MRN from the patients table.",
+            }
+
+        pid = str(patient["id"])
+
+        conditions = await conn.fetch(
+            """SELECT code, display, clinical_status,
+                      onset_date::text AS onset_date
+               FROM patient_conditions WHERE patient_id = $1::uuid
+               ORDER BY onset_date DESC NULLS LAST""",
+            pid,
+        )
+
+        medications = await conn.fetch(
+            """SELECT code, display, status,
+                      authored_on::text AS authored_on
+               FROM patient_medications WHERE patient_id = $1::uuid
+               ORDER BY authored_on DESC NULLS LAST""",
+            pid,
+        )
+
+        labs = await conn.fetch(
+            """SELECT metric_type, result_numeric, result_text,
+                      result_unit, reference_text, is_out_of_range,
+                      measured_at::text AS measured_at
+               FROM biometric_readings
+               WHERE patient_id = $1::uuid
+                 AND metric_type IS NOT NULL
+               ORDER BY measured_at DESC
+               LIMIT 20""",
+            pid,
+        )
+
+        care_gaps = await conn.fetch(
+            """SELECT gap_type, description, status,
+                      identified_date::text AS identified_date
+               FROM care_gaps WHERE patient_id = $1::uuid
+               ORDER BY identified_date DESC""",
+            pid,
+        )
+
+    dob = patient["birth_date"]
+    age = None
+    if dob:
+        from datetime import date
+        today = date.today()
+        age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
 
     return {
-        "error": f"Patient with MRN '{mrn}' not found.",
-        "hint": "Use MRN '4829341' for the canonical demo patient (Maria Chen).",
+        "id": pid,
+        "mrn": patient["mrn"],
+        "first_name": patient["first_name"] or "",
+        "last_name": patient["last_name"] or "",
+        "date_of_birth": dob.isoformat() if dob else None,
+        "age": age,
+        "gender": patient["gender"],
+        "race": patient["race"],
+        "ethnicity": patient["ethnicity"],
+        "address": {
+            "line": patient["address_line"],
+            "city": patient["city"],
+            "state": patient["state"],
+            "zip": patient["zip_code"],
+        },
+        "insurance": {"type": patient["insurance_type"]},
+        "is_synthetic": patient["is_synthetic"],
+        "data_source": patient["data_source"],
+        "conditions": [dict(r) for r in conditions],
+        "medications": [dict(r) for r in medications],
+        "recent_labs": [dict(r) for r in labs],
+        "care_gaps": [dict(r) for r in care_gaps],
     }
 
 

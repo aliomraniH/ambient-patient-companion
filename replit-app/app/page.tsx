@@ -1,5 +1,6 @@
 import { query } from "@/lib/db";
 import Link from "next/link";
+import PatientManager from "@/components/PatientManager";
 
 export const dynamic = "force-dynamic";
 
@@ -62,6 +63,17 @@ export default async function HomePage() {
           </code>
         </div>
       )}
+
+      <div className="mb-6">
+        <PatientManager patients={patients.map((p: any) => ({
+          id: p.id,
+          mrn: p.mrn,
+          first_name: p.first_name,
+          last_name: p.last_name,
+          birth_date: p.birth_date ? String(p.birth_date) : null,
+          gender: p.gender,
+        }))} />
+      </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {patients.map((p: any) => (
