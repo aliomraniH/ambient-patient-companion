@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "ambient-clinical-intelligence": {
+      "url": "http://localhost:8001/mcp",
+      "transport": "streamable-http",
+      "description": "ClinicalIntelligence — Phase 1+2 clinical decision support, deliberation engine, 19 tools"
+    },
+    "ambient-skills-companion": {
+      "url": "http://localhost:8002/mcp",
+      "transport": "streamable-http",
+      "description": "PatientCompanion — skills server (OBT score, SDOH, nudges, pre-visit brief, vitals), 17 tools"
+    },
+    "ambient-ingestion": {
+      "url": "http://localhost:8003/mcp",
+      "transport": "streamable-http",
+      "description": "PatientIngestion — HealthEx adaptive ingestion pipeline, 1 tool"
+    }
+  }
+}
