@@ -26,10 +26,13 @@ import pytest
 
 BASE = "http://localhost:8001"
 
-CLINICAL_NAME   = "ClinicalIntelligence"
-SKILLS_NAME     = "PatientCompanion"
-INGESTION_NAME  = "PatientIngestion"
+# FastMCP constructor names — must match FastMCP("<name>") in each server module
+# and the mcpServers keys in .mcp.json
+CLINICAL_NAME   = "ambient-clinical-intelligence"
+SKILLS_NAME     = "ambient-skills-companion"
+INGESTION_NAME  = "ambient-ingestion"
 
+# .mcp.json discovery keys (same as FastMCP names for this project)
 CLINICAL_MCP_KEY    = "ambient-clinical-intelligence"
 SKILLS_MCP_KEY      = "ambient-skills-companion"
 INGESTION_MCP_KEY   = "ambient-ingestion"
@@ -56,21 +59,21 @@ class TestServerNaming:
     """FastMCP constructor names must be consistent across all discovery surfaces."""
 
     def test_clinical_mcp_name(self):
-        """DN-1: server/mcp_server.py must declare FastMCP("ClinicalIntelligence")."""
+        """DN-1: server/mcp_server.py must declare FastMCP("ambient-clinical-intelligence")."""
         src = Path("server/mcp_server.py").read_text()
         assert f'FastMCP("{CLINICAL_NAME}")' in src, (
             f"Expected FastMCP(\"{CLINICAL_NAME}\") in server/mcp_server.py"
         )
 
     def test_skills_mcp_name(self):
-        """DN-2: mcp-server/server.py must declare FastMCP("PatientCompanion")."""
+        """DN-2: mcp-server/server.py must declare FastMCP("ambient-skills-companion")."""
         src = Path("mcp-server/server.py").read_text()
         assert f'FastMCP("{SKILLS_NAME}")' in src, (
             f"Expected FastMCP(\"{SKILLS_NAME}\") in mcp-server/server.py"
         )
 
     def test_ingestion_mcp_name(self):
-        """DN-3: ingestion/server.py must declare FastMCP("PatientIngestion")."""
+        """DN-3: ingestion/server.py must declare FastMCP("ambient-ingestion")."""
         src = Path("ingestion/server.py").read_text()
         assert f'FastMCP("{INGESTION_NAME}")' in src, (
             f"Expected FastMCP(\"{INGESTION_NAME}\") in ingestion/server.py"
@@ -118,7 +121,7 @@ class TestHealthCheckContract:
 
     @_skip_no_server
     def test_health_server_name(self):
-        """DN-8: /health body 'server' field must be exactly 'ClinicalIntelligence'."""
+        """DN-8: /health body 'server' field must be exactly 'ambient-clinical-intelligence'."""
         r = httpx.get(f"{BASE}/health", timeout=3)
         body = r.json()
         assert body.get("server") == CLINICAL_NAME, (
@@ -204,17 +207,18 @@ class TestCrossServerConsistency:
     """Documentation must accurately reference all three FastMCP server names."""
 
     def test_replit_md_names_all_servers(self):
-        """DN-16: replit.md must mention all three FastMCP server names."""
+        """DN-16: replit.md must mention all three FastMCP server discovery names."""
         src = Path("replit.md").read_text()
         for name in (CLINICAL_NAME, SKILLS_NAME, INGESTION_NAME):
             assert name in src, (
-                f"replit.md is missing FastMCP server name '{name}'"
+                f"replit.md is missing FastMCP server discovery name '{name}'. "
+                "Add it to the server topology table."
             )
 
     def test_submission_readme_health_endpoint(self):
-        """DN-17: submission/README.md must reference ClinicalIntelligence in health-check docs."""
+        """DN-17: submission/README.md must reference the Clinical MCP server name in health-check docs."""
         src = Path("submission/README.md").read_text()
         assert CLINICAL_NAME in src, (
             f"submission/README.md must reference '{CLINICAL_NAME}' "
-            "(e.g. in the /health endpoint documentation)"
+            "(e.g. in the GET /health response documentation)"
         )
