@@ -230,7 +230,7 @@ Claude will:
 
 - **GitHub:** https://github.com/aliomraniH/ambient-patient-companion
 - **Issues:** https://github.com/aliomraniH/ambient-patient-companion/issues
-- **MCP server health check:** `GET /health` → `{"ok": true, "server": "ClinicalIntelligence", "version": "1.0.0"}`
+- **MCP server health check:** `GET /health` → `{"ok": true, "server": "ambient-clinical-intelligence", "version": "1.0.0"}`
 
 ---
 

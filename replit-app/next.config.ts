@@ -2,9 +2,9 @@ import type { NextConfig } from "next";
 
 const devDomain = process.env.REPLIT_DEV_DOMAIN || "";
 
-const MCP_CLINICAL   = "http://localhost:8001";  // ClinicalIntelligence  — 9 tools
-const MCP_SKILLS     = "http://localhost:8002";  // PatientCompanion      — 16 tools
-const MCP_INGESTION  = "http://localhost:8003";  // PatientIngestion      — 1 tool
+const MCP_CLINICAL   = "http://localhost:8001";  // ambient-clinical-intelligence — 19 tools
+const MCP_SKILLS     = "http://localhost:8002";  // ambient-skills-companion     — 17 tools
+const MCP_INGESTION  = "http://localhost:8003";  // ambient-ingestion            — 1 tool
 
 const nextConfig: NextConfig = {
   allowedDevOrigins: devDomain ? [devDomain] : [],
