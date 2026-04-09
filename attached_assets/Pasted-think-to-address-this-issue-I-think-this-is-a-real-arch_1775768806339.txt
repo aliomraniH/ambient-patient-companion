@@ -1,0 +1,30 @@
+think to address this issue:I think this is a real architecture mismatch in the branch, not just a Claude Web quirk.
+
+The codebase currently supports direct MCP/tool invocation, but it does not really support a separate “discover tools first via tool_search” flow. The clearest sign is shared/claude-client.js: the frontend never searches for tools. It calls fixed endpoints like /tools/clinical_query, /tools/check_screening_due, /tools/register_healthex_patient, /tools/ingest_from_healthex, and /tools/run_deliberation directly. That means the app is built around known tool names and direct execution, not dynamic discovery.
+
+There is also a naming mismatch between the docs and the actual MCP server. The docs say Claude Web should see a server named ambient-clinical-intelligence on /mcp, but the actual FastMCP server is instantiated as FastMCP("ClinicalIntelligence"). I do not see evidence in the branch that this alias is being declared in a checked-in MCP manifest. So if some layer is expecting the Claude-facing name from the docs, while the runtime is advertising ClinicalIntelligence, that can absolutely cause confusion around discovery and surfacing.
+
+There is a second contradiction: the docs say there are three public MCP servers proxied through Next.js — ClinicalIntelligence on port 8001, Skills on 8002, and Ingestion on 8003 — but start.sh only starts the Clinical Intelligence MCP server on 8001, plus the dashboard and Next.js. It does not start the skills server or the ingestion server in the deployed startup path. So the branch documentation describes a broader MCP topology than the actual runtime brings up.
+
+The proxy layer also points in the same direction. next.config.ts rewrites /mcp to the clinical MCP endpoint and rewrites /tools/:path* to the clinical server’s REST wrappers. That is a strong signal that the intended access pattern is: know the tool, call it directly. It is not set up as a tool catalog or search-first abstraction.
+
+So my read of the cause is:
+
+The branch is built for direct invocation, not tool discovery.
+The client hardcodes tool endpoints instead of discovering them first.
+Docs and runtime naming diverge.
+Docs say ambient-clinical-intelligence; code advertises ClinicalIntelligence.
+Docs and startup topology diverge.
+Docs promise 3 MCPs; startup launches only the clinical one.
+
+Because of that, the statement you saw — that the tools “aren’t surfacing through tool_search” and instead “need to be called via the Anthropic API with MCP server injection” — is directionally consistent with how this branch is written. The code is much closer to session-scoped injected MCP tools or direct endpoint execution than to a global searchable tool registry.
+
+The most likely concrete fix is to choose one contract and make the repo consistent:
+
+either make it a true Claude-facing MCP setup with one authoritative advertised server name and manifest,
+or keep the current direct-call model and stop implying tool_search-based discovery in the docs.
+
+The single most suspicious line, in practice, is the mismatch between documented Claude Web name and actual FastMCP server name:
+
+docs: ambient-clinical-intelligence
+code: FastMCP("ClinicalIntelligence")
