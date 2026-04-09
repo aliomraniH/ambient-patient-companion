@@ -24,7 +24,9 @@ import pytest
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-BASE = "http://localhost:8001"
+BASE          = "http://localhost:8001"
+BASE_SKILLS   = "http://localhost:8002"
+BASE_INGEST   = "http://localhost:8003"
 
 # FastMCP constructor names — must match FastMCP("<name>") in each server module
 # and the mcpServers keys in .mcp.json
@@ -140,6 +142,45 @@ class TestHealthCheckContract:
             f"version must be a non-empty string, got: {version!r}"
         )
 
+    def test_skills_health_returns_200(self):
+        """DN-18: /health on port 8002 must return HTTP 200 with server=ambient-skills-companion."""
+        try:
+            r = httpx.get(f"{BASE_SKILLS}/health", timeout=3)
+        except Exception as exc:
+            pytest.skip(f"Skills MCP server not reachable on port 8002: {exc}")
+        assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+        body = r.json()
+        assert body.get("ok") is True, f"Expected ok=True: {body}"
+        assert body.get("server") == SKILLS_NAME, (
+            f"Expected server='{SKILLS_NAME}', got '{body.get('server')}'"
+        )
+
+    def test_ingestion_health_returns_200(self):
+        """DN-19: /health on port 8003 must return HTTP 200 with server=ambient-ingestion."""
+        try:
+            r = httpx.get(f"{BASE_INGEST}/health", timeout=3)
+        except Exception as exc:
+            pytest.skip(f"Ingestion MCP server not reachable on port 8003: {exc}")
+        assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+        body = r.json()
+        assert body.get("ok") is True, f"Expected ok=True: {body}"
+        assert body.get("server") == INGESTION_NAME, (
+            f"Expected server='{INGESTION_NAME}', got '{body.get('server')}'"
+        )
+
+    def test_all_three_servers_have_health_routes(self):
+        """DN-20: All three server source files must declare a /health custom route."""
+        for path, name in [
+            ("server/mcp_server.py", CLINICAL_NAME),
+            ("mcp-server/server.py", SKILLS_NAME),
+            ("ingestion/server.py", INGESTION_NAME),
+        ]:
+            src = Path(path).read_text()
+            assert '"/health"' in src or "'/health'" in src, (
+                f"{path} is missing a /health custom_route declaration "
+                f"(FastMCP server: {name})"
+            )
+
 
 # ── Class 3: TestStartupTopology (DN-10 to DN-15) ────────────────────────────
 
@@ -163,20 +204,20 @@ class TestStartupTopology:
         )
 
     def test_start_sh_launches_skills_8002(self):
-        """DN-12: start.sh must launch the Skills/PatientCompanion server on port 8002."""
+        """DN-12: start.sh must launch the Skills server (ambient-skills-companion) on port 8002."""
         src = Path("start.sh").read_text()
         assert "8002" in src, (
-            "start.sh must reference port 8002 to launch the Skills MCP server (PatientCompanion)"
+            "start.sh must reference port 8002 to launch the Skills MCP server (ambient-skills-companion)"
         )
-        assert "mcp-server" in src or "mcp_server" in src.lower() or "PatientCompanion" in src or "server.py" in src, (
-            "start.sh must launch the mcp-server/server.py (PatientCompanion) process"
+        assert "mcp-server" in src or "mcp_server" in src.lower() or "server.py" in src, (
+            "start.sh must launch the mcp-server/server.py (ambient-skills-companion) process"
         )
 
     def test_start_sh_launches_ingestion_8003(self):
-        """DN-13: start.sh must launch the Ingestion/PatientIngestion server on port 8003."""
+        """DN-13: start.sh must launch the Ingestion server (ambient-ingestion) on port 8003."""
         src = Path("start.sh").read_text()
         assert "8003" in src, (
-            "start.sh must reference port 8003 to launch the Ingestion MCP server (PatientIngestion)"
+            "start.sh must reference port 8003 to launch the Ingestion MCP server (ambient-ingestion)"
         )
         assert "ingestion" in src.lower(), (
             "start.sh must launch the ingestion server (PatientIngestion) process"

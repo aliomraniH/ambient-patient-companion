@@ -8,8 +8,15 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 mcp = FastMCP("ambient-ingestion")
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def rest_health(request: Request) -> JSONResponse:
+    return JSONResponse({"ok": True, "server": "ambient-ingestion", "version": "1.0.0"})
 
 
 @mcp.tool

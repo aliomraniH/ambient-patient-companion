@@ -8,8 +8,15 @@ logger = logging.getLogger(__name__)
 
 from fastmcp import FastMCP
 from skills import load_skills
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 mcp = FastMCP("ambient-skills-companion")
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def rest_health(request: Request) -> JSONResponse:
+    return JSONResponse({"ok": True, "server": "ambient-skills-companion", "version": "1.0.0"})
 
 # Auto-discover and register all skill tools
 load_skills(mcp)
