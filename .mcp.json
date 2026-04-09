@@ -1,19 +1,19 @@
 {
   "mcpServers": {
     "ambient-clinical-intelligence": {
-      "url": "http://localhost:8001/mcp",
+      "url": "https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp",
       "transport": "streamable-http",
-      "description": "ClinicalIntelligence — Phase 1+2 clinical decision support, deliberation engine, 19 tools"
+      "description": "ambient-clinical-intelligence \u2014 Phase 1+2 clinical decision support, deliberation engine, 19 tools"
     },
     "ambient-skills-companion": {
-      "url": "http://localhost:8002/mcp",
+      "url": "https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-skills",
       "transport": "streamable-http",
-      "description": "PatientCompanion — skills server (OBT score, SDOH, nudges, pre-visit brief, vitals), 17 tools"
+      "description": "ambient-skills-companion \u2014 skills server (OBT score, SDOH, nudges, pre-visit brief, vitals), 17 tools"
     },
     "ambient-ingestion": {
-      "url": "http://localhost:8003/mcp",
+      "url": "https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-ingestion",
       "transport": "streamable-http",
-      "description": "PatientIngestion — HealthEx adaptive ingestion pipeline, 1 tool"
+      "description": "ambient-ingestion \u2014 HealthEx adaptive ingestion pipeline, 1 tool"
     }
   }
 }

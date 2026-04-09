@@ -100,6 +100,39 @@ class TestServerNaming:
                 f"Present keys: {list(servers.keys())}"
             )
 
+    def test_mcp_json_urls_are_public_https(self):
+        """DN-21: .mcp.json server URLs must use public HTTPS, not localhost.
+
+        Claude cannot reach localhost from outside Replit. All URLs must be
+        https:// pointing at the public proxy domain.
+        """
+        data = json.loads(Path(".mcp.json").read_text())
+        for key, srv in data.get("mcpServers", {}).items():
+            url = srv.get("url", "")
+            assert url.startswith("https://"), (
+                f".mcp.json server '{key}' URL must start with https://, got: {url!r}. "
+                "Run 'python scripts/generate_mcp_json.py' to regenerate from $REPLIT_DEV_DOMAIN."
+            )
+            assert "localhost" not in url, (
+                f".mcp.json server '{key}' URL must not reference localhost, got: {url!r}. "
+                "Claude cannot reach localhost — update to the public Replit domain."
+            )
+
+    def test_generate_mcp_json_script_exists(self):
+        """DN-22: scripts/generate_mcp_json.py must exist (run at startup by start.sh)."""
+        assert Path("scripts/generate_mcp_json.py").exists(), (
+            "scripts/generate_mcp_json.py is missing — it regenerates .mcp.json "
+            "with the correct public URL from $REPLIT_DEV_DOMAIN at startup"
+        )
+
+    def test_start_sh_calls_generate_mcp_json(self):
+        """DN-23: start.sh must call generate_mcp_json.py to regenerate URLs on every boot."""
+        src = Path("start.sh").read_text()
+        assert "generate_mcp_json" in src, (
+            "start.sh must call 'python scripts/generate_mcp_json.py' so .mcp.json "
+            "is always regenerated with the correct public domain at startup"
+        )
+
     def test_dashboard_config_uses_port_8001(self):
         """DN-6: replit_dashboard/server.py must reference localhost:8001 for the MCP default."""
         src = Path("replit_dashboard/server.py").read_text()

@@ -5,6 +5,9 @@ set -e
 
 echo "[start.sh] Starting Ambient Patient Companion services..."
 
+# 0. Regenerate .mcp.json with the current public domain so Claude can discover tools
+python scripts/generate_mcp_json.py
+
 # 1. Clinical Intelligence MCP Server — ambient-clinical-intelligence (port 8001)
 MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server &
 MCP_PID=$!
