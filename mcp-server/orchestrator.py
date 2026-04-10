@@ -12,6 +12,8 @@ import logging
 import os
 import sys
 import uuid
+import urllib.request
+import urllib.error
 from datetime import date, datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
@@ -26,6 +28,13 @@ from skills.crisis_escalation import run_crisis_escalation
 from skills.food_access_nudge import run_food_access_nudge
 from skills.compute_provider_risk import compute_provider_risk
 from skills.generate_patient import generate_patient
+from skills.previsit_brief import generate_previsit_brief
+from skills.ingestion_tools import (
+    _get_deliberation_freshness,
+    _get_skill_freshness,
+    _is_stale,
+    FRESHNESS_TTL,
+)
 
 
 async def run_daily_pipeline(
@@ -106,6 +115,67 @@ async def run_daily_pipeline(
             logger.error("Skill %s failed: %s", skill_name, e)
             results["skills_failed"] += 1
             results["errors"].append({"skill": skill_name, "error": str(e)})
+
+    # Step 3: Deliberation (freshness-gated)
+    results["deliberation_status"] = "skipped"
+    try:
+        async with pool.acquire() as conn:
+            delib_last = await _get_deliberation_freshness(conn, patient_id)
+            delib_ttl = FRESHNESS_TTL.get("deliberation", 12)
+            if _is_stale(delib_last, delib_ttl):
+                logger.info("Deliberation stale for %s, triggering", patient_id)
+                payload = json.dumps({
+                    "patient_id": patient_id,
+                    "trigger_type": "manual",
+                    "mode": "progressive",
+                }).encode()
+                req = urllib.request.Request(
+                    "http://localhost:8001/tools/run_deliberation",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                import asyncio
+                def _do_request():
+                    try:
+                        with urllib.request.urlopen(req, timeout=120) as resp:
+                            return json.loads(resp.read())
+                    except urllib.error.URLError as ue:
+                        return {"status": "error", "error": str(ue)}
+
+                delib_result = await asyncio.to_thread(_do_request)
+                results["deliberation_status"] = delib_result.get(
+                    "status", "complete",
+                )
+                logger.info(
+                    "Deliberation for %s: %s",
+                    patient_id, results["deliberation_status"],
+                )
+    except Exception as e:
+        logger.error("Deliberation failed for %s: %s", patient_id, e)
+        results["deliberation_status"] = "failed"
+        results["errors"].append({"skill": "deliberation", "error": str(e)})
+
+    # Step 4: Artifact generation (freshness-gated)
+    results["artifacts_status"] = "skipped"
+    try:
+        async with pool.acquire() as conn:
+            brief_last = await _get_skill_freshness(
+                conn, patient_id, "generate_previsit_brief",
+            )
+            brief_ttl = FRESHNESS_TTL.get("generate_previsit_brief", 24)
+            if _is_stale(brief_last, brief_ttl):
+                logger.info("Pre-visit brief stale for %s, regenerating", patient_id)
+                await generate_previsit_brief(patient_id=patient_id)
+                results["artifacts_status"] = "completed"
+                results["skills_succeeded"] += 1
+    except Exception as e:
+        logger.error("Artifact generation failed for %s: %s", patient_id, e)
+        results["artifacts_status"] = "failed"
+        results["skills_failed"] += 1
+        results["errors"].append({
+            "skill": "generate_previsit_brief", "error": str(e),
+        })
 
     # Log pipeline run
     try:

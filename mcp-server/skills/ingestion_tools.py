@@ -1,4 +1,6 @@
-"""Skill: ingestion tools — freshness checks, ingestion triggers, conflict queries."""
+"""Skill: ingestion tools — freshness checks, ingestion triggers, conflict queries,
+and freshness-gated orchestration pipeline.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +15,67 @@ from datetime import datetime
 from fastmcp import FastMCP
 
 from db.connection import get_pool
-from skills.base import log_skill_execution
+from skills.base import get_data_track, log_skill_execution
 from transforms.fhir_to_schema import _parse_date
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Freshness TTL defaults (hours) for each orchestration phase
+# ---------------------------------------------------------------------------
+
+FRESHNESS_TTL: dict[str, int] = {
+    "compute_obt_score": 24,
+    "compute_provider_risk": 24,
+    "deliberation": 12,
+    "generate_previsit_brief": 24,
+}
+
+
+# ---------------------------------------------------------------------------
+# Freshness query helpers
+# ---------------------------------------------------------------------------
+
+
+async def _get_skill_freshness(
+    conn, patient_id: str, skill_name: str,
+) -> datetime | None:
+    """Return the latest successful execution timestamp for a skill."""
+    row = await conn.fetchrow(
+        """
+        SELECT execution_date FROM skill_executions
+        WHERE patient_id = $1 AND skill_name = $2 AND status = 'completed'
+        ORDER BY execution_date DESC LIMIT 1
+        """,
+        patient_id, skill_name,
+    )
+    return row["execution_date"] if row else None
+
+
+async def _get_deliberation_freshness(
+    conn, patient_id: str,
+) -> datetime | None:
+    """Return the latest completed deliberation timestamp for a patient."""
+    row = await conn.fetchrow(
+        """
+        SELECT triggered_at FROM deliberations
+        WHERE patient_id = $1 AND status = 'complete'
+        ORDER BY triggered_at DESC LIMIT 1
+        """,
+        patient_id,
+    )
+    return row["triggered_at"] if row else None
+
+
+def _is_stale(last_run: datetime | None, ttl_hours: int) -> bool:
+    """Return True if *last_run* is None or older than *ttl_hours*."""
+    if last_run is None:
+        return True
+    naive = last_run.replace(tzinfo=None) if last_run.tzinfo else last_run
+    elapsed = (datetime.utcnow() - naive).total_seconds() / 3600
+    return elapsed >= ttl_hours
+
 
 # ---------------------------------------------------------------------------
 # HealthEx payload explosion helpers
@@ -407,7 +465,13 @@ async def register_healthex_patient(
 def register(mcp: FastMCP):
     @mcp.tool
     async def check_data_freshness(patient_id: str) -> str:
-        """Check data freshness status for all sources of a patient.
+        """Check data freshness across all orchestration phases for a patient.
+
+        Returns ingestion source freshness, skill freshness (OBT, provider
+        risk), deliberation freshness, and artifact freshness (pre-visit
+        brief).  Each entry includes an ``is_stale`` flag and the applicable
+        TTL so callers (or ``orchestrate_refresh``) know exactly which phases
+        need to run.
 
         Args:
             patient_id: UUID of the patient
@@ -415,6 +479,7 @@ def register(mcp: FastMCP):
         pool = await get_pool()
         try:
             async with pool.acquire() as conn:
+                # --- Ingestion source freshness (existing) ---
                 rows = await conn.fetch(
                     """
                     SELECT source_name, last_ingested_at, records_count,
@@ -440,12 +505,67 @@ def register(mcp: FastMCP):
                         "is_stale": row["is_stale"],
                     })
 
+                # --- Skill freshness ---
+                skill_names = ["compute_obt_score", "compute_provider_risk"]
+                skills = {}
+                for sname in skill_names:
+                    last = await _get_skill_freshness(conn, patient_id, sname)
+                    ttl = FRESHNESS_TTL.get(sname, 24)
+                    skills[sname] = {
+                        "last_run_at": last.isoformat() if last else None,
+                        "ttl_hours": ttl,
+                        "is_stale": _is_stale(last, ttl),
+                    }
+
+                # --- Deliberation freshness ---
+                delib_last = await _get_deliberation_freshness(
+                    conn, patient_id,
+                )
+                delib_ttl = FRESHNESS_TTL.get("deliberation", 12)
+                deliberation = {
+                    "last_run_at": (
+                        delib_last.isoformat() if delib_last else None
+                    ),
+                    "ttl_hours": delib_ttl,
+                    "is_stale": _is_stale(delib_last, delib_ttl),
+                }
+
+                # --- Artifact freshness ---
+                artifact_names = ["generate_previsit_brief"]
+                artifacts = {}
+                for aname in artifact_names:
+                    last = await _get_skill_freshness(conn, patient_id, aname)
+                    ttl = FRESHNESS_TTL.get(aname, 24)
+                    artifacts[aname] = {
+                        "last_run_at": last.isoformat() if last else None,
+                        "ttl_hours": ttl,
+                        "is_stale": _is_stale(last, ttl),
+                    }
+
+                # --- Recommended actions ---
+                recommended: list[str] = []
+                if any(s["is_stale"] for s in sources):
+                    recommended.append("ingest")
+                if deliberation["is_stale"]:
+                    recommended.append("deliberation")
+                if any(s["is_stale"] for s in skills.values()):
+                    recommended.append("recompute_skills")
+                if any(a["is_stale"] for a in artifacts.values()):
+                    recommended.append("generate_artifacts")
+
                 await log_skill_execution(
                     conn, "check_data_freshness", patient_id, "completed",
                     output_data={"sources": len(sources)},
                 )
 
-            return json.dumps({"patient_id": patient_id, "sources": sources})
+            return json.dumps({
+                "patient_id": patient_id,
+                "sources": sources,
+                "skills": skills,
+                "deliberation": deliberation,
+                "artifacts": artifacts,
+                "recommended_actions": recommended,
+            })
 
         except Exception as e:
             logger.error("check_data_freshness failed: %s", e)
@@ -997,4 +1117,287 @@ def register(mcp: FastMCP):
             )
         except Exception as e:
             logger.error("use_demo_data failed: %s", e)
+            return f"Error: {e}"
+
+    # ------------------------------------------------------------------
+    # orchestrate_refresh — freshness-gated pipeline
+    # ------------------------------------------------------------------
+
+    @mcp.tool
+    async def orchestrate_refresh(
+        patient_id: str,
+        force: bool = False,
+        skip_deliberation: bool = False,
+    ) -> str:
+        """Run the full freshness-gated orchestration pipeline for a patient.
+
+        Executes four phases in order, skipping any phase whose data is
+        still fresh (unless ``force=True``):
+
+          1. **Ingest** — pull latest data if source is stale.
+          2. **Deliberation** — run dual-LLM deliberation (via clinical
+             server on port 8001) if older than 12 h.
+          3. **Recompute skills** — OBT score + provider risk if older
+             than 24 h.
+          4. **Generate artifacts** — pre-visit brief if older than 24 h.
+
+        Args:
+            patient_id:        UUID of the patient.
+            force:             If True, run every phase regardless of
+                               freshness.
+            skip_deliberation: If True, skip phase 2 entirely (useful when
+                               the clinical server is unavailable).
+        """
+        import asyncio
+        import time as _time
+        import urllib.request
+        import urllib.error
+        from datetime import date as _date
+
+        pool = await get_pool()
+        start = _time.time()
+
+        phases: dict[str, dict] = {
+            "ingest":      {"status": "skipped", "detail": None},
+            "deliberation": {"status": "skipped", "detail": None},
+            "skills":      {"status": "skipped", "detail": None},
+            "artifacts":   {"status": "skipped", "detail": None},
+        }
+
+        try:
+            async with pool.acquire() as conn:
+                data_track = await get_data_track(conn)
+
+                # ── Phase 1: Ingestion ──────────────────────────────────
+                try:
+                    freshness_row = await conn.fetchrow(
+                        """
+                        SELECT last_ingested_at, ttl_hours
+                        FROM source_freshness
+                        WHERE patient_id = $1 AND source_name = $2
+                        """,
+                        patient_id, data_track,
+                    )
+                    ttl_h = (
+                        freshness_row["ttl_hours"]
+                        if freshness_row and freshness_row["ttl_hours"]
+                        else 24
+                    )
+                    last_ingest = (
+                        freshness_row["last_ingested_at"]
+                        if freshness_row
+                        else None
+                    )
+                    if force or _is_stale(last_ingest, ttl_h):
+                        sys.path.insert(
+                            0,
+                            os.path.join(
+                                os.path.dirname(__file__), "..", "..",
+                            ),
+                        )
+                        from ingestion.pipeline import IngestionPipeline
+
+                        pipeline = IngestionPipeline(
+                            adapter_name=data_track, pool=pool,
+                        )
+                        ing = await pipeline.run(
+                            patient_id=patient_id,
+                            force_refresh=force,
+                            triggered_by="orchestrate_refresh",
+                        )
+                        phases["ingest"] = {
+                            "status": ing.status,
+                            "detail": {
+                                "records_upserted": ing.records_upserted,
+                                "conflicts": ing.conflicts_detected,
+                                "duration_ms": ing.duration_ms,
+                            },
+                        }
+                    else:
+                        phases["ingest"]["detail"] = "data still fresh"
+                except Exception as exc:
+                    logger.error("orchestrate_refresh ingest: %s", exc)
+                    phases["ingest"] = {
+                        "status": "failed",
+                        "detail": str(exc),
+                    }
+
+                # ── Phase 2: Deliberation ───────────────────────────────
+                if skip_deliberation:
+                    phases["deliberation"]["detail"] = "skipped by caller"
+                else:
+                    try:
+                        delib_last = await _get_deliberation_freshness(
+                            conn, patient_id,
+                        )
+                        delib_ttl = FRESHNESS_TTL.get("deliberation", 12)
+                        if force or _is_stale(delib_last, delib_ttl):
+                            payload = json.dumps({
+                                "patient_id": patient_id,
+                                "trigger_type": "manual",
+                                "mode": "progressive",
+                            }).encode()
+                            req = urllib.request.Request(
+                                "http://localhost:8001/tools/run_deliberation",
+                                data=payload,
+                                headers={"Content-Type": "application/json"},
+                                method="POST",
+                            )
+
+                            def _do_request():
+                                try:
+                                    with urllib.request.urlopen(
+                                        req, timeout=120,
+                                    ) as resp:
+                                        return json.loads(resp.read())
+                                except urllib.error.URLError as ue:
+                                    return {"status": "error", "error": str(ue)}
+
+                            result = await asyncio.to_thread(_do_request)
+                            phases["deliberation"] = {
+                                "status": result.get("status", "complete"),
+                                "detail": result,
+                            }
+                        else:
+                            phases["deliberation"]["detail"] = (
+                                "deliberation still fresh"
+                            )
+                    except Exception as exc:
+                        logger.error(
+                            "orchestrate_refresh deliberation: %s", exc,
+                        )
+                        phases["deliberation"] = {
+                            "status": "failed",
+                            "detail": str(exc),
+                        }
+
+                # ── Phase 3: Skill recomputation ────────────────────────
+                try:
+                    from skills.compute_obt_score import compute_obt_score
+                    from skills.compute_provider_risk import (
+                        compute_provider_risk,
+                    )
+
+                    today_str = str(_date.today())
+                    any_skill_ran = False
+
+                    obt_last = await _get_skill_freshness(
+                        conn, patient_id, "compute_obt_score",
+                    )
+                    obt_ttl = FRESHNESS_TTL.get("compute_obt_score", 24)
+                    if force or _is_stale(obt_last, obt_ttl):
+                        await compute_obt_score(
+                            patient_id=patient_id, score_date=today_str,
+                        )
+                        any_skill_ran = True
+
+                    pr_last = await _get_skill_freshness(
+                        conn, patient_id, "compute_provider_risk",
+                    )
+                    pr_ttl = FRESHNESS_TTL.get("compute_provider_risk", 24)
+                    if force or _is_stale(pr_last, pr_ttl):
+                        await compute_provider_risk(
+                            patient_id=patient_id, score_date=today_str,
+                        )
+                        any_skill_ran = True
+
+                    phases["skills"] = {
+                        "status": "completed" if any_skill_ran else "skipped",
+                        "detail": (
+                            "recomputed stale skills"
+                            if any_skill_ran
+                            else "skills still fresh"
+                        ),
+                    }
+                except Exception as exc:
+                    logger.error("orchestrate_refresh skills: %s", exc)
+                    phases["skills"] = {
+                        "status": "failed",
+                        "detail": str(exc),
+                    }
+
+                # ── Phase 4: Artifact generation ────────────────────────
+                try:
+                    from skills.previsit_brief import generate_previsit_brief
+
+                    brief_last = await _get_skill_freshness(
+                        conn, patient_id, "generate_previsit_brief",
+                    )
+                    brief_ttl = FRESHNESS_TTL.get(
+                        "generate_previsit_brief", 24,
+                    )
+                    if force or _is_stale(brief_last, brief_ttl):
+                        await generate_previsit_brief(patient_id=patient_id)
+                        phases["artifacts"] = {
+                            "status": "completed",
+                            "detail": "pre-visit brief regenerated",
+                        }
+                    else:
+                        phases["artifacts"]["detail"] = (
+                            "artifacts still fresh"
+                        )
+                except Exception as exc:
+                    logger.error("orchestrate_refresh artifacts: %s", exc)
+                    phases["artifacts"] = {
+                        "status": "failed",
+                        "detail": str(exc),
+                    }
+
+            # ── Audit trail ─────────────────────────────────────────────
+            duration_ms = int((_time.time() - start) * 1000)
+            summary = {
+                "patient_id": patient_id,
+                "phases": phases,
+                "duration_ms": duration_ms,
+                "force": force,
+            }
+            try:
+                async with pool.acquire() as conn:
+                    data_track = await get_data_track(conn)
+                    await conn.execute(
+                        """
+                        INSERT INTO pipeline_runs
+                            (id, run_date, patients_processed,
+                             skills_succeeded, skills_failed, summary,
+                             data_source)
+                        VALUES ($1, $2, 1, $3, $4, $5, $6)
+                        """,
+                        str(uuid.uuid4()),
+                        datetime.utcnow(),
+                        sum(
+                            1
+                            for p in phases.values()
+                            if p["status"] == "completed"
+                        ),
+                        sum(
+                            1
+                            for p in phases.values()
+                            if p["status"] == "failed"
+                        ),
+                        json.dumps(summary),
+                        data_track,
+                    )
+                    await log_skill_execution(
+                        conn,
+                        "orchestrate_refresh",
+                        patient_id,
+                        "completed",
+                        output_data=summary,
+                        data_source=data_track,
+                    )
+            except Exception as exc:
+                logger.error("orchestrate_refresh audit log: %s", exc)
+
+            return json.dumps(summary)
+
+        except Exception as e:
+            logger.error("orchestrate_refresh failed: %s", e)
+            try:
+                async with pool.acquire() as conn:
+                    await log_skill_execution(
+                        conn, "orchestrate_refresh", patient_id, "failed",
+                        error_message=str(e),
+                    )
+            except Exception:
+                logger.error("Failed to log orchestrate_refresh error")
             return f"Error: {e}"
