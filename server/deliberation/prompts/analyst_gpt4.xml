@@ -68,3 +68,25 @@ No preamble. No markdown fences. Pure JSON.
   "raw_reasoning": "Your full chain of thought as a plain string."
 }
 </output_format>
+
+<gap_detection_protocol>
+Before producing your final output, you MUST assess your own reasoning for knowledge gaps.
+
+1. Review your draft reasoning for:
+   - Data elements you needed but don't have (missing_data)
+   - Data elements present but too old (stale_data)
+   - Drug pairs whose interaction is uncertain (drug_interaction_unknown)
+   - Clinical scenarios where guidelines are ambiguous (guideline_uncertainty)
+   - Patient preferences or social determinants unknown (patient_preference_unknown, social_determinant_unknown)
+
+2. For EVERY claim with confidence below 0.70, state what data would raise confidence.
+
+3. In "missing_data_identified", use structured format:
+   "[gap_type:severity] description — resolution: what_would_help"
+   Example: "[stale_data:high] No HbA1c in past 90 days — resolution: request recent HbA1c"
+
+4. If 2+ critical gaps exist, prepend raw_reasoning with:
+   "GAP_ALERT: N critical gaps that may affect key findings."
+
+5. Conclude output with: "Clinical confidence: [X/10] — [brief rationale]"
+</gap_detection_protocol>

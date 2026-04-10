@@ -51,6 +51,14 @@ from server.guardrails.output_validator import validate_output
 from server.guardrails.clinical_rules import check_escalation
 from server.deliberation.engine import DeliberationEngine
 from server.deliberation.schemas import DeliberationRequest
+from server.deliberation.json_utils import strip_markdown_fences
+from gap_aware.db import (
+    get_pool as get_gap_pool,
+    insert_reasoning_gap,
+    insert_clarification_request,
+    insert_gap_trigger,
+    get_gaps_for_deliberation,
+)
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
@@ -2421,6 +2429,347 @@ async def rest_get_transfer_audit(request: Request) -> JSONResponse:
     except Exception as e:
         import sys as _sys
         print(f"[get_transfer_audit] error: {e}", file=_sys.stderr)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
+# ---------------------------------------------------------------------------
+# Gap-aware tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def assess_reasoning_confidence(
+    agent_id: str,
+    deliberation_id: str,
+    patient_mrn: str,
+    reasoning_draft: str,
+    clinical_domain: str,
+    context_snapshot: dict = None,
+    confidence_threshold: float = 0.7,
+) -> dict:
+    """Evaluate an agent's draft reasoning for knowledge gaps and return a
+    structured confidence assessment with gap taxonomy. Call before finalizing
+    any agent output in the deliberation loop."""
+    import re as _re
+
+    client = anthropic.AsyncAnthropic()
+
+    system = (
+        "You are a clinical reasoning auditor for a multi-agent healthcare AI system.\n"
+        "Your job: analyze a draft clinical reasoning output and identify specific knowledge gaps\n"
+        "that would prevent the agent from producing a clinically safe, high-confidence output.\n\n"
+        "Return ONLY valid JSON matching this schema (no markdown, no explanation):\n"
+        "{\n"
+        '  "overall_confidence": <float 0-1>,\n'
+        '  "threshold_met": <boolean>,\n'
+        '  "gaps": [\n'
+        "    {\n"
+        '      "gap_id": "<unique string>",\n'
+        '      "gap_type": "<missing_data|stale_data|conflicting_evidence|ambiguous_context|'
+        'guideline_uncertainty|drug_interaction_unknown|patient_preference_unknown|'
+        'social_determinant_unknown>",\n'
+        '      "severity": "<critical|high|medium|low>",\n'
+        '      "description": "<specific description>",\n'
+        '      "affected_reasoning_step": "<which part of the draft this affects>",\n'
+        '      "data_elements_needed": ["<list of specific data elements>"],\n'
+        '      "staleness_hours": <number or null>,\n'
+        '      "resolvable_by": ["<provider_clarification|patient_query|external_search|lab_order|peer_agent>"]\n'
+        "    }\n"
+        "  ],\n"
+        '  "proceed_recommendation": "<proceed|proceed_with_caveats|pause_and_resolve|escalate_to_provider>"\n'
+        "}\n\n"
+        'A gap is "critical" if it could lead to patient harm.\n'
+        'A gap is "high" if it significantly degrades output quality.\n'
+        "Set threshold_met=true only if overall_confidence >= the provided threshold."
+    )
+
+    user_msg = (
+        f"Agent: {agent_id}\n"
+        f"Clinical domain: {clinical_domain}\n"
+        f"Confidence threshold: {confidence_threshold}\n\n"
+        f"Draft reasoning to audit:\n{reasoning_draft[:3000]}\n\n"
+        f"Context available:\n{json.dumps(context_snapshot or {}, default=str)[:2000]}\n\n"
+        "Identify all gaps. Be specific — name exact data elements, LOINC codes where known, "
+        "specific guideline references. For drug interactions, name the drug pair."
+    )
+
+    response = await client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=2000,
+        system=system,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+
+    raw = response.content[0].text.strip()
+    raw = strip_markdown_fences(raw)
+    result = json.loads(raw)
+    result["threshold_met"] = result["overall_confidence"] >= confidence_threshold
+
+    # Persist critical/high gaps to DB
+    for gap in result.get("gaps", []):
+        if gap.get("severity") in ("critical", "high"):
+            await insert_reasoning_gap(
+                deliberation_id,
+                patient_mrn,
+                agent_id,
+                gap["gap_id"],
+                {
+                    "gap_type": gap["gap_type"],
+                    "severity": gap["severity"],
+                    "description": gap["description"],
+                    "impact_statement": gap.get("affected_reasoning_step", ""),
+                    "confidence_without_resolution": result["overall_confidence"],
+                    "confidence_with_resolution": min(
+                        result["overall_confidence"] + 0.25, 0.95
+                    ),
+                    "attempted_resolutions": [],
+                    "recommended_action_for_synthesis": "include_caveat_in_output",
+                },
+            )
+
+    return result
+
+
+@mcp.tool()
+async def request_clarification(
+    deliberation_id: str,
+    requesting_agent: str,
+    recipient: str,
+    urgency: str,
+    question_text: str,
+    clinical_rationale: str,
+    gap_id: str,
+    suggested_options: list = None,
+    default_if_unanswered: str = None,
+    timeout_minutes: int = 60,
+    fallback_behavior: str = "escalate_to_synthesis",
+    recipient_agent_id: str = None,
+) -> dict:
+    """Pause agent execution and emit a structured clarification request to a
+    provider, patient, or peer agent. Returns immediately with a clarification_id;
+    the deliberation engine polls for resolution."""
+    req = {
+        "deliberation_id": deliberation_id,
+        "requesting_agent": requesting_agent,
+        "recipient": recipient,
+        "recipient_agent_id": recipient_agent_id,
+        "urgency": urgency,
+        "question": {
+            "text": question_text,
+            "clinical_rationale": clinical_rationale,
+            "suggested_options": suggested_options or [],
+            "default_if_unanswered": default_if_unanswered,
+        },
+        "gap_id": gap_id,
+        "timeout_minutes": timeout_minutes,
+        "fallback_behavior": fallback_behavior,
+    }
+    clarification_id = await insert_clarification_request(req)
+
+    return {
+        "clarification_id": clarification_id,
+        "status": "pending",
+        "response": None,
+        "respondent": None,
+        "response_timestamp": None,
+        "resolution_action": "escalated" if urgency == "blocking" else "fallback_applied",
+    }
+
+
+@mcp.tool()
+async def emit_reasoning_gap_artifact(
+    deliberation_id: str,
+    emitting_agent: str,
+    gap_id: str,
+    gap_type: str,
+    severity: str,
+    description: str,
+    impact_statement: str,
+    confidence_without_resolution: float,
+    confidence_with_resolution: float,
+    recommended_action_for_synthesis: str,
+    patient_mrn: str = "unknown",
+    attempted_resolutions: list = None,
+    caveat_text: str = None,
+    expires_at: str = None,
+) -> dict:
+    """Persist a structured reasoning gap artifact to the warehouse.
+    SYNTHESIS reads all artifacts before merging agent outputs.
+    Call when a gap cannot be resolved inline and must be communicated
+    to the orchestrator."""
+    artifact = {
+        "gap_type": gap_type,
+        "severity": severity,
+        "description": description,
+        "impact_statement": impact_statement,
+        "confidence_without_resolution": confidence_without_resolution,
+        "confidence_with_resolution": confidence_with_resolution,
+        "attempted_resolutions": attempted_resolutions or [],
+        "recommended_action_for_synthesis": recommended_action_for_synthesis,
+        "caveat_text": caveat_text,
+        "expires_at": expires_at,
+    }
+
+    artifact_id = await insert_reasoning_gap(
+        deliberation_id, patient_mrn, emitting_agent, gap_id, artifact,
+    )
+
+    # Determine downstream actions
+    downstream = []
+    if recommended_action_for_synthesis == "trigger_order_recommendation":
+        downstream.append("order_recommendation_queued")
+    if recommended_action_for_synthesis == "add_to_care_gap_list":
+        downstream.append("care_gap_added")
+    if severity == "critical":
+        downstream.append("synthesis_priority_escalated")
+
+    return {
+        "artifact_id": artifact_id,
+        "stored": True,
+        "synthesis_notified": True,
+        "downstream_actions_triggered": downstream,
+    }
+
+
+@mcp.tool()
+async def register_gap_trigger(
+    patient_mrn: str,
+    gap_id: str,
+    watch_for: str,
+    expires_at: str,
+    on_fire_action: str,
+    loinc_code: str = None,
+    snomed_code: str = None,
+    custom_condition: str = None,
+    trigger_type: str = "gap_resolution_received",
+    deliberation_scope: list = None,
+) -> dict:
+    """Register a deliberation trigger that fires when specific gap-resolving data
+    arrives in the warehouse. Enables reactive re-deliberation without polling."""
+    req = {
+        "patient_mrn": patient_mrn,
+        "gap_id": gap_id,
+        "trigger_condition": {
+            "watch_for": watch_for,
+            "loinc_code": loinc_code,
+            "snomed_code": snomed_code,
+            "custom_condition": custom_condition,
+        },
+        "trigger_type": trigger_type,
+        "expires_at": expires_at,
+        "on_fire_action": on_fire_action,
+        "deliberation_scope": deliberation_scope or ["full_council"],
+    }
+    trigger_id = await insert_gap_trigger(req)
+
+    prob_map = {
+        "lab_result": 0.75,
+        "screening_score": 0.55,
+        "medication_change": 0.60,
+        "encounter_note": 0.80,
+        "vital_sign": 0.85,
+        "patient_response": 0.40,
+    }
+
+    return {
+        "trigger_id": trigger_id,
+        "registered": True,
+        "expires_at": expires_at,
+        "estimated_resolution_probability": prob_map.get(watch_for, 0.5),
+    }
+
+
+# ── REST wrappers for gap-aware tools ─────────────────────────────────────────
+
+
+@mcp.custom_route("/tools/assess_reasoning_confidence", methods=["POST"])
+async def rest_assess_reasoning_confidence(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await assess_reasoning_confidence(
+            agent_id=body.get("agent_id", ""),
+            deliberation_id=body.get("deliberation_id", ""),
+            patient_mrn=body.get("patient_mrn", ""),
+            reasoning_draft=body.get("reasoning_draft", ""),
+            clinical_domain=body.get("clinical_domain", "risk_assessment"),
+            context_snapshot=body.get("context_snapshot"),
+            confidence_threshold=float(body.get("confidence_threshold", 0.7)),
+        )
+        return JSONResponse(result if isinstance(result, dict) else json.loads(result))
+    except Exception as e:
+        logger.error("[assess_reasoning_confidence] error: %s", e)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
+@mcp.custom_route("/tools/request_clarification", methods=["POST"])
+async def rest_request_clarification(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await request_clarification(
+            deliberation_id=body.get("deliberation_id", ""),
+            requesting_agent=body.get("requesting_agent", ""),
+            recipient=body.get("recipient", ""),
+            urgency=body.get("urgency", "optional"),
+            question_text=body.get("question_text", ""),
+            clinical_rationale=body.get("clinical_rationale", ""),
+            gap_id=body.get("gap_id", ""),
+            suggested_options=body.get("suggested_options"),
+            default_if_unanswered=body.get("default_if_unanswered"),
+            timeout_minutes=int(body.get("timeout_minutes", 60)),
+            fallback_behavior=body.get("fallback_behavior", "escalate_to_synthesis"),
+            recipient_agent_id=body.get("recipient_agent_id"),
+        )
+        return JSONResponse(result if isinstance(result, dict) else json.loads(result))
+    except Exception as e:
+        logger.error("[request_clarification] error: %s", e)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
+@mcp.custom_route("/tools/emit_reasoning_gap_artifact", methods=["POST"])
+async def rest_emit_reasoning_gap_artifact(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await emit_reasoning_gap_artifact(
+            deliberation_id=body.get("deliberation_id", ""),
+            emitting_agent=body.get("emitting_agent", ""),
+            gap_id=body.get("gap_id", ""),
+            gap_type=body.get("gap_type", "missing_data"),
+            severity=body.get("severity", "medium"),
+            description=body.get("description", ""),
+            impact_statement=body.get("impact_statement", ""),
+            confidence_without_resolution=float(body.get("confidence_without_resolution", 0.5)),
+            confidence_with_resolution=float(body.get("confidence_with_resolution", 0.8)),
+            recommended_action_for_synthesis=body.get("recommended_action_for_synthesis", "include_caveat_in_output"),
+            patient_mrn=body.get("patient_mrn", "unknown"),
+            attempted_resolutions=body.get("attempted_resolutions"),
+            caveat_text=body.get("caveat_text"),
+            expires_at=body.get("expires_at"),
+        )
+        return JSONResponse(result if isinstance(result, dict) else json.loads(result))
+    except Exception as e:
+        logger.error("[emit_reasoning_gap_artifact] error: %s", e)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
+@mcp.custom_route("/tools/register_gap_trigger", methods=["POST"])
+async def rest_register_gap_trigger(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await register_gap_trigger(
+            patient_mrn=body.get("patient_mrn", ""),
+            gap_id=body.get("gap_id", ""),
+            watch_for=body.get("watch_for", ""),
+            expires_at=body.get("expires_at", ""),
+            on_fire_action=body.get("on_fire_action", ""),
+            loinc_code=body.get("loinc_code"),
+            snomed_code=body.get("snomed_code"),
+            custom_condition=body.get("custom_condition"),
+            trigger_type=body.get("trigger_type", "gap_resolution_received"),
+            deliberation_scope=body.get("deliberation_scope"),
+        )
+        return JSONResponse(result if isinstance(result, dict) else json.loads(result))
+    except Exception as e:
+        logger.error("[register_gap_trigger] error: %s", e)
         return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
 
 
