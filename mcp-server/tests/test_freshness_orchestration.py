@@ -131,7 +131,9 @@ async def test_get_skill_freshness_returns_latest(db_pool, test_patient):
         )
     assert result is not None
     # Should be within a few seconds of 'now'
-    assert abs((result - now).total_seconds()) < 5
+    # Strip tzinfo before comparison — asyncpg returns timezone-aware datetimes
+    result_naive = result.replace(tzinfo=None) if result.tzinfo else result
+    assert abs((result_naive - now).total_seconds()) < 5
 
 
 @pytest.mark.asyncio
@@ -177,7 +179,9 @@ async def test_get_deliberation_freshness_returns_latest(db_pool, test_patient):
         )
         result = await _get_deliberation_freshness(conn, test_patient)
     assert result is not None
-    assert abs((result - now).total_seconds()) < 5
+    # Strip tzinfo before comparison — asyncpg returns timezone-aware datetimes
+    result_naive = result.replace(tzinfo=None) if result.tzinfo else result
+    assert abs((result_naive - now).total_seconds()) < 5
 
 
 @pytest.mark.asyncio
