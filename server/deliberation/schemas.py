@@ -15,7 +15,7 @@ class PatientContextPackage(BaseModel):
     """Phase 0 output / Phase 1 input. Complete patient context."""
     patient_id: str
     patient_name: str
-    age: int
+    age: Optional[int] = None
     sex: str
     mrn: str
     primary_provider: str
