@@ -1,0 +1,78 @@
+Here's a deployment prompt for the Replit Agent:
+
+---
+
+**Deploy the explicit freshness orchestration feature from branch `claude/explicit-freshness-orchestration-XCEfo`.**
+
+## What changed
+
+Three files were modified/added on this branch:
+
+### 1. `mcp-server/skills/ingestion_tools.py`
+- Added module-level freshness TTL constants (`FRESHNESS_TTL`) and three helper functions: `_get_skill_freshness()`, `_get_deliberation_freshness()`, `_is_stale()`
+- **Enhanced `check_data_freshness` tool** — now returns `skills`, `deliberation`, `artifacts`, and `recommended_actions` fields alongside the existing `sources` field. This is backward-compatible; the existing `sources` field is unchanged.
+- **New `orchestrate_refresh` MCP tool** — runs a 4-phase freshness-gated pipeline: ingest → deliberation → recompute skills (OBT + provider risk) → generate artifacts (pre-visit brief). Each phase is skipped if its data is still fresh. Accepts `force` and `skip_deliberation` parameters. Logs runs to the existing `pipeline_runs` table.
+
+### 2. `mcp-server/orchestrator.py`
+- Added `urllib.request`, `urllib.error` imports and imports for `generate_previsit_brief` and the freshness helpers from `ingestion_tools`
+- Added **Step 3 (Deliberation)** after the existing skill sequence — freshness-gated, calls `http://localhost:8001/tools/run_deliberation` via HTTP
+- Added **Step 4 (Artifact generation)** — freshness-gated, regenerates pre-visit brief if stale
+- Existing skill sequence (Step 2) is unchanged
+
+### 3. `mcp-server/tests/test_freshness_orchestration.py` (new file)
+- 20 tests covering `_is_stale` helper, `FRESHNESS_TTL` constants, `_get_skill_freshness`, `_get_deliberation_freshness`, and enhanced `check_data_freshness` response shape
+- DB-dependent tests use existing `db_pool` and `test_patient` fixtures from `conftest.py`
+
+## Deployment steps
+
+1. **Pull the branch:**
+   ```bash
+   git fetch origin claude/explicit-freshness-orchestration-XCEfo
+   git checkout claude/explicit-freshness-orchestration-XCEfo
+   git merge main  # or rebase onto main if preferred
+   ```
+
+2. **No database migrations needed.** This feature reuses existing tables: `source_freshness`, `skill_executions`, `deliberations`, `pipeline_runs`. No schema changes.
+
+3. **No new dependencies.** All imports (`urllib.request`, `asyncio`, `datetime`) are Python stdlib. The cross-server HTTP call uses `urllib.request` (stdlib), not `aiohttp` or `httpx`.
+
+4. **Restart all three MCP servers** (the skills server on port 8002 picks up the new `orchestrate_refresh` tool automatically via `load_skills(mcp)` auto-discovery):
+   ```bash
+   # The new tool registers inside the existing register() function in ingestion_tools.py,
+   # so no changes to server.py or skill loading are needed.
+   # Just restart via start.sh or the individual workflows:
+   
+   # Server 1 (port 8001) — unchanged, but restart to ensure deliberation REST endpoint is live
+   MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server &
+   
+   # Server 2 (port 8002) — picks up orchestrate_refresh + enhanced check_data_freshness
+   (cd mcp-server && MCP_TRANSPORT=streamable-http MCP_PORT=8002 python server.py) &
+   
+   # Server 3 (port 8003) — unchanged
+   MCP_TRANSPORT=streamable-http MCP_PORT=8003 python -m ingestion.server &
+   ```
+
+5. **Run tests to verify:**
+   ```bash
+   cd mcp-server && python -m pytest tests/test_freshness_orchestration.py -v
+   ```
+
+## Verification after deployment
+
+1. **Check the skills server health:**
+   ```
+   GET http://localhost:8002/health
+   ```
+   Should return `{"ok": true, "server": "ambient-skills-companion", "version": "1.0.0"}`
+
+2. **Test `check_data_freshness`** — call with any patient UUID. Verify the response includes `sources`, `skills`, `deliberation`, `artifacts`, and `recommended_actions`.
+
+3. **Test `orchestrate_refresh`** — call with a patient UUID and `skip_deliberation=true` (to avoid needing API keys). Verify it returns a JSON summary with `phases` showing each phase's status (skipped/completed/failed).
+
+4. **Tool count on Server 2** should now be **19** (was 18 — added `orchestrate_refresh`). Update any tool count assertions in `tests/test_mcp_discovery.py` if they check the skills server tool count.
+
+## Key design notes
+
+- `orchestrate_refresh` calls deliberation via HTTP POST to `http://localhost:8001/tools/run_deliberation` with a 120-second timeout. If the clinical server is down, the phase fails gracefully and the pipeline continues.
+- Freshness TTLs: ingestion uses existing `source_freshness.ttl_hours`, OBT/provider risk/pre-visit brief = 24h, deliberation = 12h. These are defined in `FRESHNESS_TTL` dict at the top of `ingestion_tools.py`.
+- The `import get_data_track` was added to `ingestion_tools.py` imports (from `skills.base`) — it was previously only imported by other skill modules.
