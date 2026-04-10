@@ -124,7 +124,7 @@ graph TB
 The primary clinical intelligence layer. Every AI call passes through a three-layer guardrail pipeline. Also hosts the HealthEx ingestion pipeline, Dual-LLM Deliberation Engine, and Flag Lifecycle system.
 
 ```
-Public URL: https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp
+Public URL: https://[your-replit-domain]/mcp
 
 Guardrail Pipeline:
   Layer 1 — Input:      PHI detection · jailbreak blocking · scope check · emotional tone flag
@@ -159,7 +159,7 @@ Guardrail Pipeline:
 18 clinical skills auto-discovered from `mcp-server/skills/` via a `register(mcp)` convention.
 
 ```
-Public URL: https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-skills
+Public URL: https://[your-replit-domain]/mcp-skills
 ```
 
 ```mermaid
@@ -188,7 +188,7 @@ graph LR
 ### Server 3 — `ambient-ingestion` · `ingestion/server.py`
 
 ```
-Public URL: https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-ingestion
+Public URL: https://[your-replit-domain]/mcp-ingestion
 
 trigger_ingestion(patient_id, source, force_refresh)
   Full ETL pipeline: FHIR parse → conflict detection → upsert → freshness log
@@ -206,9 +206,9 @@ All three servers require OAuth PKCE before connecting. The flow completes autom
 
 | Server | URL |
 |--------|-----|
-| `ambient-clinical-intelligence` | `https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp` |
-| `ambient-skills-companion` | `https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-skills` |
-| `ambient-ingestion` | `https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-ingestion` |
+| `ambient-clinical-intelligence` | `https://[your-replit-domain]/mcp` |
+| `ambient-skills-companion` | `https://[your-replit-domain]/mcp-skills` |
+| `ambient-ingestion` | `https://[your-replit-domain]/mcp-ingestion` |
 
 The OAuth discovery endpoints are served by Next.js:
 

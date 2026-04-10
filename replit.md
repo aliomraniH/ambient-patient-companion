@@ -171,7 +171,7 @@ All three are proxied through Next.js (port 5000). Claude connects via OAuth PKC
 | `ambient-skills-companion` | 8002 | `/mcp-skills` | 18 | `GET /health` |
 | `ambient-ingestion` | 8003 | `/mcp-ingestion` | 1 | `GET /health` |
 
-**Public base URL:** `https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev`
+**Public base URL:** `https://[your-replit-domain]`
 
 ### Server 1 — ambient-clinical-intelligence (`server/mcp_server.py`)
 

@@ -54,7 +54,7 @@ Next.js 16 (port 5000)
       └── PostgreSQL — 34 tables (DATABASE_URL env var, auto-set by Replit)
 ```
 
-**Public base URL**: `https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev`
+**Public base URL**: `https://[your-replit-domain]`
 
 | Server | Path | Tools |
 |--------|------|-------|
