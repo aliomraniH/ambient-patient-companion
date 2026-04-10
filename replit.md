@@ -1,6 +1,17 @@
 # Ambient Patient Companion
 
-A multi-agent AI system that generates a continuously derived patient health UX from Role x Context x Patient State x Time.
+A multi-agent AI health system that generates a continuously derived patient health UX from Role × Context × Patient State × Time — `S = f(R, C, P, T)`.
+
+## What This System Does
+
+The Ambient Patient Companion connects Claude to a live clinical intelligence layer built for primary care and care management. It provides:
+
+- **Real patient data** from a 34-table PostgreSQL warehouse (Synthea + HealthEx FHIR)
+- **Dual-LLM Deliberation Engine** — Claude Sonnet + GPT-4o independently analyze clinical context, cross-critique across multiple rounds, then synthesize into 5 structured output categories
+- **3-Layer Clinical Guardrail Pipeline** — input validation → escalation rules → output safety on every AI call
+- **19 MCP tools** across 3 servers, all accessible to Claude via OAuth-authenticated HTTPS
+
+---
 
 ## Architecture
 
@@ -8,61 +19,135 @@ A multi-agent AI system that generates a continuously derived patient health UX 
 S = f(R, C, P, T)  →  optimal clinical surface
 ```
 
-Seven specialized agents communicate through a shared MCP tool registry. All agents read from a local PostgreSQL warehouse. No agent calls an external API directly.
+```
+Claude Web / API
+      │ OAuth PKCE (auto-handled)
+      ▼
+Next.js 16 (port 5000)
+  ├── Proxy: /mcp          → localhost:8001 (ambient-clinical-intelligence)
+  ├── Proxy: /mcp-skills   → localhost:8002 (ambient-skills-companion)
+  ├── Proxy: /mcp-ingestion→ localhost:8003 (ambient-ingestion)
+  └── OAuth: /.well-known/oauth-protected-resource
+           /.well-known/oauth-authorization-server
+           /register  /authorize  /token
+      │
+      ├── MCP Server 1 — ambient-clinical-intelligence (port 8001)
+      │   19 tools · 3-layer guardrails · Dual-LLM Deliberation · Flag Lifecycle
+      │
+      ├── MCP Server 2 — ambient-skills-companion (port 8002)
+      │   18 tools · 10 skill modules · OBT Score · SDOH · pre-visit brief
+      │
+      └── MCP Server 3 — ambient-ingestion (port 8003)
+          1 tool · HealthEx ETL pipeline (5 format parsers)
+      │
+      └── PostgreSQL Warehouse — 34 tables
+          patients · biometrics · deliberations · flags · ingestion_plans · …
+```
+
+---
 
 ## Project Structure
 
 ```
 ambient-patient-companion/
-├── replit-app/          ← Next.js 16 frontend (main web UI, port 5000)
-│   ├── app/             ← App Router pages + API routes
-│   │   └── api/mcp/[port]/[[...segments]]/route.ts  ← MCP proxy (→ localhost:8001/2/3)
-│   ├── components/      ← React UI components
-│   └── lib/db.ts        ← PostgreSQL pool (pg)
-├── server/              ← Phase 1 Clinical Intelligence FastMCP server (port 8001)
-│   ├── mcp_server.py    ← FastMCP server: 18 tools + REST wrappers + guardrails
-│   ├── guardrails/      ← input_validator, output_validator, clinical_rules
-│   └── deliberation/
-│       ├── json_utils.py            ← strip_markdown_fences() — handles LLM code-fence wrapping
-│       ├── tiered_context_loader.py ← TieredContextLoader: 3-tier budget-capped context (11K limit)
-│       ├── data_request_parser.py   ← parse_data_requests(): signals from round output → tier loads
-│       ├── migrations/002_data_requests.sql ← deliberation_data_requests table
-│       ├── analyst.py     ← Phase 1: strips fences before model_validate_json
-│       └── critic.py      ← Phase 2: strips fences on CrossCritique + RevisedAnalysis
-├── mcp-server/          ← FastMCP Python agent server
-│   ├── db/schema.sql    ← 22-table PostgreSQL schema (source of truth)
-│   ├── skills/          ← 12 MCP agent skill implementations
-│   ├── seed.py          ← Data seeding: python mcp-server/seed.py --patients 10 --months 6
-│   ├── orchestrator.py  ← Daily pipeline sequencer
-│   └── tests/           ← pytest test suite (87 backend tests)
-├── ingestion/           ← Adaptive HealthEx ingest pipeline
-│   ├── adapters/healthex/
-│   │   ├── format_detector.py   ← detect_format() → 5 formats (A/B/C/D/JSON-dict)
-│   │   ├── ingest.py            ← adaptive_parse(): detect → parse → LLM fallback
-│   │   ├── llm_fallback.py      ← Claude fallback for unrecognised payloads
-│   │   ├── planner.py           ← Two-phase ingest planner (ingestion_plans table)
-│   │   ├── executor.py          ← Phase 2 worker — calls TracedWriter
-│   │   ├── transfer_planner.py  ← Size-aware TransferPlan + TransferRecord dataclasses
-│   │   ├── traced_writer.py     ← Per-record async writer + transfer_log audit trail
-│   │   └── parsers/             ← format_a/b/c/d + json_dict parsers
-│   └── tests/                  ← 69 ingestion tests (format detection, parsers, pipeline)
-├── docs/                ← Planning documents (mcp_use_cases.md — story line + action plan)
-├── tests/e2e/           ← End-to-end use-case suite (18 tests, all tools)
-│   ├── data_entry_agent.py  ← PatientDataEntryAgent: seeds 6 months of Maria Chen history
-│   ├── conftest.py          ← Session-scoped DB pool + maria_chen fixture
-│   └── test_all_mcp_tools.py ← UC-01→UC-15 (MCP skills) + deliberation tools
-├── replit_dashboard/    ← FastAPI config dashboard (API keys, MCP URLs, Claude config)
-│   ├── server.py        ← FastAPI app (port 8080) — includes MCP_CLINICAL_INTELLIGENCE_URL
-│   ├── index.html       ← Single-page dashboard UI
-│   └── tests/           ← 30 dashboard tests (anyio-based)
-├── shared/              ← Shared JS client (claude-client.js)
-├── prototypes/          ← 4 HTML proof-of-concept prototypes
-├── config/system_prompts/ ← Role-based system prompts (pcp, care_manager, patient)
-├── tests/phase1/        ← 153 Phase 1 integration tests (incl. 21 transfer pipeline)
-├── tests/phase2/        ← 57 Phase 2 deliberation feature tests
-├── CLAUDE.md            ← Full implementation guide for Claude Code agents
-└── requirements.txt     ← Root Python dependencies (pytest-asyncio==0.21.2)
+│
+├── server/                      ← Server 1: ambient-clinical-intelligence (port 8001)
+│   ├── mcp_server.py            ← FastMCP("ambient-clinical-intelligence") — 19 tools + REST wrappers
+│   ├── guardrails/              ← input_validator · output_validator · clinical_rules
+│   └── deliberation/            ← Dual-LLM Deliberation Engine
+│       ├── engine.py            ← 5-phase orchestrator (+ Phase 0.5, 3.25, 3.5)
+│       ├── planner.py           ← Phase 0.5: pre-deliberation agenda builder (Haiku)
+│       ├── context_compiler.py  ← Phase 0: assemble patient EHR context
+│       ├── tiered_context_loader.py  ← 3-tier budget-capped loading (11K limit)
+│       ├── analyst.py           ← Phase 1: parallel Claude Sonnet + GPT-4o analysis
+│       ├── critic.py            ← Phase 2: cross-critique rounds with convergence
+│       ├── synthesizer.py       ← Phase 3: unified synthesis → DeliberationResult
+│       ├── synthesis_reviewer.py← Phase 3.25: post-synthesis domain review (Haiku)
+│       ├── output_safety.py     ← Phase 3.5: guardrail wrapper on deliberation output
+│       ├── behavioral_adapter.py← Phase 4: SMS/push nudge formatting
+│       ├── knowledge_store.py   ← Phase 5: atomic DB commit
+│       ├── flag_reviewer.py     ← LLM-powered flag lifecycle review (Haiku)
+│       ├── flag_writer.py       ← Flag registry writes with data provenance
+│       ├── data_request_parser.py  ← Parse agent data requests between rounds
+│       ├── json_utils.py        ← strip_markdown_fences() + safe_json_loads()
+│       ├── schemas.py           ← 20+ Pydantic models
+│       ├── prompts/             ← XML LLM prompt templates
+│       ├── migrations/001–004   ← Deliberation + flag lifecycle tables
+│       └── tests/               ← 109 deliberation unit tests
+│
+├── mcp-server/                  ← Server 2: ambient-skills-companion (port 8002)
+│   ├── server.py                ← FastMCP("ambient-skills-companion") — auto-discovers skills
+│   ├── skills/                  ← 10 skill modules (register(mcp) convention)
+│   │   ├── compute_obt_score.py
+│   │   ├── compute_provider_risk.py
+│   │   ├── crisis_escalation.py
+│   │   ├── food_access_nudge.py
+│   │   ├── generate_checkins.py
+│   │   ├── generate_patient.py
+│   │   ├── generate_vitals.py
+│   │   ├── ingestion_tools.py   ← 8 tools: freshness · ingestion · conflicts · data tracks
+│   │   ├── previsit_brief.py
+│   │   └── sdoh_assessment.py
+│   ├── db/schema.sql            ← 22-table PostgreSQL base schema (source of truth)
+│   ├── transforms/              ← FHIR-to-schema transformers (5 resource types)
+│   ├── seed.py                  ← python mcp-server/seed.py --patients 10 --months 6
+│   └── tests/                   ← 92 backend tests
+│
+├── ingestion/                   ← Server 3: ambient-ingestion (port 8003)
+│   ├── server.py                ← FastMCP("ambient-ingestion") — trigger_ingestion tool
+│   ├── pipeline.py              ← ETL orchestrator
+│   ├── conflict_resolver.py     ← Multi-source conflict resolution
+│   └── adapters/healthex/
+│       ├── format_detector.py   ← detect_format() → 5 formats (A/B/C/D/JSON-dict)
+│       ├── ingest.py            ← adaptive_parse() entry point
+│       ├── planner.py           ← Two-phase ingest planner (ingestion_plans table)
+│       ├── executor.py          ← Phase 2 worker + TracedWriter audit trail
+│       ├── content_router.py    ← TEXT/STRUCT/REF content classification
+│       ├── llm_fallback.py      ← Claude fallback for unrecognised payloads (+ PHI scan)
+│       ├── transfer_planner.py  ← Size-aware TransferPlan + TransferRecord
+│       ├── traced_writer.py     ← Per-record async writer + transfer_log
+│       └── parsers/             ← format_a/b/c/d + json_dict parsers
+│
+├── replit-app/                  ← Next.js 16 frontend (port 5000)
+│   ├── next.config.ts           ← Proxy rewrites → 3 MCP servers
+│   ├── app/                     ← App Router pages + API routes
+│   │   ├── .well-known/
+│   │   │   ├── oauth-protected-resource/[[...slug]]/route.ts  ← RFC 9728
+│   │   │   └── oauth-authorization-server/route.ts            ← RFC 8414
+│   │   ├── authorize/route.ts   ← OAuth authorization_code grant (auto-issues code)
+│   │   ├── token/route.ts       ← Token exchange endpoint
+│   │   ├── register/route.ts    ← RFC 7591 dynamic client registration
+│   │   └── api/                 ← patients · vitals · checkin · obt · mcp · sse
+│   ├── lib/oauth-store.ts       ← In-memory OAuth client/code/token store
+│   └── components/
+│       └── PatientManager.tsx   ← Patient CRUD UI (search · add · edit · delete)
+│
+├── replit_dashboard/            ← Config Dashboard (port 8080)
+│   ├── server.py                ← FastAPI — 18 env keys + Claude config download
+│   ├── index.html               ← Single-page dashboard UI
+│   └── tests/                   ← 30 dashboard tests
+│
+├── scripts/
+│   └── generate_mcp_json.py     ← Regenerates .mcp.json from $REPLIT_DEV_DOMAIN at startup
+│
+├── tests/
+│   ├── phase1/                  ← 196 Phase 1 clinical intelligence tests
+│   ├── phase2/                  ← 95 Phase 2 deliberation + flag lifecycle tests
+│   ├── e2e/                     ← 28 end-to-end MCP use-case tests
+│   ├── test_mcp_smoke.py        ← 24 MCP smoke tests
+│   └── test_mcp_discovery.py    ← 26 MCP discovery + OAuth regression tests (DN-1–DN-26)
+│
+├── .mcp.json                    ← MCP client discovery (public HTTPS URLs, auto-regenerated)
+├── start.sh                     ← Production startup: regenerates .mcp.json → starts all 5 services
+├── config/system_prompts/       ← Role-based prompts (pcp · care_manager · patient)
+├── shared/claude-client.js      ← Shared JS MCP client
+├── prototypes/                  ← 4 HTML proof-of-concept prototypes
+├── submission/README.md         ← MCP marketplace submission
+├── CLAUDE.md                    ← Full implementation guide for Claude Code
+└── requirements.txt             ← Python deps (pytest-asyncio==0.21.2 pinned)
 ```
+
+---
 
 ## Workflows (5 active)
 
@@ -74,253 +159,172 @@ ambient-patient-companion/
 | Skills MCP Server | `cd mcp-server && MCP_TRANSPORT=streamable-http MCP_PORT=8002 python server.py` | 8002 |
 | Ingestion MCP Server | `MCP_TRANSPORT=streamable-http MCP_PORT=8003 python -m ingestion.server` | 8003 |
 
-## Three MCP Servers (all public via Next.js proxy)
+---
 
-| Server | Port | Public Path | Tools | Claude Web Name |
-|--------|------|-------------|-------|-----------------|
-| ClinicalIntelligence | 8001 | `/mcp` | 19 | `ambient-clinical-intelligence` |
-| PatientCompanion (Skills) | 8002 | `/mcp-skills` | 17 | `ambient-skills-companion` |
-| PatientIngestion | 8003 | `/mcp-ingestion` | 1 | `ambient-ingestion` |
+## Three MCP Servers
 
-All three are proxied through Next.js (port 5000) — no port number in public URLs.
+All three are proxied through Next.js (port 5000). Claude connects via OAuth PKCE — the `/authorize` endpoint auto-issues a code with no login screen (public server).
 
-### Server 1 — ClinicalIntelligence (`server/mcp_server.py`)
+| FastMCP Name | Port | Public Path | Tools | Health |
+|---|---|---|---|---|
+| `ambient-clinical-intelligence` | 8001 | `/mcp` | 19 | `GET /health` |
+| `ambient-skills-companion` | 8002 | `/mcp-skills` | 18 | `GET /health` |
+| `ambient-ingestion` | 8003 | `/mcp-ingestion` | 1 | `GET /health` |
 
-Nineteen tools at `https://[domain]/mcp` (9 Phase 1 + 10 HealthEx/Deliberation/Ingestion/Audit/Flags):
+**Public base URL:** `https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev`
+
+### Server 1 — ambient-clinical-intelligence (`server/mcp_server.py`)
+
+19 tools at `https://[domain]/mcp`:
 
 | Tool | Description |
 |------|-------------|
-| `clinical_query` | 3-layer guardrail pipeline → Claude |
+| `clinical_query` | 3-layer guardrail pipeline → Claude Sonnet |
 | `get_guideline` | Fetch USPSTF/ADA guideline by ID |
 | `check_screening_due` | Overdue screenings for patient profile |
 | `flag_drug_interaction` | Known drug interactions |
-| `get_synthetic_patient` | Maria Chen demo patient (MRN 4829341) |
+| `get_synthetic_patient` | Demo patient from live DB (MRN 4829341) |
 | `use_healthex` | Switch data track to HealthEx real records |
 | `use_demo_data` | Switch data track to Synthea demo data |
 | `switch_data_track` | Switch to named track (synthea/healthex/auto) |
 | `get_data_source_status` | Report active track + available sources |
-| `register_healthex_patient` | Create/upsert a HealthEx patient row, return UUID |
+| `register_healthex_patient` | Create/upsert HealthEx patient row, return UUID |
 | `ingest_from_healthex` | Two-phase ingest: plan (fast) + execute (write rows) |
-| `execute_pending_plans` | Re-execute failed/pending ingestion plans from cache |
-| `get_ingestion_plans` | Read plan summaries + insights_summary for a patient |
-| `get_transfer_audit` | Per-record transfer_log audit trail (status, timing, errors) |
-| `run_deliberation` | Trigger deliberation (mode="progressive" default, or "full" dual-LLM) |
+| `execute_pending_plans` | Re-execute failed/pending ingestion plans |
+| `get_ingestion_plans` | Read plan summaries + insights_summary |
+| `get_transfer_audit` | Per-record transfer_log audit trail |
+| `run_deliberation` | Dual-LLM deliberation (mode: "progressive" or "full") |
 | `get_deliberation_results` | Retrieve stored deliberation outputs |
-| `get_patient_knowledge` | Fetch accumulated patient-specific knowledge |
-| `get_pending_nudges` | List undelivered nudges for patient or care team |
-| `get_flag_review_status` | Current flag lifecycle status (open/retracted/pending human review) |
+| `get_flag_review_status` | Flag lifecycle status (open/retracted/pending human review) |
+| `get_patient_knowledge` | Accumulated patient-specific knowledge |
+| `get_pending_nudges` | Queued nudges for delivery scheduling |
 
-Also has REST wrappers at `/tools/<name>` and liveness check at `/health`.
+Also has REST wrappers at `/tools/<name>` for direct browser calls.
 
-**HealthEx two-phase pipeline** (all on `/mcp`, port 8001):
-`use_healthex` → `register_healthex_patient` → `ingest_from_healthex` (plan + auto flag review) → `execute_pending_plans` (write+audit) → `get_ingestion_plans` (batch status) → `get_transfer_audit` (per-record audit) → `run_deliberation` (+ auto flag write) → `get_deliberation_results` → `get_flag_review_status` → `get_pending_nudges`
+### Server 2 — ambient-skills-companion (`mcp-server/server.py`)
 
-### Server 2 — PatientCompanion (`mcp-server/server.py`)
-
-Seventeen tools at `https://[domain]/mcp-skills` (auto-discovered from `mcp-server/skills/`):
+18 tools at `https://[domain]/mcp-skills` (auto-discovered from `mcp-server/skills/`):
 `compute_obt_score`, `compute_provider_risk`, `run_crisis_escalation`, `run_food_access_nudge`,
 `generate_daily_checkins`, `generate_patient`, `generate_daily_vitals`, `generate_previsit_brief`,
 `run_sdoh_assessment`, `use_healthex`, `use_demo_data`, `switch_data_track`,
 `get_data_source_status`, `check_data_freshness`, `run_ingestion`, `get_source_conflicts`,
-`ingest_from_healthex`
+`ingest_from_healthex`, `register_healthex_patient`
 
-### Server 3 — PatientIngestion (`ingestion/server.py`)
+### Server 3 — ambient-ingestion (`ingestion/server.py`)
 
-One tool at `https://[domain]/mcp-ingestion`:
-`trigger_ingestion` — runs the full ETL pipeline for a patient from a named source adapter.
+1 tool at `https://[domain]/mcp-ingestion`:
+`trigger_ingestion(patient_id, source, force_refresh)` — full ETL pipeline for a patient.
 
-**Claude web MCP config** — download from Config Dashboard (port 8080):
-- Dev (always available): `GET /api/generate/mcp-config?env=dev`
-- Prod (after deployment): `GET /api/generate/mcp-config?env=prod`
-- Full summary (both URLs): `GET /api/generate/claude-config`
+---
 
-Guardrails pipeline:
-1. **Input**: PHI detection, jailbreak blocking, scope check, emotional tone flag
-2. **Escalation rules**: life-threatening, controlled substances, pediatric, pregnancy
-3. **Output**: citation check, PHI leakage scan, diagnostic language flags, drug grounding
+## OAuth 2.0 Discovery Layer
 
-## Phase 2 — Dual-LLM Deliberation Engine (`server/deliberation/`)
+Claude requires OAuth PKCE before connecting to any remote MCP server. Five Next.js routes handle this:
 
-An async pre-computation layer where Claude (Anthropic) and GPT-4 (OpenAI) independently analyze a patient's clinical context, cross-critique each other, then synthesize into 5 structured output categories:
+| Endpoint | RFC | Purpose |
+|---|---|---|
+| `GET /.well-known/oauth-protected-resource` | RFC 9728 | Declares auth server URL |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 | Lists OAuth endpoints |
+| `POST /register` | RFC 7591 | Dynamic client registration |
+| `GET /authorize` | RFC 6749 | Issues auth code immediately (no login — public server) |
+| `POST /token` | RFC 6749 | Exchanges code for Bearer token |
+
+State is managed in `replit-app/lib/oauth-store.ts` (in-memory, ephemeral — clients re-authorize on restart).
+
+---
+
+## Dual-LLM Deliberation Engine (`server/deliberation/`)
+
+6-phase async pre-computation pipeline (Claude Sonnet + GPT-4o):
 
 ```
-server/deliberation/
-├── schemas.py          ← 20 Pydantic models for all data flow
-├── engine.py           ← 5-phase pipeline orchestrator
-├── context_compiler.py ← Phase 0: assemble patient EHR context
-├── analyst.py          ← Phase 1: parallel Claude + GPT-4 analysis
-├── critic.py           ← Phase 2: cross-critique with convergence
-├── synthesizer.py      ← Phase 3: unified synthesis
-├── behavioral_adapter.py ← Phase 4: SMS/nudge formatting
-├── knowledge_store.py  ← Phase 5: atomic DB commit
-├── prompts/            ← 5 XML prompt templates
-├── migrations/001_deliberation_tables.sql  ← 4 new tables
-├── migrations/002_ingestion_plans.sql     ← ingestion_plans table + raw_fhir_cache columns
-├── migrations/003_transfer_log.sql        ← transfer_log table (28 cols, 4 indexes, FK→patients)
-└── migrations/004_content_router_tables.sql ← clinical_notes + media_references + 2 indexes
+Phase 0.5  planner.py           Pre-deliberation agenda builder (Haiku)
+Phase 0    context_compiler.py  Assemble patient EHR context (tiered, 11K budget)
+Phase 1    analyst.py           Parallel Claude Sonnet + GPT-4o independent analysis
+Phase 2    critic.py            Cross-critique rounds with convergence scoring
+Phase 3    synthesizer.py       Unified synthesis → 5 output categories
+Phase 3.25 synthesis_reviewer.py Post-synthesis domain review, re-deliberation trigger (Haiku)
+Phase 3.5  output_safety.py     Guardrail wrapper on deliberation output
+Phase 4    behavioral_adapter.py SMS/push nudge formatting
+Phase 5    knowledge_store.py   Atomic DB commit
 ```
 
-4 new DB tables: `deliberations`, `deliberation_outputs`, `patient_knowledge`, `core_knowledge_updates`
+4 DB tables: `deliberations`, `deliberation_outputs`, `patient_knowledge`, `core_knowledge_updates`
+3 flag tables: `deliberation_flags`, `flag_review_runs`, `flag_corrections`
 
-UI: `prototypes/pcp-encounter.html` has 2 tabs — **Clinical Workspace** and **AI Deliberation** — with `prototypes/components/deliberation-panel.js` handling the deliberation panel.
+---
 
-## Database
+## Database — 34 Tables
 
-- **Provider**: Replit built-in PostgreSQL
-- **Schema**: `mcp-server/db/schema.sql` (22 core tables) + `server/deliberation/migrations/001_deliberation_tables.sql` (4 deliberation tables) + `server/migrations/002_ingestion_plans.sql` (1 ingestion_plans table) + `server/migrations/003_transfer_log.sql` (1 transfer_log table) + `server/migrations/004_content_router_tables.sql` (2 tables: clinical_notes + media_references) + `server/deliberation/migrations/004_flag_lifecycle.sql` (3 tables: deliberation_flags + flag_review_runs + flag_corrections = **33 total**)
-- **Connection**: `DATABASE_URL` environment variable (auto-set by Replit)
-- **Key constraints**:
-  - `is_stale` in `source_freshness` is a regular boolean (not generated — PostgreSQL requires immutable expressions for generated columns)
-  - `biometric_readings` has a UNIQUE index on `(patient_id, metric_type, measured_at)` for idempotent inserts
+- **Provider**: Replit built-in PostgreSQL (`DATABASE_URL` env var)
+- **Base schema** (22 tables, `mcp-server/db/schema.sql`)
+- **Deliberation** (4 tables, `server/deliberation/migrations/001`)
+- **Ingestion** (4 tables, migrations 002–004): `ingestion_plans`, `transfer_log`, `clinical_notes`, `media_references`
+- **Flag lifecycle** (3 tables, `server/deliberation/migrations/004`): `deliberation_flags`, `flag_review_runs`, `flag_corrections`
+- **System**: `system_config` (data track, active model)
 
-## Environment Variables / Secrets
+Key column names: `biometric_readings` uses `metric_type` (not `observation_type`) and `measured_at` (not `recorded_at`).
 
-| Key | Category | Notes |
-|-----|----------|-------|
-| `ANTHROPIC_API_KEY` | THIRD_PARTY | Replit Secret — used by clinical MCP server |
-| `LANGSMITH_API_KEY` | THIRD_PARTY | Replit Secret — optional tracing |
-| `DATABASE_URL` | AUTO | Replit PostgreSQL (auto-set) |
-| `CLAUDE_MODEL` | AUTO | Default: `claude-sonnet-4-5` |
-| `MCP_CLINICAL_INTELLIGENCE_URL` | AUTO | Default: `http://localhost:8001/mcp` |
-| `SYNTHEA_OUTPUT_DIR` | AUTO | Default: `/home/runner/synthea-output` |
+---
 
-Config dashboard at port 8080 manages all 18 keys in three categories (AUTO / SELF_HOSTED / THIRD_PARTY).
+## Environment Variables
 
-## Seeding Data
+| Key | Purpose |
+|-----|---------|
+| `ANTHROPIC_API_KEY` | Replit Secret — Claude Sonnet + Haiku calls |
+| `OPENAI_API_KEY` | Replit Secret — GPT-4o deliberation critic |
+| `LANGSMITH_API_KEY` | Replit Secret — optional LangSmith tracing |
+| `GITHUB_TOKEN` | Replit Secret — GitHub push access |
+| `DATABASE_URL` | Auto-set by Replit PostgreSQL |
+| `REPLIT_DEV_DOMAIN` | Auto-set — used by scripts/generate_mcp_json.py |
+
+Config dashboard at port 8080 provides a UI for all env keys.
+
+---
+
+## Testing — ~670 tests
 
 ```bash
-python mcp-server/seed.py --patients 10 --months 6
+python -m pytest tests/phase1/ -v                    # 196 Phase 1 clinical intelligence
+python -m pytest tests/phase2/ -v                    # 95 Phase 2 deliberation + flags
+python -m pytest server/deliberation/tests/ -v       # 109 deliberation unit tests
+python -m pytest tests/e2e/ -v                       # 28 end-to-end MCP use-cases
+python -m pytest tests/test_mcp_smoke.py -v          # 24 MCP smoke tests
+python -m pytest tests/test_mcp_discovery.py -v      # 26 MCP discovery + OAuth tests
+python -m pytest ingestion/tests/ -v                 # 152 ingestion pipeline tests
+cd mcp-server && python -m pytest tests/ -v          # 92 backend skills tests
+cd replit-app && npm test                            # 37 Jest frontend tests
+cd replit_dashboard && python -m pytest tests/ -v    # 30 dashboard tests
 ```
 
-Generates synthetic FHIR fixtures first:
-```bash
-python mcp-server/scripts/create_minimal_fixtures.py
-```
-
-## Testing
-
-Each suite runs independently (conftest scoping keeps them isolated).
-
-### Phase 1 Clinical Intelligence — 132 tests
-```bash
-python -m pytest tests/phase1/ -v
-```
-
-### Phase 2 Deliberation Engine — 40 unit tests + 94 feature tests (incl. 30 flag lifecycle + 7 integration)
-```bash
-python -m pytest server/deliberation/tests/ -v   # 108 passed, 1 skipped
-python -m pytest tests/phase2/ -v                # 94 passed (57 deliberation + 30 flag unit + 7 flag integration)
-```
-
-### End-to-end MCP use-case suite — 21 tests (5 skipped without live servers)
-```bash
-python -m pytest tests/e2e/ -v
-```
-
-### Backend Skills MCP (Python/pytest) — 87 tests
-```bash
-cd mcp-server && pytest tests/ -v
-```
-
-### Adaptive Ingestion Pipeline — 85 tests
-```bash
-python -m pytest ingestion/tests/ -v   # format detection, parsers A/B/C/D, pipeline, planner, executor
-```
-
-### Frontend (Next.js/Jest) — 37 tests
-```bash
-cd replit-app && npm test
-```
-
-### Config Dashboard (anyio/pytest) — 30 tests
-```bash
-cd replit_dashboard && python -m pytest tests/ -v
-```
-
-**Total: 623 tests (586 Python + 37 Jest), all passing**
-| Suite | Count |
+| Suite | Tests |
 |-------|-------|
-| Phase 1 clinical intelligence (incl. 18 DB format integration + 8 ingestion-plans IP tests) | 132 |
-| Phase 2 deliberation (unit + features + fence-stripping + flag lifecycle) | 202 (108 unit + 94 feature) |
-| E2E use-case suite (UC-01→UC-18 + 3 ingestion-tool smoke tests) | 21 |
-| Skills MCP backend (incl. 27 fix verification tests) | 87 |
-| Adaptive ingestion pipeline (parsers + edge cases + perf + planner PL-1–8 + executor EX-1–8) | 152 |
-| MCP tool registration + REST smoke tests | 24 |
-| Next.js frontend (Jest) | 37 |
+| Phase 1 clinical intelligence | 196 |
+| Phase 2 deliberation + flag lifecycle | 95 |
+| Deliberation engine unit | 109 |
+| End-to-end MCP use-cases | 28 |
+| MCP smoke tests | 24 |
+| MCP discovery + OAuth (DN-1 to DN-26) | 26 |
+| Ingestion pipeline | 152 |
+| Skills MCP backend | 92 |
+| Frontend (Jest) | 37 |
 | Config dashboard | 30 |
 
-## Package Manager
-
-- Frontend: `npm` (package-lock.json in replit-app/)
-- Backend: Python 3.12 (pip / requirements); pytest-asyncio==0.21.2 required
-
-## MCP Skills (12 implemented in mcp-server/)
-
-| Skill | Function |
-|-------|----------|
-| `generate_patient.py` | Imports FHIR patient bundles into PostgreSQL |
-| `generate_vitals.py` | Generates daily biometric readings (idempotent) |
-| `generate_checkins.py` | Creates daily check-in records |
-| `compute_obt_score.py` | Computes Optimal Being Trajectory scores (returns JSON) |
-| `crisis_escalation.py` | Detects crisis indicators (returns JSON with escalation_triggered) |
-| `sdoh_assessment.py` | Social Determinants of Health assessment |
-| `ingestion_tools.py` | Data freshness, source status, `use_healthex()`, `use_demo_data()` |
-| `previsit_brief.py` | Pre-visit clinical brief generation |
-| `food_access_nudge.py` | Food access intervention nudges |
-| `compute_provider_risk.py` | Provider-level risk score computation |
+---
 
 ## Key Engineering Rules
 
-- **asyncpg**: Never use `$N + INTERVAL '1 day'` — pre-compute bounds in Python
-- **asyncpg**: Never use `do` as a SQL table alias — `do` is a reserved PostgreSQL keyword; use `dout` or similar
-- **MCP skills**: Never use `print()` — all logging goes to `sys.stderr`
-- **Model names**: `claude-sonnet-4-20250514` (Clinical/Synthesis), `gpt-4o` (deliberation critic)
-- **pytest-asyncio**: Pinned to 0.21.2 — 1.x breaks session-scoped event_loop
-- **Replit Secrets**: Take priority over local `.env` in dashboard and connectivity tests
-- **Dashboard tests**: `clean_env` fixture pops ALL_KEYS from os.environ — isolates from Replit Secrets
-- **Port config**: Next.js=5000, Config Dashboard=8080, Clinical MCP=8001, Skills MCP=8002, Ingestion MCP=8003
+- **asyncpg**: Never use `$N + INTERVAL '1 day'` — pre-compute date bounds in Python before passing to asyncpg
+- **asyncpg**: Never use `do` as a SQL alias — reserved PostgreSQL keyword; use `dout` or similar
 - **FastMCP**: `FastMCP()` does NOT accept `description=` kwarg — causes startup crash
-- **Deliberation**: `run_deliberation` is async fire-and-forget — poll `get_deliberation_results` for output
-- **MCP Proxy**: Browser calls `/api/mcp/<port>/tools/<name>` → Next.js route proxies to `http://localhost:<port>/tools/<name>`; shared/claude-client.js uses relative `/api/mcp/8001` in browser context
-- **HealthEx Protocol**: `register_healthex_patient` MUST be called before `ingest_from_healthex` — it bootstraps the `patients` row that `run_deliberation` requires. See CLAUDE.md Section 13.
-- **Synthea fixtures**: `mcp-server/tests/fixtures/fhir/` holds 3 minimal FHIR bundles; conftest.py sets `SYNTHEA_OUTPUT_DIR` to fixtures when `/home/runner/synthea-output/fhir/` is absent
-- **Adaptive ingest**: `ingest_from_healthex` routes all payloads through `ingestion.adapters.healthex.ingest.adaptive_parse()` — 5 formats (A: plain text, B: compressed table, C: flat FHIR text, D: FHIR Bundle JSON, JSON-dict arrays); response always includes `format_detected` and `parser_used` fields; `records_written` is a dict (not int)
-- **Fence-stripping**: LLMs sometimes wrap JSON in ```json ... ``` fences even when told not to — `server/deliberation/json_utils.strip_markdown_fences()` is called in both `analyst.py` and `critic.py` before `model_validate_json`
-- **pytest conftest scoping**: `tests/e2e/conftest.py` must NOT declare `pytest_plugins` — this causes collection errors when running suites together; `asyncio_mode = auto` in root `pytest.ini` is sufficient
-- **source_freshness staleness**: Sources with `records_count=0` are correctly flagged `is_stale=True` in tests — this is expected for registered-but-empty sources like `synthea`; only check staleness for sources with `records_count > 0`
-
-## Key Bug Fixes Applied
-
-1. **get_pending_nudges SQL**: `do` is a reserved PostgreSQL keyword — renamed table alias to `dout` in deliberation JOIN query
-2. **generate_patient.py**: `birth_date` string→`date` object conversion for asyncpg
-3. **compute_obt_score.py**: Pre-computed `target_plus_one` to avoid asyncpg type error; returns JSON
-4. **crisis_escalation.py**: Same INTERVAL fix; returns JSON with `escalation_triggered` field
-5. **pytest-asyncio**: Pinned to 0.21.2 (1.x broke session-scoped event_loop pattern)
-6. **schema.sql**: Added FK constraints to 10 previously unlinked tables; added UNIQUE index on biometric_readings
-7. **dashboard completeness**: Uses `_explicitly_set()` — defaults don't count as user-configured
-8. **FHIR fixtures**: 10 minimal Synthea bundles in `/home/runner/synthea-output/fhir/`
-9. **context_compiler UUID lookup**: `run_deliberation(patient_id=<UUID>)` now works for HealthEx patients registered via `register_healthex_patient` — added UUID regex detection + `WHERE id = $1::uuid` fallback before the partial MRN LIKE match
-10. **IndependentAnalysis schema**: `model_id`, `role_emphasis`, `raw_reasoning` now default to `""` so `model_validate_json` succeeds before the caller sets them server-side (analyst.py lines 112-116)
-11. **Analyst prompts**: Updated `analyst_claude.xml` and `analyst_gpt4.xml` with explicit JSON skeleton showing `claim`/`confidence` field names, plain-string `anticipated_trajectory`, plain-string list for `missing_data_identified` — prevents LLM from using `finding`/`risk`/`action` aliases or wrapping values in dicts
-12. **test_system_config_data_track**: Fixed to accept any valid track value (`synthea`, `healthex`, `auto`) instead of hardcoding `synthea` — `DATA_TRACK` is a live mutable config that changes when `use_healthex()` is called
-13. **Adaptive ingest pipeline** (PR #12): `ingest_from_healthex` now calls `adaptive_parse()` — all 5 HealthEx payload formats (plain text, compressed table, flat FHIR text, FHIR Bundle JSON, JSON dict arrays) are detected and normalized deterministically; LLM fallback fires when deterministic parsers return 0 rows on non-trivial input
-14. **Fence-stripping in deliberation engine**: `strip_markdown_fences()` added to `json_utils.py` and wired into `analyst.py` (both Claude + GPT-4) and `critic.py` (CrossCritique + RevisedAnalysis) — prevents `model_validate_json` crash when LLMs wrap responses in ```json fences despite explicit instructions
-15. **TestRawTextPayloadCaching → TestFormatBCompressedTableIngest**: Old tests asserting `records_written == 0` for `#`-prefixed payloads were incorrect after the adaptive pipeline landed — updated to verify `format_detected='compressed_table'`, `parser_used='format_b_compressed_table'`, and `records_written` is a dict
-16. **UC-07 staleness assertion**: `test_uc07_check_data_freshness` updated to only flag stale sources with `records_count > 0` — `synthea` source in test environment has 0 records (never populated) and being stale is expected and non-critical
-17. **e2e conftest pytest_plugins**: Removed `pytest_plugins = ["pytest_asyncio"]` from `tests/e2e/conftest.py` — non-top-level `pytest_plugins` declarations cause collection errors when running suites together; `asyncio_mode = auto` in `pytest.ini` is sufficient
-18. **Fix A — transform_by_type data_source passthrough** (`mcp-server/transforms/fhir_to_schema.py` line 292): `transform_by_type()` now passes `source` as the third positional argument to every transform function (`fn([resource], patient_id, source)`). Previously it called `fn([resource], patient_id)` so every record silently got `data_source="synthea"` (the default) regardless of the caller-supplied source. `source` is now required (no default). Verified by 6 new tests in `mcp-server/tests/test_fix_verification.py`.
-19. **Fix B — transform_encounters string type guard** (`mcp-server/transforms/fhir_to_schema.py` lines 206-217): `transform_encounters()` now guards `r.get("type")` with `isinstance(..., list)` before indexing. When `type` is a raw string (e.g. `"encounter"`) it wraps it as `{"display": raw_type}` instead of crashing with `AttributeError: 'str' object has no attribute 'get'`. When `type` is `None` or a list with a non-dict first element, the guard prevents the crash. Verified by 9 new tests in `test_fix_verification.py`.
-20. **Fix C — Format B parser encounters support** (`ingestion/adapters/healthex/parsers/format_b_parser.py`): `parse_compressed_table()` now handles `resource_type="encounters"`. Added `"encounters"` to `_default_headers()` (8 columns), `"Type": "C"` and `"Location": "C"` to `_build_col_dict_map()`, an `elif resource_type == "encounters"` branch to `_to_native()` returning `{type, date, description, provider, status}`, and `"encounters": ("type", "date")` to `_deduplicate()`. Dict references use `C:` prefix for type lookups. Verified by 12 new tests in `test_fix_verification.py`.
-21. **Fix — Text payloads routed through adaptive_parse** (`mcp-server/skills/ingestion_tools.py` — branch `claude/fix-ingestion-pipeline-7qQy4`, commit `f6047ab`): Previously `ingest_from_healthex` short-circuited all `#`-prefixed text payloads (Format A/B/C) with `records_written: 0`, caching raw text but never parsing it. Now the text-payload branch calls `adaptive_parse()`, maps results through new `_native_to_warehouse_rows()` helper (labs→`biometric_readings`, conditions→`patient_conditions`, medications→`patient_medications`, encounters→`clinical_events`), and feeds rows into the existing per-table INSERT loop. Also added `_parse_lab_value()` to extract floats from strings like `"34.0-34.9"` or `">60"`. Verified live: Format B conditions=3 rows, labs=3 rows, encounters=2 rows (all previously 0).
-22. **Fix — `safe_json_loads()` in deliberation engine** (`server/deliberation/json_utils.py`): Added `safe_json_loads(text)` — strips markdown fences first, returns `{}` for empty/None input, raises `ValueError` with a 200-char preview on `JSONDecodeError` instead of propagating raw exception. Prevents synthesizer crash when Claude wraps its output in ` ```json ``` ` fences.
-23. **Fix — synthesizer uses `safe_json_loads`** (`server/deliberation/synthesizer.py`): Replaced bare `json.loads(raw)` with `safe_json_loads(raw)` — prevents `Unterminated string` / `JSONDecodeError` crash when the synthesizer receives fence-wrapped output from Claude.
-26. **Fix — Content-Type Router + Context Compiler** (`ingestion/adapters/healthex/content_router.py` — migration `004_content_router_tables.sql`): Resolves ultrasound blob `Unterminated string` / deliberation JSON crash. (a) `classify_content_type()` maps MIME types to `text/struct/ref/unknown` routes; (b) `strip_html()` — `HTMLParser` subclass strips tags, collapses whitespace, excludes `<style>`/`<script>`; (c) `strip_rtf()` — regex removes RTF control words; (d) `sanitize_for_context()` — JSON round-trip escaping (canonical fix for quote-escape crash); (e) `_deep_sanitize()` — recursive dict/list sanitizer; (f) `route_fhir_resource()` — dispatches Binary/DocumentReference/Observation/Practitioner to text, struct, ref, or skip; (g) `route_and_write_resources()` + `write_clinical_note_row()` + `write_media_reference_row()` write to the two new tables; (h) `_parse_ts()` converts ISO datetime strings to Python datetime before asyncpg bind. Executor wiring: `_extract_routable_resources()` extracts Binary/DocRef/Observation(valueString)/Practitioner from raw JSON blobs; called as supplemental step in `_execute_one_plan()`. Context compiler: imports `sanitize_for_context`/`_deep_sanitize` from content_router (with inline fallback); queries `clinical_notes` (step 10) and `media_references` (step 11); populates `PatientContextPackage.clinical_notes` and `.available_media`. Schema: `PatientContextPackage` gains two new `list[dict]` fields (`clinical_notes`, `available_media`). 2 new DB tables (`clinical_notes`, `media_references`), 4 indexes, both FK→patients. 41 new tests (CR-01→CR-36+). Total: 194 phase1 tests.
-
-25. **Fix — Traceable Transfer Pipeline** (`ingestion/adapters/healthex/transfer_planner.py` + `traced_writer.py` — migration `003_transfer_log.sql`): Five confirmed failures addressed: (a) bulk-blob writes (all rows → 1 DB record) fixed by per-record loop; (b) no audit trail fixed by `transfer_log` table (28 columns, 4 status transitions: planned→sanitized→written→verified); (c) double-quote blob escaping fixed by `sanitize_text_field()` called before any DB write; (d) size-aware chunking via `plan_transfer()` selecting single/chunked_small/chunked_medium/chunked_large strategy; (e) each `TransferRecord` carries `record_key`, `record_hash`, LOINC/ICD-10 code, batch/chunk UUIDs. `executor.py` updated to call `execute_transfer_plan_async()` instead of bulk `_transform_and_write_rows()`. New MCP tool `get_transfer_audit` (18th tool) + REST wrapper at `/tools/get_transfer_audit`. 21 new phase1 tests (`test_transfer_pipeline.py` TP-01→TP-20+). Total: 153 phase1 tests.
-
-24. **Fix — Two-phase async ingestion architecture** (`ingestion/adapters/healthex/planner.py` + `executor.py` — branch `claude/fix-ingestion-blob-loop-2A6H2`, commit `3609e7e`): Large HealthEx blobs previously wrote only 1 row instead of 34+ due to timeout in the single-pass loop. Phase 1 (fast, <500ms): `ingest_from_healthex` caches raw blob in `raw_fhir_cache` (with new `raw_text` + `detected_format` columns), runs LLM planner → creates `ingestion_plans` row. Phase 2 (inline or async): `execute_pending_plans` reads plan → adaptive_parse → writes rows one-at-a-time → updates plan status. Non-numeric lab values (Negative, Positive, No growth) are now preserved (previously dropped silently). Added 2 new MCP tools (`execute_pending_plans`, `get_ingestion_plans`) + migration `002_ingestion_plans.sql` (18-column table). 16 new unit tests (PL-1–PL-8 + EX-1–EX-8) + 8 IP integration tests + 3 REST smoke tests.
-25. **Fix — REST wrappers for execute_pending_plans + get_ingestion_plans** (`server/mcp_server.py`): Added `@mcp.custom_route("/tools/execute_pending_plans")` and `@mcp.custom_route("/tools/get_ingestion_plans")` so the new tools are reachable from HTML prototypes and smoke tests via the same `/tools/<name>` REST pattern as all other tools.
-
-## "No approval received" Note (Claude Web Behaviour)
-
-`use_healthex` and `register_healthex_patient` work correctly when called directly via MCP protocol (verified by curl smoke tests). The "No approval received" message is **Claude Web's own HITL safety gate** for state-modifying tool calls — it is not emitted by our servers. If Claude Web blocks those tools, the user must explicitly approve in the chat when prompted, or call the tools in a Claude session configured without HITL gating.
+- **MCP tools**: Never use `print()` — all logging goes to `sys.stderr`
+- **Model names**: `claude-sonnet-4-20250514` (clinical/synthesis), `gpt-4o` (deliberation critic), `claude-haiku-4-5-20251001` (flag reviewer + planner + synthesis reviewer)
+- **pytest-asyncio**: Pinned to 0.21.2 — 1.x breaks session-scoped `event_loop` pattern
+- **pytest.ini**: `asyncio_mode = auto` + `--import-mode=importlib` required
+- **MCP discovery**: `.mcp.json` must use public HTTPS URLs (not localhost) — `scripts/generate_mcp_json.py` regenerates it from `$REPLIT_DEV_DOMAIN` at every startup via `start.sh`
+- **OAuth**: All 5 OAuth routes must be present — Claude hits `/.well-known/oauth-protected-resource` before connecting; 404 here causes "server appears to be sleeping" error
+- **Deliberation fire-and-forget**: `run_deliberation` is async — poll `get_deliberation_results` for output
+- **HealthEx protocol**: `register_healthex_patient` MUST be called before `ingest_from_healthex` — it bootstraps the `patients` row that `run_deliberation` requires
+- **Fence-stripping**: LLMs wrap JSON in ` ```json ``` ` fences — `json_utils.strip_markdown_fences()` is called in analyst.py, critic.py, synthesizer.py before `model_validate_json`
+- **Patients table**: `first_name`, `last_name` are nullable (many HealthEx patients have NULL names)
+- **Port config**: Next.js=5000, Config Dashboard=8080, Clinical MCP=8001, Skills MCP=8002, Ingestion MCP=8003

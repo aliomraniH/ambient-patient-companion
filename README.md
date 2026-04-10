@@ -52,109 +52,57 @@ This project operationalizes three peer-reviewed streams of research:
 
 ---
 
-## The Patient: Maria Chen
-
-All prototypes and clinical scenarios are built around a single canonical patient — Maria Chen — whose six-month journey provides the continuous data substrate the system needs to demonstrate emergent intelligence.
-
-```
-Maria Chen, 54
-├── Type 2 Diabetes Mellitus  — HbA1c 7.8% at intake
-├── Hypertension              — baseline BP 141/86 mmHg
-├── Generalized Anxiety Disorder
-└── Hypothyroidism
-    Care setting: Patel Family Medicine
-    Companion start: October 28, 2025
-```
-
-### Six-Month Clinical Arc
-
-```mermaid
-gantt
-    title Maria Chen — Six-Month Journey
-    dateFormat  YYYY-MM-DD
-    axisFormat  %b %d
-
-    section Wellness Score
-    Not scored (overwhelmed)        :done,    w0,  2025-10-28, 2025-11-19
-    Building (71/100 — Amber)       :active,  w1,  2025-11-20, 2026-01-19
-    Growing (76/100 — Amber)        :active,  w2,  2026-01-20, 2026-02-07
-    Crisis (52/100 — Red)           :crit,    w3,  2026-02-08, 2026-02-17
-    Recovery (58→84 — Green)        :         w4,  2026-02-18, 2026-04-28
-
-    section Clinical Events
-    Day 0 — Diagnosis               :milestone, 2025-10-28, 0d
-    Day 45 — First AI insight       :milestone, 2025-12-14, 0d
-    Month 3 — Care gap flagged      :milestone, 2026-01-20, 0d
-    Month 4 — Mother hospitalized   :crit, crisis, 2026-02-08, 10d
-    Care coordinator call           :milestone, 2026-02-18, 0d
-    Six-month milestone             :milestone, 2026-04-25, 0d
-```
-
-| Phase | Date | Wellness | What the AI does |
-|-------|------|----------|-----------------|
-| **Day 0** | Oct 28 | — | Welcome only. No data yet. No tracking. |
-| **Week 3** | Nov 20 | Building | First morning check-in flow. 4 emoji-tap questions. Baseline dots. |
-| **Day 45** | Dec 14 | 71 Amber | Wellness Ring debuts. "One Big Thing." First AI insight surfaces. |
-| **Full Day** | Dec 16 | 71 Amber | Stress → BP correlation confirmed. Embedded chat. Escalation demo. |
-| **Growing** | Jan 20 | 76 Amber | End-of-month glucose alert. Care gap proactive flag. |
-| **Crisis** | Feb 8 | 58 Red | Mother hospitalized. Minimal UI. Companion just present. |
-| **Care Response** | Feb 18 | 52 Red | Invisible 7-day behavioral signal triggers care coordinator call. |
-| **6 Months** | Apr 25 | 84 Green | HbA1c 7.1%, BP 133/82, PHQ-9 down 8 points. Pre-visit brief ready. |
-
-**Outcomes at 6 months:** HbA1c 7.8% → 7.1% · BP 141/86 → 133/82 · 76% check-in adherence · PHQ-9 down 8 points
-
----
-
 ## System Architecture
 
 ```mermaid
 graph TB
-    subgraph "Public Access (HTTPS, no port)"
-        CW["Claude Web<br/>ambient-clinical-intelligence"]
-        CD["Claude Desktop<br/>npx mcp-remote"]
-        BR["Browser / Prototypes<br/>REST API"]
+    subgraph "Claude Web / API"
+        CW["OAuth PKCE handshake<br/>auto-handled by Next.js"]
     end
 
     subgraph "Next.js 16 — Port 5000"
-        NX["next.config.ts<br/>Reverse Proxy Rewrites"]
-        UI["App Router UI<br/>React Components"]
+        NX["Proxy Rewrites"]
+        OA["OAuth Layer<br/>/.well-known/* · /register<br/>/authorize · /token"]
     end
 
     subgraph "MCP Server 1 — Port 8001"
-        S1["ClinicalIntelligence<br/>FastMCP + Guardrails"]
-        G1["3-Layer Guardrail Pipeline<br/>input → escalation → output"]
+        S1["ambient-clinical-intelligence<br/>FastMCP 3.2"]
+        G1["3-Layer Guardrail Pipeline"]
+        DE["Dual-LLM Deliberation Engine<br/>6 phases · Claude + GPT-4o"]
         T1["19 Tools"]
     end
 
     subgraph "MCP Server 2 — Port 8002"
-        S2["PatientCompanion<br/>FastMCP Skills Server"]
-        SK["Auto-discovered Skills<br/>10 skill modules"]
-        T2["17 Tools"]
+        S2["ambient-skills-companion<br/>FastMCP 3.2"]
+        SK["10 skill modules<br/>auto-discovered"]
+        T2["18 Tools"]
     end
 
     subgraph "MCP Server 3 — Port 8003"
-        S3["PatientIngestion<br/>FastMCP ETL Server"]
-        T3["1 Tool: trigger_ingestion"]
+        S3["ambient-ingestion<br/>FastMCP 3.2"]
+        T3["1 Tool — trigger_ingestion<br/>5 format parsers"]
     end
 
-    subgraph "PostgreSQL Warehouse"
-        DB["34-table schema<br/>patients · vitals · check-ins<br/>biometrics · deliberations · flags<br/>ingestion_plans · clinical_notes · …"]
+    subgraph "PostgreSQL — 34 Tables"
+        DB["patients · biometrics · conditions<br/>deliberations · flags · nudges<br/>ingestion_plans · transfer_log<br/>clinical_notes · system_config · …"]
     end
 
-    subgraph "Anthropic API"
-        AN["claude-sonnet-4-6<br/>Clinical reasoning only<br/>through guardrails"]
+    subgraph "LLMs"
+        AN["claude-sonnet-4-20250514<br/>clinical + synthesis"]
+        GP["gpt-4o<br/>deliberation critic"]
+        HA["claude-haiku-4-5-20251001<br/>flag review · planner · reviewer"]
     end
 
+    CW -->|"OAuth PKCE"| OA
     CW -->|"/mcp"| NX
-    CD -->|"/mcp"| NX
-    BR -->|"/tools/*"| NX
-
     NX -->|"localhost:8001"| S1
     NX -->|"localhost:8002"| S2
     NX -->|"localhost:8003"| S3
-    NX --> UI
 
     S1 --> G1 --> AN
+    S1 --> DE --> AN
+    DE --> GP
+    DE --> HA
     S1 --> DB
     S2 --> SK --> DB
     S3 --> DB
@@ -164,18 +112,19 @@ graph TB
     style S3 fill:#C9864A,color:#fff
     style DB fill:#2d4a6b,color:#fff
     style AN fill:#c9655c,color:#fff
+    style OA fill:#3E6B5C,color:#fff
 ```
 
 ---
 
 ## Three MCP Servers
 
-### Server 1 — ClinicalIntelligence `server/mcp_server.py`
+### Server 1 — `ambient-clinical-intelligence` · `server/mcp_server.py`
 
-The primary clinical intelligence layer. Every AI call passes through a three-layer guardrail pipeline before touching the Anthropic API. Also hosts the HealthEx ingestion pipeline, Dual-LLM Deliberation Engine, and Flag Lifecycle system.
+The primary clinical intelligence layer. Every AI call passes through a three-layer guardrail pipeline. Also hosts the HealthEx ingestion pipeline, Dual-LLM Deliberation Engine, and Flag Lifecycle system.
 
 ```
-/mcp  →  http://localhost:8001/mcp
+Public URL: https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp
 
 Guardrail Pipeline:
   Layer 1 — Input:      PHI detection · jailbreak blocking · scope check · emotional tone flag
@@ -183,39 +132,39 @@ Guardrail Pipeline:
   Layer 3 — Output:     citation check · PHI leakage scan · diagnostic language flags · drug grounding
 ```
 
-| Tool | Description | Public REST |
-|------|-------------|-------------|
-| `clinical_query` | 3-layer guardrail → Claude → validated response | `POST /tools/clinical_query` |
+| Tool | Description | REST |
+|------|-------------|------|
+| `clinical_query` | 3-layer guardrail → Claude Sonnet → validated response | `POST /tools/clinical_query` |
 | `get_guideline` | Fetch ADA/USPSTF guideline by ID (e.g., `9.1a`) | `GET /tools/get_guideline` |
 | `check_screening_due` | Overdue USPSTF screenings for patient profile | `POST /tools/check_screening_due` |
 | `flag_drug_interaction` | Known drug interactions from clinical rules | `POST /tools/flag_drug_interaction` |
-| `get_synthetic_patient` | Maria Chen demo patient (MRN 4829341) | `GET /tools/get_synthetic_patient` |
+| `get_synthetic_patient` | Demo patient from live DB (MRN 4829341) | `GET /tools/get_synthetic_patient` |
 | `use_healthex` | Switch data track to HealthEx real records | `POST /tools/use_healthex` |
 | `use_demo_data` | Switch data track to Synthea demo data | `POST /tools/use_demo_data` |
 | `switch_data_track` | Switch to named track (synthea/healthex/auto) | `POST /tools/switch_data_track` |
 | `get_data_source_status` | Report active track + available sources | `GET /tools/get_data_source_status` |
 | `register_healthex_patient` | Create/upsert HealthEx patient row, return UUID | `POST /tools/register_healthex_patient` |
-| `ingest_from_healthex` | Write HealthEx FHIR data into warehouse | `POST /tools/ingest_from_healthex` |
-| `execute_pending_plans` | Execute pending two-phase ingestion plans | `POST /tools/execute_pending_plans` |
-| `get_ingestion_plans` | List ingestion plans for a patient | `POST /tools/get_ingestion_plans` |
-| `get_transfer_audit` | Audit trail for data transfers | `POST /tools/get_transfer_audit` |
+| `ingest_from_healthex` | Two-phase ingest: plan (fast) + execute (write rows) | `POST /tools/ingest_from_healthex` |
+| `execute_pending_plans` | Re-execute failed/pending ingestion plans | `POST /tools/execute_pending_plans` |
+| `get_ingestion_plans` | Read plan summaries + insights_summary | `POST /tools/get_ingestion_plans` |
+| `get_transfer_audit` | Per-record transfer_log audit trail | `POST /tools/get_transfer_audit` |
 | `run_deliberation` | Dual-LLM deliberation (progressive or full mode) | `POST /tools/run_deliberation` |
-| `get_deliberation_results` | Retrieve deliberation outputs per patient | `POST /tools/get_deliberation_results` |
-| `get_flag_review_status` | Flag lifecycle status (open, retracted, needs review) | `POST /tools/get_flag_review_status` |
+| `get_deliberation_results` | Retrieve stored deliberation outputs | `POST /tools/get_deliberation_results` |
+| `get_flag_review_status` | Flag lifecycle status (open/retracted/pending human review) | `POST /tools/get_flag_review_status` |
 | `get_patient_knowledge` | Accumulated patient-specific knowledge | `POST /tools/get_patient_knowledge` |
 | `get_pending_nudges` | Queued nudges for delivery scheduling | `POST /tools/get_pending_nudges` |
 
-### Server 2 — PatientCompanion `mcp-server/server.py`
+### Server 2 — `ambient-skills-companion` · `mcp-server/server.py`
 
-All 17 clinical skills are auto-discovered from `mcp-server/skills/` via a `register(mcp)` convention. Includes data track management and HealthEx ingestion utilities.
+18 clinical skills auto-discovered from `mcp-server/skills/` via a `register(mcp)` convention.
 
 ```
-/mcp-skills  →  http://localhost:8002/mcp
+Public URL: https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-skills
 ```
 
 ```mermaid
 graph LR
-    subgraph "PatientCompanion — 17 tools"
+    subgraph "ambient-skills-companion — 18 tools"
         A["compute_obt_score<br/>Optimal Being Trajectory"]
         B["compute_provider_risk<br/>Chase list score"]
         C["run_crisis_escalation<br/>Behavioral crisis detection"]
@@ -225,7 +174,7 @@ graph LR
         G["generate_daily_vitals<br/>Biometric reading seed"]
         H["generate_previsit_brief<br/>Pre-encounter synthesis"]
         I["run_sdoh_assessment<br/>Social determinants"]
-        J["check_data_freshness<br/>run_ingestion<br/>get_source_conflicts<br/>get_data_source_status<br/>ingest_from_healthex<br/>switch_data_track<br/>use_healthex / use_demo_data"]
+        J["Data track tools (8)<br/>freshness · ingestion · conflicts<br/>source status · healthex · demo data"]
     end
 
     style A fill:#6B5EA8,color:#fff
@@ -236,35 +185,71 @@ graph LR
     style J fill:#2d4a6b,color:#fff
 ```
 
-### Server 3 — PatientIngestion `ingestion/server.py`
+### Server 3 — `ambient-ingestion` · `ingestion/server.py`
 
 ```
-/mcp-ingestion  →  http://localhost:8003/mcp
+Public URL: https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-ingestion
 
 trigger_ingestion(patient_id, source, force_refresh)
-  Runs full ETL pipeline: FHIR parse → conflict detection → upsert → freshness log
+  Full ETL pipeline: FHIR parse → conflict detection → upsert → freshness log
   Adapters: synthea (demo) | healthex (real records)
+  Format parsers: A (plain text) · B (compressed table) · C (flat FHIR text) · D (FHIR JSON) · JSON-dict
 ```
 
 ---
 
-## Public URLs
+## Connecting Claude
 
-All three servers are proxied through Next.js — no port number required in any URL.
+All three servers require OAuth PKCE before connecting. The flow completes automatically — no login screen because this is a public server. Claude handles the handshake invisibly.
 
-| Connector Name | URL | Tools |
-|---------------|-----|-------|
-| `ambient-clinical-intelligence` | `https://[your-domain]/mcp` | 19 |
-| `ambient-skills-companion` | `https://[your-domain]/mcp-skills` | 17 |
-| `ambient-ingestion` | `https://[your-domain]/mcp-ingestion` | 1 |
+**To add to Claude:** Settings → Integrations → Add custom integration → paste URL below → done.
 
-To add to Claude Web: **Settings → Integrations → Add custom integration** — paste URL, set name, done.
+| Server | URL |
+|--------|-----|
+| `ambient-clinical-intelligence` | `https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp` |
+| `ambient-skills-companion` | `https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-skills` |
+| `ambient-ingestion` | `https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-ingestion` |
+
+The OAuth discovery endpoints are served by Next.js:
+
+| Endpoint | RFC | Purpose |
+|---|---|---|
+| `GET /.well-known/oauth-protected-resource` | RFC 9728 | Declares auth server — prevents "server sleeping" error |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 | Lists token/register/authorize endpoints |
+| `POST /register` | RFC 7591 | Issues `client_id` to Claude |
+| `GET /authorize` | RFC 6749 | Auto-issues authorization code |
+| `POST /token` | RFC 6749 | Returns Bearer token |
 
 ---
 
-## Database Schema
+## Dual-LLM Deliberation Engine
 
-34-table PostgreSQL warehouse across the base schema and 8 migrations. All data is FK-constrained.
+An async pre-computation pipeline where Claude Sonnet and GPT-4o independently analyze a patient's clinical context, cross-critique each other, then synthesize into 5 structured output categories.
+
+```mermaid
+graph LR
+    subgraph "6-Phase Deliberation Pipeline"
+        P05["Phase 0.5<br/>planner.py<br/>Pre-deliberation agenda (Haiku)"]
+        P0["Phase 0<br/>context_compiler.py<br/>EHR context assembly (11K budget)"]
+        P1["Phase 1<br/>analyst.py<br/>Claude + GPT-4o in parallel"]
+        P2["Phase 2<br/>critic.py<br/>Cross-critique + convergence"]
+        P3["Phase 3<br/>synthesizer.py<br/>Unified synthesis"]
+        P325["Phase 3.25<br/>synthesis_reviewer.py<br/>Domain review (Haiku)"]
+        P35["Phase 3.5<br/>output_safety.py<br/>Guardrail wrapper"]
+        P4["Phase 4<br/>behavioral_adapter.py<br/>SMS/nudge formatting"]
+        P5["Phase 5<br/>knowledge_store.py<br/>Atomic DB commit"]
+    end
+
+    P05 --> P0 --> P1 --> P2 --> P3 --> P325 --> P35 --> P4 --> P5
+```
+
+**5 output categories** (from synthesis): clinical_findings · medication_review · care_gaps · behavioral_insights · care_coordination_actions
+
+**Flag Lifecycle**: deliberation results are screened by `flag_reviewer.py` (Haiku). Flags with `had_zero_values=True` or `requires_human=True` are held for human review before activation.
+
+---
+
+## Database Schema — 34 Tables
 
 ```mermaid
 erDiagram
@@ -273,9 +258,6 @@ erDiagram
     patients ||--o{ biometric_readings : generates
     patients ||--o{ daily_checkins : submits
     patients ||--o{ obt_scores : receives
-    patients ||--o{ provider_risk_scores : tracked_by
-    patients ||--o{ sdoh_assessments : assessed_via
-    patients ||--o{ ingestion_runs : ingested_via
     patients ||--o{ deliberations : analyzed_by
     patients ||--o{ deliberation_flags : flagged_in
     patients ||--o{ ingestion_plans : planned_for
@@ -284,15 +266,11 @@ erDiagram
         uuid patient_id
         string metric_type
         float value
-        text result_text
-        text reference_range_text
-        numeric value_precise
         timestamp measured_at
     }
 
     deliberations {
         uuid patient_id
-        string trigger_type
         float convergence_score
         int rounds_completed
         string mode
@@ -302,43 +280,23 @@ erDiagram
         uuid patient_id
         string title
         enum lifecycle_state
-        enum flag_basis
         enum priority
         bool requires_human
-    }
-
-    ingestion_plans {
-        uuid patient_id
-        string resource_type
-        string status
-        jsonb insights_summary
-        int rows_written
-    }
-
-    system_config {
-        string key
-        string value
-        timestamp updated_at
     }
 ```
 
 **Table groups:**
-- **Base schema** (22 tables): `patients`, `patient_conditions`, `patient_medications`, `patient_sdoh_flags`, `biometric_readings`, `daily_checkins`, `medication_adherence`, `clinical_events`, `care_gaps`, `obt_scores`, `clinical_facts`, `behavioral_correlations`, `agent_interventions`, `agent_memory_episodes`, `skill_executions`, `provider_risk_scores`, `pipeline_runs`, `data_sources`, `source_freshness`, `ingestion_log`, `raw_fhir_cache`, `system_config`
-- **Deliberation tables** (8 tables, migrations 001–004): `deliberations`, `deliberation_outputs`, `patient_knowledge`, `core_knowledge_updates`, `deliberation_data_requests`, `deliberation_flags`, `flag_review_runs`, `flag_corrections`
-- **Ingestion tables** (4 tables, migrations 002–005): `ingestion_plans`, `transfer_log`, `clinical_notes`, `media_references`
-
-**Key constraints:**
-- `biometric_readings` has UNIQUE index on `(patient_id, metric_type, measured_at)` — idempotent upserts
-- `is_stale` in `source_freshness` is a regular boolean (not generated — asyncpg compatibility)
-- All date arithmetic pre-computed in Python before asyncpg calls (no `$N + INTERVAL` syntax)
-- Clinical data columns use TEXT not VARCHAR — Migration 005 fixed silent truncation of UCUM unit codes and reference ranges
-- `deliberation_flags` uses PostgreSQL ENUMs: `flag_lifecycle_state`, `flag_basis`, `flag_priority`, `correction_action`
+- **Base schema** (22 tables): `patients`, `patient_conditions`, `patient_medications`, `biometric_readings`, `daily_checkins`, `obt_scores`, `provider_risk_scores`, `sdoh_assessments`, `care_gaps`, `ingestion_log`, `source_freshness`, `system_config` + 10 more
+- **Deliberation** (4 tables): `deliberations`, `deliberation_outputs`, `patient_knowledge`, `core_knowledge_updates`
+- **Flag lifecycle** (3 tables): `deliberation_flags`, `flag_review_runs`, `flag_corrections`
+- **Ingestion** (4 tables): `ingestion_plans`, `transfer_log`, `clinical_notes`, `media_references`
+- **System**: `system_config` (data track, model, dashboard state)
 
 ---
 
 ## Four Interaction Contracts
 
-The `S=f(R,C,P,T)` formula produces four distinct interaction patterns, each with a completely different primary question:
+The `S=f(R,C,P,T)` formula produces four distinct interaction patterns:
 
 ```mermaid
 graph TD
@@ -372,8 +330,6 @@ graph TD
 
 ## Alert Fatigue — The Clinical Research Problem
 
-The notification architecture was built in direct response to a documented crisis:
-
 ```
 📖 JMIR Systematic Review, 2021
    → 56 alerts/day per clinician
@@ -382,16 +338,14 @@ The notification architecture was built in direct response to a documented crisi
 
 📖 AMIA Conference, 2019 (4 health systems)
    → 1/3 of medication alerts are repeats from same patient, same year
-   → Top 17 alerts at one institution = 1.7 million firings/month
 
 📖 BMC Medical Informatics, 2017
    → Two distinct fatigue mechanisms:
      (A) Cognitive overload from volume
      (B) Desensitization from repetition
-   → Volume reduction alone is insufficient
 ```
 
-**The design response — Action-First Architecture:**
+**Design response — Action-First Architecture:**
 
 ```
 Every card must result in action or be dismissed.
@@ -399,28 +353,19 @@ No "read" state.   No history.   No accumulating badge.
 The feed empties as you work. When empty: "All caught up."
 ```
 
-| Alert Right | Applied as |
-|-------------|-----------|
-| Right information | Only actionable clinical signals — no FYI alerts |
-| Right person | Routed by persona — nurse never sees lab QC alerts |
-| Right format | AI summary in plain language, action UI matched to cognitive load |
-| Right channel | Pull surface, not push interruption — clinicians come to it |
-| Right time | Critical → care gaps → routine (strict priority ordering) |
-
 ---
 
 ## AI Escalation Design
 
-A key demonstration in the prototype: **the AI's value is sometimes in what it refuses to answer.**
+A key demonstration: **the AI's value is sometimes in what it refuses to answer.**
 
 ```
 Normal flow:
-  Maria asks about stress → BP relationship     ← AI answers
-  Maria asks about Tuesday's reading (148/91)   ← AI answers
-  Maria asks if twice-daily breathing helps     ← AI answers
+  Patient asks about stress → BP relationship     ← AI answers
+  Patient asks about Tuesday's reading (148/91)   ← AI answers
 
 Escalation trigger:
-  Maria: "My head hurts — adjust my pill?"
+  Patient: "My head hurts — adjust my pill?"
 
   Instead of answering:
   ┌─────────────────────────────────────────────────────┐
@@ -459,39 +404,39 @@ graph LR
     style W5 fill:#2d4a6b,color:#fff
 ```
 
+`start.sh` is the production entry point. It calls `scripts/generate_mcp_json.py` first to regenerate `.mcp.json` with the correct public HTTPS URLs from `$REPLIT_DEV_DOMAIN`, then starts all 5 services.
+
 ---
 
-## Test Coverage
+## Test Coverage — ~670 tests
 
 ```
-Total: ~695 test functions
-
-┌────────────────────────────────────┬────────┬───────────┐
-│ Suite                              │ Tests  │ Framework │
-├────────────────────────────────────┼────────┼───────────┤
-│ Phase 1 Clinical Intelligence      │  196   │ pytest    │
-│ Phase 2 Deliberation + Flags       │   95   │ pytest    │
-│ Ingestion Pipeline                 │  152   │ pytest    │
-│ Deliberation Engine Unit           │  109   │ pytest    │
-│ Backend MCP Skills                 │   92   │ pytest    │
-│ Frontend (Next.js)                 │   37   │ Jest      │
-│ Config Dashboard                   │   30   │ anyio     │
-│ End-to-End MCP use-cases           │   28   │ pytest    │
-│ MCP Smoke Tests                    │   24   │ pytest    │
-└────────────────────────────────────┴────────┴───────────┘
+┌────────────────────────────────────────┬────────┬───────────┐
+│ Suite                                  │ Tests  │ Framework │
+├────────────────────────────────────────┼────────┼───────────┤
+│ Phase 1 Clinical Intelligence          │  196   │ pytest    │
+│ Phase 2 Deliberation + Flags           │   95   │ pytest    │
+│ Deliberation Engine Unit               │  109   │ pytest    │
+│ Ingestion Pipeline                     │  152   │ pytest    │
+│ Skills MCP Backend                     │   92   │ pytest    │
+│ End-to-End MCP Use-Cases               │   28   │ pytest    │
+│ MCP Smoke Tests                        │   24   │ pytest    │
+│ MCP Discovery + OAuth (DN-1–DN-26)     │   26   │ pytest    │
+│ Frontend (Next.js)                     │   37   │ Jest      │
+│ Config Dashboard                       │   30   │ anyio     │
+└────────────────────────────────────────┴────────┴───────────┘
 ```
 
 ```bash
-# Run all suites
-python -m pytest tests/phase1/ -v                 # Phase 1 clinical intelligence
-python -m pytest tests/phase2/ -v                 # Phase 2 deliberation + flags
-python -m pytest tests/e2e/ -v                    # End-to-end MCP tests
-python -m pytest tests/test_mcp_smoke.py -v       # MCP smoke tests
-python -m pytest ingestion/tests/ -v              # Ingestion pipeline
-python -m pytest server/deliberation/tests/ -v    # Deliberation engine unit
-cd mcp-server && python -m pytest tests/ -v       # Backend skills
-cd replit-app && npm test                         # Frontend tests
-cd replit_dashboard && python -m pytest           # Dashboard tests
+python -m pytest tests/phase1/ -v
+python -m pytest tests/phase2/ -v
+python -m pytest server/deliberation/tests/ -v
+python -m pytest ingestion/tests/ -v
+python -m pytest tests/e2e/ -v
+python -m pytest tests/test_mcp_discovery.py -v   # DN-1 to DN-26
+cd mcp-server && python -m pytest tests/ -v
+cd replit-app && npm test
+cd replit_dashboard && python -m pytest tests/ -v
 ```
 
 ---
@@ -503,209 +448,57 @@ ambient-patient-companion/
 │
 ├── replit-app/                  Next.js 16 frontend (port 5000)
 │   ├── next.config.ts           Proxy rewrites → 3 MCP servers
-│   ├── app/                     App Router pages + API routes
-│   └── components/              React UI components
+│   ├── lib/oauth-store.ts       In-memory OAuth client/code/token store
+│   ├── app/
+│   │   ├── .well-known/         OAuth discovery (RFC 9728 + RFC 8414)
+│   │   ├── authorize/           Authorization code grant (auto-issues)
+│   │   ├── token/               Token exchange
+│   │   ├── register/            Dynamic client registration (RFC 7591)
+│   │   └── api/                 patients · vitals · checkin · obt · mcp · sse
+│   └── components/
+│       └── PatientManager.tsx   Patient CRUD (search · add · edit · delete)
 │
-├── server/                      Server 1: ClinicalIntelligence (port 8001)
-│   ├── mcp_server.py            FastMCP: 19 tools + REST wrappers
+├── server/                      Server 1: ambient-clinical-intelligence (port 8001)
+│   ├── mcp_server.py            FastMCP: 19 tools + REST wrappers + /health
 │   ├── guardrails/              input_validator · output_validator · clinical_rules
-│   ├── deliberation/            Dual-LLM Deliberation Engine
-│   │   ├── engine.py            Orchestrator (run + run_progressive modes)
-│   │   ├── context_compiler.py  Patient context assembly from warehouse
-│   │   ├── tiered_context_loader.py  Progressive 3-tier context loading
-│   │   ├── analyst.py           Parallel Claude + GPT-4 analysis
-│   │   ├── critic.py            Cross-critique rounds
-│   │   ├── synthesizer.py       Unified synthesis
-│   │   ├── flag_reviewer.py     LLM-powered flag lifecycle review (Haiku)
-│   │   ├── flag_writer.py       Flag registry writes with provenance
-│   │   ├── data_request_parser.py  Parse agent data requests between rounds
-│   │   ├── knowledge_store.py   Patient knowledge persistence
-│   │   ├── behavioral_adapter.py  SMS/push nudge formatting
-│   │   ├── json_utils.py        Markdown fence stripping
-│   │   ├── schemas.py           Pydantic models
-│   │   ├── prompts/             LLM prompt templates
-│   │   ├── migrations/          4 SQL migrations (001–004)
-│   │   └── tests/               109 deliberation unit tests
-│   └── migrations/              4 SQL migrations (002–005)
+│   └── deliberation/            Dual-LLM Deliberation Engine (6 phases)
+│       ├── engine.py            Phase orchestrator
+│       ├── planner.py           Phase 0.5: agenda builder (Haiku)
+│       ├── context_compiler.py  Phase 0: EHR context assembly
+│       ├── analyst.py           Phase 1: parallel Claude + GPT-4o
+│       ├── critic.py            Phase 2: cross-critique
+│       ├── synthesizer.py       Phase 3: unified synthesis
+│       ├── synthesis_reviewer.py Phase 3.25: domain review (Haiku)
+│       ├── output_safety.py     Phase 3.5: guardrail wrapper
+│       ├── behavioral_adapter.py Phase 4: nudge formatting
+│       ├── knowledge_store.py   Phase 5: DB commit
+│       ├── flag_reviewer.py     LLM flag lifecycle review (Haiku)
+│       └── flag_writer.py       Flag registry writes
 │
-├── mcp-server/                  Server 2: PatientCompanion (port 8002)
-│   ├── server.py                FastMCP: auto-discovers all skills
-│   ├── skills/                  10 skill modules, each with register(mcp)
-│   │   ├── compute_obt_score.py
-│   │   ├── generate_patient.py
-│   │   ├── generate_vitals.py
-│   │   ├── generate_checkins.py
-│   │   ├── compute_provider_risk.py
-│   │   ├── crisis_escalation.py
-│   │   ├── sdoh_assessment.py
-│   │   ├── previsit_brief.py
-│   │   ├── food_access_nudge.py
-│   │   └── ingestion_tools.py   8 tools: freshness, ingestion, conflicts, data tracks
-│   ├── db/schema.sql            22-table PostgreSQL base schema (source of truth)
-│   ├── transforms/              FHIR-to-schema transformers
-│   ├── seed.py                  Seed: python mcp-server/seed.py --patients 10
-│   └── tests/                   92 backend tests (pytest)
+├── mcp-server/                  Server 2: ambient-skills-companion (port 8002)
+│   ├── server.py                FastMCP: auto-discovers skills (18 tools)
+│   ├── skills/                  10 skill modules
+│   ├── db/schema.sql            22-table base schema (source of truth)
+│   └── transforms/              FHIR-to-schema transformers
 │
-├── ingestion/                   Server 3: PatientIngestion (port 8003)
+├── ingestion/                   Server 3: ambient-ingestion (port 8003)
 │   ├── server.py                FastMCP: trigger_ingestion tool
-│   ├── pipeline.py              ETL pipeline orchestrator
-│   ├── conflict_resolver.py     Multi-source conflict resolution
-│   ├── adapters/
-│   │   └── healthex/            Two-phase async ingestion adapter
-│   │       ├── content_router.py    TEXT/STRUCT/REF content classification
-│   │       ├── executor.py          Phase 2 worker: plan → parse → write
-│   │       ├── format_detector.py   HealthEx format A/B/C/D detection
-│   │       ├── planner.py           LLM-assisted extraction planning
-│   │       ├── transfer_planner.py  Traceable transfer pipeline
-│   │       ├── traced_writer.py     Audited warehouse writes
-│   │       ├── llm_fallback.py      LLM fallback for unparseable data
-│   │       ├── ingest.py            Entry point
-│   │       └── parsers/             5 format-specific parsers
-│   └── tests/                   152 ingestion tests (pytest)
+│   ├── pipeline.py              ETL orchestrator
+│   └── adapters/healthex/       5-format adaptive parser + audit trail
 │
 ├── replit_dashboard/            Config Dashboard (port 8080)
-│   ├── server.py                FastAPI: 18 env keys + Claude config download
-│   ├── index.html               Single-page dashboard UI
-│   └── tests/                   30 dashboard tests
-│
+├── scripts/
+│   └── generate_mcp_json.py     Regenerates .mcp.json from $REPLIT_DEV_DOMAIN
 ├── tests/
-│   ├── phase1/                  196 Phase 1 integration tests
-│   ├── phase2/                  95 Phase 2 deliberation + flag lifecycle tests
-│   ├── e2e/                     28 end-to-end MCP use-case tests
-│   └── test_mcp_smoke.py        24 MCP smoke tests
-│
-├── docs/                        Deployment guides
-│   ├── replit-deploy-flag-lifecycle.md
-│   ├── replit-deploy-ingestion-plans.md
-│   └── mcp_use_cases.md
-│
-├── submission/                  MCP marketplace submission package
-│   ├── README.md                Integration descriptor
-│   └── icon.png                 Logo
-│
+│   ├── phase1/                  196 Phase 1 tests
+│   ├── phase2/                  95 Phase 2 tests
+│   ├── e2e/                     28 end-to-end tests
+│   ├── test_mcp_smoke.py        24 MCP smoke tests
+│   └── test_mcp_discovery.py    26 discovery + OAuth tests (DN-1–DN-26)
+├── .mcp.json                    MCP client discovery (auto-regenerated at startup)
+├── start.sh                     Production startup script
 ├── config/system_prompts/       Role-based prompts (pcp · care_manager · patient)
 ├── shared/claude-client.js      Shared JS MCP client
 ├── prototypes/                  4 HTML proof-of-concept prototypes
-├── requirements.txt             Python deps (pytest-asyncio==0.21.2 pinned)
-└── start.sh                     Production startup script
+└── submission/README.md         MCP marketplace submission
 ```
-
----
-
-## Design Principles
-
-Three principles flow directly from `S=f(R,C,P,T)` and are applied consistently across every component:
-
-**1. Cognitive simplicity over data richness**
-Showing less is an active design decision, not a limitation. The patient surface never shows a dashboard. The clinical surface never shows an unfiltered feed.
-
-**2. Trust earned through consistency**
-The companion earns the right to surface insights only after 45 days of data collection. The AI never claims certainty it does not have, and shows confidence scores where relevant.
-
-**3. Goal is health identity, not engagement**
-The prototype deliberately avoids streak mechanics, notification floods, and gamification. The patient's goal is to understand themselves, not to use an app.
-
-**What was explicitly not built:**
-- No health dashboards (aggregated metrics create anxiety without agency)
-- No daily notification floods (every notification must be actionable by definition)
-- No streak mechanics (a missed day is information, not failure)
-- No autonomous AI interventions (AI surfaces patterns; humans make decisions)
-- No clinical jargon on the patient surface
-
----
-
-## Environment Variables
-
-| Key | Source | Notes |
-|-----|--------|-------|
-| `ANTHROPIC_API_KEY` | Replit Secret | Used by ClinicalIntelligence server + deliberation |
-| `OPENAI_API_KEY` | Replit Secret | Used by Dual-LLM Deliberation Engine (GPT-4 side) |
-| `DATABASE_URL` | Auto (Replit PostgreSQL) | Used by all 3 MCP servers |
-| `LANGSMITH_API_KEY` | Replit Secret | Optional tracing |
-| `MCP_TRANSPORT` | Workflow env | `streamable-http` for all 3 servers |
-| `MCP_PORT` | Workflow env | 8001 / 8002 / 8003 |
-| `CLAUDE_MODEL` | Auto | Default: `claude-sonnet-4-6` |
-
-Config Dashboard at port 8080 manages all 18 keys across three categories (AUTO / SELF_HOSTED / THIRD_PARTY).
-
----
-
-## Seeding Data
-
-```bash
-# Generate minimal Synthea FHIR fixtures first
-python mcp-server/scripts/create_minimal_fixtures.py
-
-# Seed database: 10 patients, 6 months of history each
-python mcp-server/seed.py --patients 10 --months 6
-```
-
----
-
-## Quick Start
-
-```bash
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Install frontend dependencies
-cd replit-app && npm ci
-
-# Seed the database
-python mcp-server/seed.py --patients 5 --months 3
-
-# All 5 workflows start automatically via Replit
-# Or manually:
-MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server &
-cd mcp-server && MCP_TRANSPORT=streamable-http MCP_PORT=8002 python server.py &
-MCP_TRANSPORT=streamable-http MCP_PORT=8003 python -m ingestion.server &
-cd replit_dashboard && python server.py &
-cd replit-app && npm run dev
-```
-
----
-
-## Key Engineering Rules
-
-- **asyncpg**: Never use `$N + INTERVAL '1 day'` — pre-compute date bounds in Python
-- **MCP skills**: Never use `print()` — all logging goes to `sys.stderr`
-- **pytest-asyncio**: Pinned to `0.21.2` — version 1.x breaks session-scoped `event_loop`
-- **Model name**: `claude-sonnet-4-6` (hardcoded; verified by Phase 1 tests)
-- **Guardrails**: `clinical_query` is the only tool that calls the Anthropic API for user queries — deliberation uses separate Claude + GPT-4 calls
-- **Data tracks**: `use_healthex()` / `use_demo_data()` return plain strings, not JSON; `get_data_source_status()` returns JSON
-- **Two-phase ingestion**: Plans cached in `ingestion_plans`; executor reads raw blobs from `raw_fhir_cache`
-- **Flag lifecycle**: Never auto-retract critical/high flags linked to sent nudges (safety rule in `flag_reviewer.py`)
-- **Context budget**: Deliberation tiered loader enforces 11K char total budget — exceeding this crashes the pipeline
-- **VARCHAR columns**: Use TEXT not VARCHAR for clinical data — Migration 005 fixed silent truncation
-
----
-
-## The Broader Vision
-
-```mermaid
-graph TB
-    subgraph "Complete — Phase 1"
-        P1["19 clinical decision tools<br/>3-layer guardrails<br/>34-table PostgreSQL warehouse<br/>~695 tests passing"]
-    end
-
-    subgraph "In Progress — Phase 2"
-        P2["Dual-LLM Deliberation Engine<br/>HealthEx ingestion pipeline live<br/>Flag lifecycle + retroactive correction<br/>Progressive context loading"]
-    end
-
-    subgraph "Vision — Phase 3"
-        P3["Population health dashboard<br/>Chase list orchestration<br/>Digital twin simulation<br/>Autonomous care gap closure"]
-    end
-
-    P1 -->|"Data pipelines + Deliberation"| P2
-    P2 -->|"Multi-agent orchestration"| P3
-
-    style P1 fill:#4A8C72,color:#fff
-    style P2 fill:#C9864A,color:#fff
-    style P3 fill:#6B5EA8,color:#fff
-```
-
-The long-term goal is a system where a single care manager, augmented by the PatientCompanion AI agent network, can safely manage a patient panel **5 to 10 times larger** than what is currently possible — not by eliminating the human relationship, but by eliminating the friction that prevents it.
-
----
-
-*Built at Patel Family Medicine · Ambient Action Model Project · April 2026*
