@@ -1,0 +1,82 @@
+## The `age=None` Bug — Explained
+
+### What's happening
+
+When `run_deliberation(mode="full")` is called, the server builds a `PatientContextPackage` — a Pydantic model that packages up the patient's data to feed into the dual-LLM pipeline. One of its required fields is `age: int`.
+
+The error was:
+```
+1 validation error for PatientContextPackage
+age
+  Input should be a valid integer [type=int_type, input_value=None, input_type=NoneType]
+```
+
+Pydantic is receiving `None` for `age` and rejecting the whole package before deliberation even starts.
+
+---
+
+### Why `age` is `None`
+
+The warehouse stores **date of birth** (`1987-03-25`), not age. Age has to be *computed* from DOB at runtime. The bug is that wherever the context compiler reads the patient row to populate `PatientContextPackage`, it's either:
+
+- Reading an `age` column directly (which doesn't exist or is null), **instead of** computing `age = today - dob`, or
+- The DOB is stored correctly but the derivation step is simply missing — `age` is never assigned before the Pydantic model is instantiated.
+
+Progressive mode doesn't hit this because it builds context differently (tier-based text loading, bypasses `PatientContextPackage` entirely). Full mode is the only path that constructs it — which is why progressive ran fine and full crashed.
+
+---
+
+### Where to look in the code
+
+```bash
+grep -r "PatientContextPackage" --include="*.py" -n
+```
+
+You'll find something like:
+
+```python
+context = PatientContextPackage(
+    patient_id=patient.id,
+    age=patient.age,        # ← this is the problem line
+    sex=patient.sex,
+    conditions=[...],
+    ...
+)
+```
+
+`patient.age` is `None` because the `patients` table has no `age` column — it has `date_of_birth`. The fix is a one-liner at the point of construction:
+
+```python
+from datetime import date
+
+def compute_age(dob: date) -> int:
+    today = date.today()
+    return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+context = PatientContextPackage(
+    patient_id=patient.id,
+    age=compute_age(patient.date_of_birth),   # ← fix
+    sex=patient.sex,
+    ...
+)
+```
+
+---
+
+### The secondary risk
+
+Even after this fix, you should make `age` optional with a fallback in the Pydantic model itself — so a missing DOB doesn't nuke the whole deliberation:
+
+```python
+class PatientContextPackage(BaseModel):
+    age: Optional[int] = None   # graceful degradation
+    ...
+```
+
+That way a bad DOB produces a warning, not a hard crash. The agents can still deliberate; they just won't have age-specific context.
+
+---
+
+### Summary in one sentence
+
+The context compiler passes `patient.age` (a null DB column) instead of computing `age` from `patient.date_of_birth` — fix it at the construction site with a two-line age derivation, and optionally make the field nullable in the Pydantic model as a safety net.
