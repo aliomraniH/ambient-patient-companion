@@ -176,3 +176,7 @@ class DeliberationResult(BaseModel):
     unresolved_disagreements: list[dict] = Field(default_factory=list)
     # Full audit trail — set by engine after synthesis
     transcript: dict = Field(default_factory=dict)
+    # Gap-aware validation metadata (set by engine after deliberation)
+    gap_artifacts: list[dict] = Field(default_factory=list)
+    gap_summary: str = ""
+    context_validation: dict = Field(default_factory=dict)
