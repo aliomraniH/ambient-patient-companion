@@ -33,6 +33,7 @@ from .output_safety import (
 )
 from .planner import build_deliberation_agenda
 from .synthesis_reviewer import review_synthesis
+from .gap_validation import validate_and_enrich_context, collect_gap_artifacts
 
 log = logging.getLogger(__name__)
 
@@ -113,6 +114,24 @@ class DeliberationEngine:
             vector_store=self.vector_store
         )
         context.deliberation_trigger = request.trigger_type
+
+        # ── Phase 0.1: Gap-aware context validation ─────────────────────────
+        _context_validation_meta: dict = {}
+        try:
+            context, _context_validation_meta = await validate_and_enrich_context(
+                context=context,
+                db_pool=self.db_pool,
+                patient_id=request.patient_id,
+                trigger_type=request.trigger_type,
+            )
+            log.info(
+                "Context validation: freshness=%.2f stale=%d refreshed=%d",
+                _context_validation_meta.get("freshness_score", -1),
+                _context_validation_meta.get("stale_elements_detected", 0),
+                _context_validation_meta.get("elements_refreshed", 0),
+            )
+        except Exception as e:
+            log.warning("Gap-aware context validation failed (non-fatal): %s", e)
 
         # ── Phase 0.5: Build deliberation agenda ─────────────────────────────
         agenda = None
@@ -244,6 +263,18 @@ class DeliberationEngine:
             synthesizer_model="claude-sonnet-4-20250514"
         )
 
+        # ── Phase 5.5: Collect gap artifacts ─────────────────────────────────
+        try:
+            gap_artifacts, gap_summary = await collect_gap_artifacts(
+                db_pool=self.db_pool,
+                deliberation_id=deliberation_id,
+            )
+            result.gap_artifacts = gap_artifacts
+            result.gap_summary = gap_summary
+            result.context_validation = _context_validation_meta
+        except Exception as e:
+            log.warning("Gap artifact collection failed (non-fatal): %s", e)
+
         return result
 
     # ── Progressive Context Loading Mode ──────────────────────────────────
@@ -276,6 +307,24 @@ class DeliberationEngine:
         # ── Phase 0b: Always load Tier 1 ─────────────────────────────────
         tier1_ctx = await loader.load_tier1()
         context = {**static_ctx, **tier1_ctx}
+
+        # ── Phase 0.1: Gap-aware context validation ─────────────────────────
+        _prog_validation_meta: dict = {}
+        try:
+            context, _prog_validation_meta = await validate_and_enrich_context(
+                context=context,
+                db_pool=self.db_pool,
+                patient_id=request.patient_id,
+                trigger_type=request.trigger_type,
+            )
+            log.info(
+                "Progressive context validation: freshness=%.2f stale=%d refreshed=%d",
+                _prog_validation_meta.get("freshness_score", -1),
+                _prog_validation_meta.get("stale_elements_detected", 0),
+                _prog_validation_meta.get("elements_refreshed", 0),
+            )
+        except Exception as e:
+            log.warning("Progressive gap-aware context validation failed (non-fatal): %s", e)
 
         # ── Phase 0.5: Build deliberation agenda ─────────────────────────
         prog_agenda = None
@@ -535,6 +584,17 @@ class DeliberationEngine:
                 "context_stats": loader.context_summary(),
             }
 
+        # ── Post-commit: Collect gap artifacts ───────────────────────────────
+        _gap_artifacts: list = []
+        _gap_summary_text: str = ""
+        try:
+            _gap_artifacts, _gap_summary_text = await collect_gap_artifacts(
+                db_pool=self.db_pool,
+                deliberation_id=deliberation_id,
+            )
+        except Exception as e:
+            log.warning("Progressive gap artifact collection failed (non-fatal): %s", e)
+
         return {
             "deliberation_id": deliberation_id,
             "status": "complete",
@@ -542,6 +602,9 @@ class DeliberationEngine:
             "rounds_completed": rounds_completed,
             "context_stats": loader.context_summary(),
             "summary": self._summarize_output(final_output),
+            "gap_artifacts": _gap_artifacts,
+            "gap_summary": _gap_summary_text,
+            "context_validation": _prog_validation_meta,
         }
 
     async def _build_static_context(self, patient_id: str) -> dict:
