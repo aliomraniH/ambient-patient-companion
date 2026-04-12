@@ -1,0 +1,87 @@
+Deploy the accuracy & efficiency improvements branch
+(claude/improve-patient-companion-eit5i) to the Ambient Patient Companion.
+
+This adds five validators (F1-F5) plus Batch API model tiering to the batch
+pipeline. Zero breaking changes — no MCP tool signatures, ports, OAuth, or
+API contracts are modified. All additions are internal to the ingestion and
+deliberation pipelines.
+
+## Deployment Steps (run in order)
+
+1. Pull the branch:
+   git fetch origin
+   git checkout claude/improve-patient-companion-eit5i
+
+2. No new Python dependencies required. requirements.txt is unchanged.
+
+3. Run the new DB migration:
+   psql $DATABASE_URL -f server/migrations/006_quality_flags.sql
+   (Adds quality_flag TEXT and quality_status VARCHAR(20) to transfer_log.
+   Additive and safe for existing rows.)
+
+4. Run the new test suite (all 170 must pass):
+   python -m pytest \
+     ingestion/tests/test_clinical_sanitizer.py \
+     ingestion/tests/test_source_anchor.py \
+     ingestion/tests/test_self_consistency.py \
+     ingestion/tests/test_fhir_validator.py \
+     ingestion/tests/test_plausibility.py \
+     server/deliberation/tests/test_critical_value_injector.py \
+     server/deliberation/tests/test_convergence_gate.py \
+     server/deliberation/tests/test_batch_api.py -v
+
+5. Run the sanitization regression (must be 100%):
+   python -c "from ingestion.sanitization.clinical_sanitizer import run_sanitization_regression; print(run_sanitization_regression())"
+
+6. Regression check — existing tests still pass:
+   python -m pytest tests/ server/deliberation/tests/ ingestion/tests/
+
+7. Restart the 3 MCP servers via existing Replit workflows:
+   - ambient-clinical-intelligence  (port 8001)
+   - ambient-skills-companion       (port 8002)
+   - ambient-ingestion              (port 8003)
+
+8. Smoke test — verify health endpoints respond with
+   {"ok":true,"server":"<name>","version":"1.0.0"}
+
+9. End-to-end validation with Maria Chen (MRN 4829341):
+   - Trigger an ingestion that contains "A+ blood type, <0.01 comparator,
+     HbA1c 7.4%" — verify all three survive sanitization.
+   - Call run_deliberation(patient_id="4829341") and poll
+     get_deliberation_results.
+   - Confirm the result has convergence_score populated and that if
+     convergence_score < 0.40, recommendation fields are null and
+     nudge_content is empty.
+   - Confirm the Gold context contains an entry with
+     source="__critical_values__" in applicable_guidelines.
+
+10. Database sanity check:
+    psql $DATABASE_URL -c "
+      SELECT quality_status, COUNT(*) FROM transfer_log
+      GROUP BY quality_status;
+    "
+    psql $DATABASE_URL -c "
+      SELECT ROUND(convergence_score::numeric, 1) AS score_bucket, COUNT(*)
+      FROM deliberations GROUP BY score_bucket ORDER BY score_bucket;
+    "
+
+## What to expect
+
+- transfer_log will start populating quality_flag on records that fail
+  FHIR validation or plausibility (decimal errors, implausible ranges).
+- Deliberations with low convergence will return with recommendation=null
+  and a provider_note explaining why.
+- Sanitized clinical text preserves A+, <0.01, 38.5°C, c.68_69delAG,
+  7.4%, 141/86 while stripping [INST], <|im_start|>, "ignore previous
+  instructions", unicode tag smuggling.
+
+## Rollback
+
+If issues appear, roll back with:
+   git checkout main
+The migration is additive — no schema rollback required.
+
+Reference files:
+- Full plan: /root/.claude/plans/lucky-nibbling-swan.md
+- Deployment doc: docs/REPLIT_DEPLOYMENT_PROMPT.md
+- Commit: 67a8444 on branch claude/improve-patient-companion-eit5i
