@@ -40,6 +40,11 @@ _MCPSERVER_DIR = Path(__file__).resolve().parent.parent / "mcp-server"
 if str(_MCPSERVER_DIR) not in sys.path:
     sys.path.insert(0, str(_MCPSERVER_DIR))
 
+# Allow imports from the repo root (shared/provenance lives there).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import anthropic
 import asyncpg
 from fastmcp import FastMCP
@@ -2933,6 +2938,19 @@ async def rest_register_gap_trigger(request: Request) -> JSONResponse:
     except Exception as e:
         logger.error("[register_gap_trigger] error: %s", e)
         return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
+# ---------------------------------------------------------------------------
+# Shared provenance tool (registered on all three MCP servers)
+# ---------------------------------------------------------------------------
+
+from shared.provenance import register_provenance_tool  # noqa: E402
+
+register_provenance_tool(
+    mcp,
+    source_server="ambient-clinical-intelligence",
+    get_pool=get_gap_pool,
+)
 
 
 # ---------------------------------------------------------------------------
