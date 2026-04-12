@@ -20,6 +20,20 @@ class PatientContextPackage(BaseModel):
     mrn: str
     primary_provider: str
     practice: str
+
+    @field_validator("age", mode="before")
+    @classmethod
+    def _coerce_age(cls, v):
+        """Safety net: coerce missing/invalid age to 0 so downstream prompt
+        JSON never emits 'age': null, which weakens LLM reasoning. Real
+        DOB-based age computation happens upstream in context_compiler.py.
+        """
+        if v is None:
+            return 0
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
     # Clinical state
     active_conditions: list[dict]       # [{code, display, onset_date}]
     current_medications: list[dict]     # [{name, dose, frequency, start_date}]
