@@ -91,14 +91,16 @@ def validate_section(section: dict) -> list[dict]:
 
     Rule execution order:
       Pre-check: AGENT_TIER_CONSTRAINT_VIOLATED
-      1. UNTAGGED_CLAIM
-      2. TOOL_MISSING_CALL_EVIDENCE
-      3. RETRIEVAL_GAP_NOT_DECLARED
-      4. SYNTHESIZED_NO_BASIS
-      5. PENDING_NO_TOOL_NAMED
-      6. KNOWN_DOMAIN_SYNTHESIZED_INSTEAD_OF_PENDING
-      7. RETRIEVAL_GAP_SILENCED   (WARN)
-      8. TIMESTAMP_STALENESS      (WARN)
+      1.  UNTAGGED_CLAIM
+      2.  TOOL_MISSING_CALL_EVIDENCE
+      3.  RETRIEVAL_GAP_NOT_DECLARED
+      4.  SYNTHESIZED_NO_BASIS
+      5.  PENDING_NO_TOOL_NAMED
+      6.  KNOWN_DOMAIN_SYNTHESIZED_INSTEAD_OF_PENDING
+      7.  RETRIEVAL_GAP_SILENCED              (WARN)
+      8.  TIMESTAMP_STALENESS                 (WARN)
+      9.  CORPUS_BOUND_DOMAIN_NO_GAP          (WARN, THEO only)
+      10. AI_DISCLOSURE_MISSING               (BLOCK, PATIENT_FACING only)
 
     Returns a list of violation dicts. Empty list means the section is
     clean.
@@ -224,6 +226,58 @@ def validate_section(section: dict) -> list[dict]:
             # Malformed timestamps are ignored — Rule 2 handles missing
             # call evidence; a bad timestamp here is not a BLOCK by itself.
             pass
+
+    # Rule 9: CORPUS_BOUND_DOMAIN_NO_GAP (WARN, THEO only)
+    # If THEO declares RETRIEVAL with evidence_gap_flagged=False while
+    # the content summary touches a known THEO corpus-bound domain,
+    # surface a WARN. We can't prove the claim is wrong — only the
+    # agent knows what retrieval returned — but a missed gap here
+    # caused Failure Incident A, so we force a second look.
+    if (
+        section.get("agent") == "THEO"
+        and tier == "RETRIEVAL"
+        and section.get("evidence_gap_flagged") is False
+    ):
+        corpus_bound = AGENT_RULES.get("THEO", {}).get(
+            "corpus_bound_domains", []
+        )
+        summary = (section.get("content_summary") or "").lower()
+        matched = next(
+            (d for d in corpus_bound if d.lower() in summary), None
+        )
+        if matched:
+            violations.append({
+                "rule": "CORPUS_BOUND_DOMAIN_NO_GAP",
+                "severity": "WARN",
+                "message": (
+                    f"Section '{sid}' (THEO): content touches "
+                    f"corpus-bound domain '{matched}' but declares "
+                    "evidence_gap_flagged=False. ADA-2026 does not "
+                    "cover this domain; re-check whether a gap should "
+                    "be flagged or call search_clinical_knowledge."
+                ),
+            })
+
+    # Rule 10: AI_DISCLOSURE_MISSING (BLOCK, PATIENT_FACING only)
+    # CA AB 3030 requires every patient-facing output to carry an
+    # AI-use disclosure. We accept either a truthy ai_disclosure field
+    # (bool / non-empty string) or ai_disclosure_tag.
+    if section.get("agent") == "PATIENT_FACING":
+        disclosure = (
+            section.get("ai_disclosure")
+            or section.get("ai_disclosure_tag")
+        )
+        if not disclosure:
+            violations.append({
+                "rule": "AI_DISCLOSURE_MISSING",
+                "severity": "BLOCK",
+                "message": (
+                    f"Section '{sid}' (PATIENT_FACING): missing AI-use "
+                    "disclosure. CA AB 3030 requires every "
+                    "patient-facing output to carry an ai_disclosure "
+                    "(or ai_disclosure_tag) field."
+                ),
+            })
 
     return violations
 

@@ -187,12 +187,55 @@ AGENT_RULES: dict[str, dict] = {
             "nudge governance rationale",
         ],
     },
+
+    "SYSTEM": {
+        # Operational / pipeline metadata (latency, model IDs, run IDs).
+        # Not clinical. Permissive — all four tiers allowed — but still
+        # subject to the generic rules (must declare tier, must have
+        # basis if SYNTHESIZED, etc.). PENDING is disallowed because
+        # SYSTEM does not defer to tool calls; it reports on the run.
+        "forbidden_tiers": ["PENDING"],
+        "forbidden_tier_message": (
+            "SYSTEM sections describe the pipeline run itself and may "
+            "not be PENDING. Use TOOL for measured facts (model, "
+            "latency), SYNTHESIZED for run rationale, or RETRIEVAL for "
+            "config lookups."
+        ),
+        "tool_tier_tools": [],
+    },
+
+    "PATIENT_FACING": {
+        # Anything rendered to a patient. AB 3030 (California 2025)
+        # requires an AI-use disclosure tag on every patient-facing
+        # output. The dedicated Rule 10 check below enforces this.
+        # Free synthesis at patient-level is forbidden — synthesis
+        # belongs to SYNTHESIS, which then routes to PATIENT_FACING.
+        "forbidden_tiers": ["SYNTHESIZED"],
+        "forbidden_tier_message": (
+            "PATIENT_FACING sections must be routed through SYNTHESIS "
+            "first and may not be SYNTHESIZED directly. Tier must be "
+            "TOOL (for scored/structured content) or RETRIEVAL (for "
+            "guideline-quoted content)."
+        ),
+        "tool_tier_tools": [
+            "compute_obt_score",
+            "generate_previsit_brief",
+            "select_nudge_type",
+        ],
+    },
 }
 
-# Agents whose outputs participate in provenance auditing
-ALL_AUDITED_AGENTS = {"ARIA", "MIRA", "THEO", "SYNTHESIS", "SYSTEM"}
+# Agents whose outputs participate in provenance auditing.
+# Every entry MUST have a corresponding entry in AGENT_RULES — enforced
+# by tests/test_provenance_registry_coverage.py.
+ALL_AUDITED_AGENTS = {
+    "ARIA", "MIRA", "THEO", "SYNTHESIS", "SYSTEM", "PATIENT_FACING",
+}
 
 # Agents for whom Rule 6 (known-domain synthesis) applies.
-# ARIA is excluded — SYNTHESIZED is already blocked for ARIA at the
-# agent-tier pre-check, so Rule 6 never has a chance to fire.
-RULE_6_AGENTS = {"MIRA", "THEO", "SYNTHESIS"}
+# ARIA is included so that Rule 6 catches cross-domain TOOL mismatches
+# (e.g. ARIA declaring TOOL with tool_name="clinical_query" for
+# pharmacology content that belongs to THEO's corpus). ARIA's
+# SYNTHESIZED tier is already blocked by the agent-tier pre-check, so
+# Rule 6 against ARIA only ever fires for TOOL-tier mismatches.
+RULE_6_AGENTS = {"ARIA", "MIRA", "THEO", "SYNTHESIS"}
