@@ -12,7 +12,9 @@ The Ambient Patient Companion connects Claude to a live clinical intelligence la
 - **5 Data Quality Validators (F1–F5)** — FHIR conformance, clinical plausibility, source anchoring, self-consistency, clinical text sanitization; flagging written to `transfer_log.quality_status`
 - **Convergence Gate** — deliberation synthesis only proceeds when Claude + GPT-4o agree (score ≥ 0.40); low-convergence results return `recommendation=null` with provider note
 - **Batch API Model Router** — task-type-to-model routing (Haiku for classification, Sonnet for extraction, Opus for deliberation/synthesis)
-- **46 MCP tools** across 3 servers, all accessible to Claude via OAuth-authenticated HTTPS
+- **Mode Elicitation Protocol** — `run_deliberation` with no mode returns `mode_selection_required` + selection token; explicit modes: `triage` (Sonnet-only, ~1 LLM call), `progressive`, `full`
+- **`verify_output_provenance` — universal provenance gate** across all 3 MCP servers; blocks MIRA/ARIA/THEO/SYNTHESIS outputs with undeclared or domain-mismatched tiers; audit trail in `provenance_audit_log`
+- **47 MCP tools** across 3 servers (added `verify_output_provenance`), all accessible to Claude via OAuth-authenticated HTTPS
 
 ---
 
@@ -155,10 +157,17 @@ ambient-patient-companion/
 │   ├── test_mcp_smoke.py        ← 24 MCP smoke tests
 │   └── test_mcp_discovery.py    ← 26 MCP discovery + OAuth regression tests (DN-1–DN-26)
 │
+├── shared/                      ← Cross-server shared Python modules
+│   ├── claude-client.js         ← Shared JS MCP client
+│   └── provenance/              ← Universal provenance gate (all 3 MCP servers)
+│       ├── domain_registry.py   ← 8-rule domain registry (MIRA/ARIA/THEO/SYNTHESIS tiers)
+│       ├── verifier.py          ← validate_section() + build_gate_decision() + render_recommendation()
+│       ├── audit_writer.py      ← Async DB writer → provenance_audit_log (no raw PHI)
+│       └── tool_adapter.py      ← register_provenance_tool(mcp, source_server, get_pool)
+│
 ├── .mcp.json                    ← MCP client discovery (public HTTPS URLs, auto-regenerated)
 ├── start.sh                     ← Production startup: regenerates .mcp.json → starts all 5 services
 ├── config/system_prompts/       ← Role-based prompts (pcp · care_manager · patient)
-├── shared/claude-client.js      ← Shared JS MCP client
 ├── prototypes/                  ← 4 HTML proof-of-concept prototypes
 ├── submission/README.md         ← MCP marketplace submission
 ├── CLAUDE.md                    ← Full implementation guide for Claude Code
