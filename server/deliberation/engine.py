@@ -2,9 +2,11 @@
 engine.py — Orchestrates all 5 phases of the Dual-LLM Deliberation Engine.
 This is the single entry point for triggering a deliberation.
 
-Supports two modes:
+Supports three modes:
   run()             — original full dual-LLM pipeline (loads all context upfront)
   run_progressive() — progressive context loading with tiered demand-fetch loop
+  run_triage()      — minimal single-LLM screening pass (Claude Sonnet only;
+                      skips critic, synthesis, behavioral adaptation)
 """
 import asyncio
 import json
@@ -16,9 +18,14 @@ from pathlib import Path
 from typing import Optional
 import anthropic
 import openai
-from .schemas import DeliberationRequest, DeliberationResult, PatientContextPackage
+from .schemas import (
+    DeliberationRequest,
+    DeliberationResult,
+    PatientContextPackage,
+    MissingDataFlag,
+)
 from .context_compiler import compile_patient_context
-from .analyst import run_parallel_analysis
+from .analyst import run_parallel_analysis, _analyze_with_claude, CLAUDE_MODEL as ANALYST_CLAUDE_MODEL
 from .critic import run_critique_rounds
 from .synthesizer import synthesize
 from .behavioral_adapter import adapt_nudges
@@ -312,6 +319,151 @@ class DeliberationEngine:
             log.warning("Gap artifact collection failed (non-fatal): %s", e)
 
         return result
+
+    # ── Triage Mode (lightweight single-LLM screening) ────────────────────
+
+    async def run_triage(
+        self,
+        request: DeliberationRequest,
+    ) -> dict:
+        """
+        Minimal single-LLM screening pass. Runs:
+          - Phase 0    context compilation
+          - Phase 0.5  planner (Haiku) — non-fatal, agenda added to context
+          - Phase 1    analyst — Claude Sonnet ONLY (skip GPT-4o)
+          - Phase 3.5  output safety on any analyst-identified data gaps
+          - Phase 5    knowledge_store commit (mode='triage' stamped in transcript)
+
+        Skips: critic rounds, synthesis, synthesis_reviewer, behavioral_adapter,
+        convergence gating, re-deliberation. Intended for initial screening when
+        dual-LLM council is unnecessary (~1 LLM call total beyond the agenda).
+
+        Returns a dict shaped like run()'s return for caller compatibility.
+        """
+        deliberation_id = str(uuid.uuid4())
+        start_time = time.monotonic()
+        total_tokens = 0
+
+        # ── Phase 0: Context Compilation ──────────────────────────────────
+        context: PatientContextPackage = await compile_patient_context(
+            patient_id=request.patient_id,
+            db_pool=self.db_pool,
+            vector_store=self.vector_store,
+        )
+        context.deliberation_trigger = request.trigger_type
+
+        # ── Phase 0.5: Build deliberation agenda (non-fatal) ──────────────
+        try:
+            agenda = await build_deliberation_agenda(
+                patient_context=context,
+                deliberation_id=deliberation_id,
+            )
+            if agenda:
+                context.applicable_guidelines.append({
+                    "source": "deliberation_agenda",
+                    "content": agenda.to_prompt_context(),
+                })
+        except Exception as e:
+            log.warning("Triage agenda build failed — continuing without: %s", e)
+
+        # ── Phase 1: Single-LLM analysis (Claude only) ────────────────────
+        guidelines_json = json.dumps(context.applicable_guidelines, indent=2)
+        prior_knowledge_json = json.dumps(context.prior_patient_knowledge, indent=2)
+        claude_analysis = await _analyze_with_claude(
+            context, guidelines_json, prior_knowledge_json,
+        )
+        claude_analysis.model_id = ANALYST_CLAUDE_MODEL
+        claude_analysis.role_emphasis = "diagnostic_reasoning"
+        total_tokens += getattr(claude_analysis, "_token_count", 0)
+
+        # ── Assemble minimal DeliberationResult ───────────────────────────
+        missing_flags: list[MissingDataFlag] = []
+        for desc in claude_analysis.missing_data_identified:
+            if not desc:
+                continue
+            missing_flags.append(MissingDataFlag(
+                flag_id=str(uuid.uuid4()),
+                priority="medium",
+                data_type="other",
+                description=str(desc)[:500],
+                clinical_relevance="identified_during_triage",
+                recommended_action="review_during_full_deliberation",
+                confidence=0.7,
+                both_models_agreed=False,
+            ))
+
+        result = DeliberationResult(
+            deliberation_id=deliberation_id,
+            patient_id=request.patient_id,
+            timestamp=datetime.utcnow(),
+            trigger=request.trigger_type,
+            models={"analyst": ANALYST_CLAUDE_MODEL, "mode": "triage"},
+            rounds_completed=1,
+            convergence_score=1.0,  # single LLM — no disagreement possible
+            total_tokens=total_tokens,
+            total_latency_ms=0,
+            anticipatory_scenarios=[],
+            predicted_patient_questions=[],
+            missing_data_flags=missing_flags,
+            nudge_content=[],
+            knowledge_updates=[],
+            unresolved_disagreements=[],
+            transcript={
+                "mode": "triage",
+                "analyst_output": claude_analysis.model_dump(),
+            },
+        )
+
+        # ── Phase 3.5: Output safety on missing-data flag descriptions ────
+        for flag in result.missing_data_flags:
+            safety = validate_deliberation_output(
+                content=flag.description,
+                output_type="missing_data_flags",
+                patient_id=context.patient_id,
+                deliberation_id=deliberation_id,
+            )
+            if safety.get("violations"):
+                flag.description = safety["content"]
+
+        result.total_latency_ms = int((time.monotonic() - start_time) * 1000)
+
+        # ── Phase 5: Commit ───────────────────────────────────────────────
+        await commit_deliberation(
+            result=result,
+            db_pool=self.db_pool,
+            convergence_score=result.convergence_score,
+            rounds_completed=result.rounds_completed,
+            total_tokens=result.total_tokens,
+            total_latency_ms=result.total_latency_ms,
+            synthesizer_model="triage-single-llm",
+        )
+
+        return {
+            "deliberation_id": result.deliberation_id,
+            "status": "complete",
+            "mode": "triage",
+            "patient_id": result.patient_id,
+            "convergence_score": result.convergence_score,
+            "summary": {
+                "anticipatory_scenarios": 0,
+                "predicted_questions": 0,
+                "missing_data_flags": len(result.missing_data_flags),
+                "nudges_generated": 0,
+                "knowledge_updates": 0,
+                "key_findings": len(claude_analysis.key_findings),
+                "risk_flags": len(claude_analysis.risk_flags),
+                "recommended_actions": len(claude_analysis.recommended_actions),
+            },
+            "triage_findings": [
+                {"claim": f.claim, "confidence": f.confidence}
+                for f in claude_analysis.key_findings[:5]
+            ],
+            "critical_flags": [
+                f.description for f in result.missing_data_flags
+                if f.priority in ("critical", "high")
+            ],
+            "total_latency_ms": result.total_latency_ms,
+        }
 
     # ── Progressive Context Loading Mode ──────────────────────────────────
 
