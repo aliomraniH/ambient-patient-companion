@@ -115,6 +115,17 @@ class DeliberationEngine:
         )
         context.deliberation_trigger = request.trigger_type
 
+        # ── Phase 0.05: Critical Value Injection (F4) ──────────────────────
+        try:
+            from ingestion.context.critical_value_injector import inject_critical_values
+            context = await inject_critical_values(
+                context=context,
+                db_pool=self.db_pool,
+                patient_id=request.patient_id,
+            )
+        except Exception as e:
+            log.warning("Critical value injection failed (non-fatal): %s", e)
+
         # ── Phase 0.1: Gap-aware context validation ─────────────────────────
         _context_validation_meta: dict = {}
         try:
@@ -164,6 +175,23 @@ class DeliberationEngine:
             call_claude_fn=_call_claude,
             call_gpt4_fn=_call_gpt4
         )
+
+        # ── Phase 2.5: Convergence-triggered retry (F5) ────────────────────
+        try:
+            from .convergence_gate import deliberate_with_retry
+            critique_result = await deliberate_with_retry(
+                initial_critique_result=critique_result,
+                claude_analysis=claude_analysis,
+                gpt4_analysis=gpt4_analysis,
+                context=context,
+                max_additional_rounds=2,
+                run_critique_rounds_fn=run_critique_rounds,
+                load_prompt_fn=_load_prompt,
+                call_claude_fn=_call_claude,
+                call_gpt4_fn=_call_gpt4,
+            )
+        except Exception as e:
+            log.warning("Convergence retry failed (non-fatal): %s", e)
 
         # ── Phase 3: Synthesis ─────────────────────────────────────────────────
         result: DeliberationResult = await synthesize(
@@ -251,6 +279,14 @@ class DeliberationEngine:
         result.convergence_score = critique_result["convergence_score"]
         result.total_tokens = total_tokens
         result.total_latency_ms = total_latency_ms
+
+        # ── Phase 4.5: Convergence-gated output (F5) ─────────────────────────
+        # HARD CONSTRAINT: when convergence < 0.40, recommendations are nulled.
+        try:
+            from .convergence_gate import gate_synthesis_output
+            result = gate_synthesis_output(result, result.convergence_score)
+        except Exception as e:
+            log.warning("Convergence gate failed (non-fatal): %s", e)
 
         # ── Phase 5: Knowledge Commit ──────────────────────────────────────────
         await commit_deliberation(
