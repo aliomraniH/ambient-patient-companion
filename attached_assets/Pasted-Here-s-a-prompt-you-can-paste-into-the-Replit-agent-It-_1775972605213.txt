@@ -1,0 +1,179 @@
+Here's a prompt you can paste into the Replit agent. It covers both undeployed commits — the prior mode-elicitation commit (43753e4, already on main) and the new provenance commit (80984cf, on claude/verify-output-provenance-xZlgj).
+
+Two commits need to be deployed to this Replit environment. They layer
+cleanly and must be applied in order.
+
+────────────────────────────────────────────────────────────────────────
+COMMIT 1 — already on origin/main (not yet deployed)
+────────────────────────────────────────────────────────────────────────
+SHA:    43753e4
+Title:  Add mode elicitation protocol and triage mode to deliberation engine
+Scope:  server/ (run_deliberation, selection-token cache, triage path)
+Impact:
+  • run_deliberation(patient_id) with no mode now returns
+    {"status":"mode_selection_required", "selection_token":..., "options":[...]}
+    and expects a follow-up call with the chosen mode + token.
+  • New "triage" mode (Sonnet-only, ~1 LLM call) joins the existing
+    "progressive" and "full" modes.
+  • Invalid mode → {"status":"invalid_mode",...} instead of silently
+    running the most expensive path.
+  • Selection-token cache is in-memory (5-min TTL); cache loss just
+    forces a fresh mode-selection round-trip.
+No schema changes. No migration required.
+
+────────────────────────────────────────────────────────────────────────
+COMMIT 2 — on branch claude/verify-output-provenance-xZlgj
+────────────────────────────────────────────────────────────────────────
+SHA:    80984cf
+Title:  Add verify_output_provenance universal tool across all three MCP servers
+Scope:  new shared/provenance/ module; registration hooks on all three
+        MCP servers; one new SQL migration; three new test files.
+
+Files added:
+  shared/__init__.py
+  shared/provenance/__init__.py
+  shared/provenance/domain_registry.py
+  shared/provenance/verifier.py
+  shared/provenance/audit_writer.py
+  shared/provenance/tool_adapter.py
+  mcp-server/skills/verify_output_provenance.py   (auto-discovered)
+  server/migrations/007_provenance_audit_log.sql   (NEW MIGRATION)
+  tests/test_provenance_all_agents.py
+  tests/test_mira_incident_regression.py
+  tests/test_provenance_db_write.py
+
+Files modified:
+  server/mcp_server.py         (+repo-root sys.path, registration call)
+  ingestion/server.py          (+repo-root sys.path, local pool singleton,
+                                registration call)
+
+────────────────────────────────────────────────────────────────────────
+DEPLOYMENT STEPS (run in this exact order)
+────────────────────────────────────────────────────────────────────────
+
+1. Fetch and merge.
+   git fetch origin
+   git checkout main
+   git pull origin main                     # brings in 43753e4
+   git merge --ff-only origin/claude/verify-output-provenance-xZlgj
+   # If FF-only fails (main has diverged), do a clean merge, NOT a rebase:
+   #   git merge origin/claude/verify-output-provenance-xZlgj
+   # Do NOT cherry-pick — the shared/ directory is a unit.
+
+2. Apply the new migration. DATABASE_URL is auto-set by Replit.
+   python -c "
+   import asyncio, asyncpg, os
+   async def run():
+       conn = await asyncpg.connect(os.environ['DATABASE_URL'])
+       try:
+           sql = open('server/migrations/007_provenance_audit_log.sql').read()
+           await conn.execute(sql)
+           exists = await conn.fetchval(
+               \"SELECT COUNT(*) FROM information_schema.tables \"
+               \"WHERE table_name='provenance_audit_log'\"
+           )
+           cols = await conn.fetch(
+               \"SELECT column_name FROM information_schema.columns \"
+               \"WHERE table_name='provenance_audit_log' ORDER BY ordinal_position\"
+           )
+           print('table_exists:', bool(exists))
+           print('columns:', [c['column_name'] for c in cols])
+       finally:
+           await conn.close()
+   asyncio.run(run())
+   "
+   Expect: table_exists=True; columns includes provenance_report_id,
+   source_server, gate_decision, patient_mrn_hash, section_results,
+   pending_tools_needed.
+
+3. Restart the three MCP workflows (in Replit's Tools → Workflows panel,
+   OR equivalently re-invoke start.sh if this is the production run):
+     - ambient-clinical-intelligence  (port 8001)
+     - ambient-skills-companion       (port 8002)
+     - ambient-ingestion              (port 8003)
+   No Next.js restart is needed — only the FastMCP processes.
+
+4. Smoke-test the new tool on each server. For each of the three tool
+   ports, POST to /tools/verify_output_provenance with this MIRA-incident
+   payload:
+
+   curl -s -X POST http://localhost:8001/tools/verify_output_provenance \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "payload": "{\"output_id\":\"smoke-1\",\"assembled_by\":\"deploy-check\",\"sections\":[{\"section_id\":\"mira-llm-health-flag\",\"agent\":\"MIRA\",\"declared_tier\":\"TOOL\",\"content_summary\":\"LLM Interaction Health Flag: OpenAI/MIT RCT 2025.\",\"tool_name\":\"clinical_query\",\"tool_called_at\":\"2026-04-12T03:34:02Z\"}]}",
+       "deliberation_id": "",
+       "patient_mrn": "",
+       "strict_mode": true
+     }'
+
+   Repeat against port 8002 and 8003. All three MUST return:
+     "gate_decision": "BLOCKED"
+     "pending_tools_needed": ["score_llm_interaction_health"]
+
+5. Verify the audit log received one row per smoke-test (source_server
+   distinguishes them):
+   python -c "
+   import asyncio, asyncpg, os
+   async def run():
+       conn = await asyncpg.connect(os.environ['DATABASE_URL'])
+       rows = await conn.fetch(
+           \"SELECT source_server, gate_decision, assessed_at \"
+           \"FROM provenance_audit_log ORDER BY assessed_at DESC LIMIT 5\"
+       )
+       for r in rows: print(dict(r))
+       await conn.close()
+   asyncio.run(run())
+   "
+   Expect: at least three BLOCKED rows, one per source_server value.
+
+6. Run the unit tests (no DB required):
+   python -m pytest tests/test_provenance_all_agents.py \
+                   tests/test_mira_incident_regression.py -v
+   Expected: 24 passed.
+
+7. Regenerate .mcp.json so tool discovery picks up the new tool on the
+   public HTTPS domain (this is the standard step from CLAUDE.md §12):
+   python scripts/generate_mcp_json.py
+
+────────────────────────────────────────────────────────────────────────
+GUARDRAILS
+────────────────────────────────────────────────────────────────────────
+
+- Do NOT squash or reorder these commits. Commit 2 depends on an
+  intact shared/ directory.
+- Do NOT amend either commit. If anything needs fixing, add a NEW
+  commit on top.
+- Do NOT edit the migration file after it has been applied — write a
+  008_*.sql if a correction is needed.
+- Do NOT run the .sql file with psql unless you confirm DATABASE_URL
+  is the current Replit DB (safer to use the asyncpg snippet above).
+- Do NOT modify .replit / start.sh unless a restart fails — the new
+  shared/ module works via the existing sys.path pattern.
+- If Commit 1's mode-elicitation behavior surprises any existing
+  caller, the caller should pass mode="triage" / "progressive" / "full"
+  explicitly. This is not a regression — it's the new contract.
+
+────────────────────────────────────────────────────────────────────────
+ROLLBACK
+────────────────────────────────────────────────────────────────────────
+
+If anything fails after step 3:
+  git reset --hard origin/main~1       # back to before 43753e4
+  # then restart workflows. The 007 migration is safe to leave in
+  # place (only adds a new table; does not touch existing data).
+
+Report back with:
+  - Which step ran, which returned errors, full stderr.
+  - Output of step 2 (column list).
+  - Output of step 4 (gate_decision and pending_tools_needed for all
+    three servers).
+  - Output of step 5 (row count).
+
+Key points I baked into this prompt, based on what I verified in the codebase:
+
+    Migration application uses the asyncpg Python snippet, not psql — matches how migrations 002–006 are applied in this repo (no runner script exists).
+    Three-port smoke test, not one — because the whole value prop is that the provenance gate is universal across servers.
+    Audit-log verification step — confirms the non-blocking DB write actually landed, with source_server distinguishing the three processes.
+    No schema changes for Commit 1 — only Commit 2 requires migration 007.
+    Explicit "do not squash" guardrail — the shared/ directory is atomic; a partial cherry-pick would break imports on whichever server got missed.
+    Rollback note that migration 007 is safe to leave — it's additive only, no existing data touched.
