@@ -1254,10 +1254,18 @@ def register(mcp: FastMCP):
                                     return {"status": "error", "error": str(ue)}
 
                             result = await asyncio.to_thread(_do_request)
-                            phases["deliberation"] = {
-                                "status": result.get("status", "complete"),
+                            delib_status = result.get("status", "complete")
+                            phase_entry = {
+                                "status": delib_status,
                                 "detail": result,
                             }
+                            # Surface the real error from run_deliberation
+                            # instead of hiding it under a default "complete".
+                            if delib_status in ("error", "failed"):
+                                phase_entry["error"] = result.get(
+                                    "error", "unknown deliberation error"
+                                )
+                            phases["deliberation"] = phase_entry
                         else:
                             phases["deliberation"]["detail"] = (
                                 "deliberation still fresh"
@@ -1345,12 +1353,24 @@ def register(mcp: FastMCP):
 
             # ── Audit trail ─────────────────────────────────────────────
             duration_ms = int((_time.time() - start) * 1000)
+            # Surface per-phase errors at the top level so callers can
+            # distinguish silent success from partial failure.
+            _FAIL = {"failed", "error"}
+            failed_phases = {
+                name: p.get("error") or p.get("detail")
+                for name, p in phases.items()
+                if p.get("status") in _FAIL
+            }
+            overall_status = "partial" if failed_phases else "complete"
             summary = {
                 "patient_id": patient_id,
+                "status": overall_status,
                 "phases": phases,
                 "duration_ms": duration_ms,
                 "force": force,
             }
+            if failed_phases:
+                summary["failed_phases"] = failed_phases
             try:
                 async with pool.acquire() as conn:
                     data_track = await get_data_track(conn)
@@ -1367,12 +1387,12 @@ def register(mcp: FastMCP):
                         sum(
                             1
                             for p in phases.values()
-                            if p["status"] == "completed"
+                            if p.get("status") == "completed"
                         ),
                         sum(
                             1
                             for p in phases.values()
-                            if p["status"] == "failed"
+                            if p.get("status") in _FAIL
                         ),
                         json.dumps(summary),
                         data_track,

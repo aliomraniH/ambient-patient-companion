@@ -538,28 +538,47 @@ class DeliberationEngine:
 
         total_latency_ms = int((time.monotonic() - start_time) * 1000)
 
+        # ── Resilient commit: each write is independent so one bad item
+        # cannot wipe out sibling writes. Asyncpg is autocommit per-statement
+        # when not inside an explicit transaction, so per-item try/except is
+        # sufficient for partial progress.
+        outputs_written = 0
+        failed_writes: list[dict] = []
+        session_written = False
+
         try:
             async with self.db_pool.acquire() as conn:
-                await conn.execute(
-                    """INSERT INTO deliberations
-                       (id, patient_id, trigger_type, started_at, status,
-                        rounds_completed, convergence_score,
-                        synthesizer_model, model_claude, model_gpt4,
-                        total_tokens, total_latency_ms, transcript)
-                       VALUES ($1,$2,$3,$4,'complete',$5,$6,$7,$8,$9,$10,$11,$12)""",
-                    deliberation_id,
-                    request.patient_id,
-                    request.trigger_type,
-                    datetime.utcnow(),
-                    rounds_completed,
-                    0.0,
-                    "claude-haiku-4-5-20251001",
-                    "n/a",
-                    "claude-haiku-4-5-20251001",
-                    0,
-                    total_latency_ms,
-                    json.dumps({"rounds": all_outputs}),
-                )
+                try:
+                    await conn.execute(
+                        """INSERT INTO deliberations
+                           (id, patient_id, trigger_type, started_at, status,
+                            rounds_completed, convergence_score,
+                            synthesizer_model, model_claude, model_gpt4,
+                            total_tokens, total_latency_ms, transcript)
+                           VALUES ($1,$2,$3,$4,'complete',$5,$6,$7,$8,$9,$10,$11,$12)""",
+                        deliberation_id,
+                        request.patient_id,
+                        request.trigger_type,
+                        datetime.utcnow(),
+                        rounds_completed,
+                        0.0,
+                        "claude-haiku-4-5-20251001",
+                        "n/a",
+                        "claude-haiku-4-5-20251001",
+                        0,
+                        total_latency_ms,
+                        json.dumps({"rounds": all_outputs}),
+                    )
+                    session_written = True
+                except Exception as sess_err:
+                    log.error(
+                        "Failed to write deliberations session row: %s",
+                        repr(sess_err),
+                    )
+                    failed_writes.append({
+                        "output_type": "deliberation_session",
+                        "error": repr(sess_err),
+                    })
 
                 for output_type in (
                     "anticipatory_scenario",
@@ -574,17 +593,28 @@ class DeliberationEngine:
                     for item in items:
                         if not isinstance(item, dict):
                             continue
-                        await conn.execute(
-                            """INSERT INTO deliberation_outputs
-                               (deliberation_id, output_type, output_data,
-                                priority, confidence)
-                               VALUES ($1, $2, $3, $4, $5)""",
-                            deliberation_id,
-                            output_type,
-                            json.dumps(item),
-                            item.get("priority"),
-                            item.get("confidence") or item.get("probability"),
-                        )
+                        try:
+                            await conn.execute(
+                                """INSERT INTO deliberation_outputs
+                                   (deliberation_id, output_type, output_data,
+                                    priority, confidence)
+                                   VALUES ($1, $2, $3, $4, $5)""",
+                                deliberation_id,
+                                output_type,
+                                json.dumps(item),
+                                item.get("priority"),
+                                item.get("confidence") or item.get("probability"),
+                            )
+                            outputs_written += 1
+                        except Exception as item_err:
+                            log.error(
+                                "Failed to write %s output: %s",
+                                output_type, repr(item_err),
+                            )
+                            failed_writes.append({
+                                "output_type": output_type,
+                                "error": repr(item_err),
+                            })
 
                 # ── Flag lifecycle: write flags to registry + review ──
                 try:
@@ -593,10 +623,20 @@ class DeliberationEngine:
 
                     for item in final_output.get("missing_data_flags", []):
                         if isinstance(item, dict):
-                            await write_flag(
-                                conn, request.patient_id,
-                                deliberation_id, item,
-                            )
+                            try:
+                                await write_flag(
+                                    conn, request.patient_id,
+                                    deliberation_id, item,
+                                )
+                            except Exception as flag_item_err:
+                                log.warning(
+                                    "write_flag failed (non-fatal): %s",
+                                    repr(flag_item_err),
+                                )
+                                failed_writes.append({
+                                    "output_type": "flag_registry",
+                                    "error": repr(flag_item_err),
+                                })
 
                     await run_flag_review(
                         self.db_pool, request.patient_id,
@@ -606,19 +646,36 @@ class DeliberationEngine:
                 except Exception as flag_err:
                     log.warning(
                         "Post-deliberation flag lifecycle failed (non-fatal): %s",
-                        flag_err,
+                        repr(flag_err),
                     )
+                    failed_writes.append({
+                        "output_type": "flag_lifecycle",
+                        "error": repr(flag_err),
+                    })
 
         except Exception as e:
-            log.error("Failed to commit deliberation: %s", e)
+            # Connection-level failure (pool, network, auth). Can't recover,
+            # but surface what we know.
+            log.error("Failed to commit deliberation: %s", repr(e))
             return {
                 "deliberation_id": deliberation_id,
                 "status": "error",
-                "error": str(e),
+                "error": repr(e),
                 "patient_id": request.patient_id,
                 "rounds_completed": rounds_completed,
+                "outputs_written": outputs_written,
+                "failed_writes": failed_writes,
                 "context_stats": loader.context_summary(),
             }
+
+        # Classify outcome: if session row failed, nothing is recoverable;
+        # otherwise mark partial only when any write actually failed.
+        if not session_written:
+            commit_status = "error"
+        elif failed_writes:
+            commit_status = "partial"
+        else:
+            commit_status = "complete"
 
         # ── Post-commit: Collect gap artifacts ───────────────────────────────
         _gap_artifacts: list = []
@@ -633,9 +690,11 @@ class DeliberationEngine:
 
         return {
             "deliberation_id": deliberation_id,
-            "status": "complete",
+            "status": commit_status,
             "patient_id": request.patient_id,
             "rounds_completed": rounds_completed,
+            "outputs_written": outputs_written,
+            "failed_writes": failed_writes,
             "context_stats": loader.context_summary(),
             "summary": self._summarize_output(final_output),
             "gap_artifacts": _gap_artifacts,
