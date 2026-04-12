@@ -318,3 +318,150 @@ def test_render_recommendation_pending():
     section = {"declared_tier": "PENDING",
                "pending_tool_name": "score_llm_interaction_health"}
     assert render_recommendation(section, []) == "PENDING"
+
+
+# ── Rule 6 extension: ARIA cross-domain TOOL mismatch ─────────────────
+
+def test_rule6_aria_pharmacology_tool_mismatch():
+    """ARIA declaring TOOL for pharmacology content with the wrong
+    tool_name must be caught. Pharmacology belongs to THEO."""
+    v = validate_section({
+        "section_id": "aria-crossdomain",
+        "agent": "ARIA",
+        "declared_tier": "TOOL",
+        "content_summary": (
+            "PPI safety: pantoprazole long-term is well tolerated."
+        ),
+        "tool_name": "clinical_query",
+        "tool_called_at": datetime.now(timezone.utc).isoformat(),
+    })
+    r6 = [r for r in v
+          if r["rule"] == "KNOWN_DOMAIN_SYNTHESIZED_INSTEAD_OF_PENDING"]
+    assert r6 and "search_clinical_knowledge" in r6[0]["message"]
+
+
+# ── Rule 9: CORPUS_BOUND_DOMAIN_NO_GAP (WARN) ─────────────────────────
+
+def test_rule9_theo_corpus_bound_domain_warns():
+    v = validate_section({
+        "section_id": "theo-ppi-no-gap",
+        "agent": "THEO",
+        "declared_tier": "RETRIEVAL",
+        "content_summary": (
+            "PPI therapy is well supported by current evidence."
+        ),
+        "evidence_gap_flagged": False,
+        "citations": ["ADA 2026"],
+    })
+    warn = [r for r in v if r["rule"] == "CORPUS_BOUND_DOMAIN_NO_GAP"]
+    assert warn and warn[0]["severity"] == "WARN"
+
+
+def test_rule9_theo_corpus_bound_with_gap_declared_clean():
+    v = validate_section({
+        "section_id": "theo-ppi-gap-ok",
+        "agent": "THEO",
+        "declared_tier": "RETRIEVAL",
+        "content_summary": (
+            "PPI safety: insufficient ADA-2026 coverage; gap flagged."
+        ),
+        "evidence_gap_flagged": True,
+    })
+    assert not any(
+        r["rule"] == "CORPUS_BOUND_DOMAIN_NO_GAP" for r in v
+    )
+
+
+def test_rule9_does_not_fire_for_non_theo_agents():
+    # MIRA mentioning PPI shouldn't trigger Rule 9 (THEO-scoped).
+    v = validate_section({
+        "section_id": "mira-ppi",
+        "agent": "MIRA",
+        "declared_tier": "RETRIEVAL",
+        "content_summary": "Patient worries about PPI side effects.",
+        "evidence_gap_flagged": False,
+    })
+    assert not any(
+        r["rule"] == "CORPUS_BOUND_DOMAIN_NO_GAP" for r in v
+    )
+
+
+# ── Rule 10: AI_DISCLOSURE_MISSING (BLOCK, PATIENT_FACING) ────────────
+
+def test_rule10_patient_facing_missing_disclosure():
+    v = validate_section({
+        "section_id": "nudge-1",
+        "agent": "PATIENT_FACING",
+        "declared_tier": "TOOL",
+        "content_summary": "Schedule your A1c screening.",
+        "tool_name": "select_nudge_type",
+        "tool_called_at": datetime.now(timezone.utc).isoformat(),
+    })
+    r10 = [r for r in v if r["rule"] == "AI_DISCLOSURE_MISSING"]
+    assert r10 and r10[0]["severity"] == "BLOCK"
+
+
+def test_rule10_patient_facing_with_disclosure_clean():
+    v = validate_section({
+        "section_id": "nudge-2",
+        "agent": "PATIENT_FACING",
+        "declared_tier": "TOOL",
+        "content_summary": "Schedule your A1c screening.",
+        "tool_name": "select_nudge_type",
+        "tool_called_at": datetime.now(timezone.utc).isoformat(),
+        "ai_disclosure": "This message was generated with AI assistance.",
+    })
+    assert not any(r["rule"] == "AI_DISCLOSURE_MISSING" for r in v)
+
+
+def test_rule10_accepts_boolean_disclosure_tag():
+    v = validate_section({
+        "section_id": "nudge-3",
+        "agent": "PATIENT_FACING",
+        "declared_tier": "TOOL",
+        "content_summary": "Schedule your A1c screening.",
+        "tool_name": "select_nudge_type",
+        "tool_called_at": datetime.now(timezone.utc).isoformat(),
+        "ai_disclosure_tag": True,
+    })
+    assert not any(r["rule"] == "AI_DISCLOSURE_MISSING" for r in v)
+
+
+def test_patient_facing_synthesized_tier_blocked():
+    # Pre-check: PATIENT_FACING may not be SYNTHESIZED directly —
+    # synthesis must route through SYNTHESIS first.
+    v = validate_section({
+        "section_id": "pf-synth",
+        "agent": "PATIENT_FACING",
+        "declared_tier": "SYNTHESIZED",
+        "content_summary": "Friendly reminder to exercise.",
+        "synthesis_basis": "mood context",
+        "ai_disclosure": True,
+    })
+    assert any(r["rule"] == "AGENT_TIER_CONSTRAINT_VIOLATED" for r in v)
+
+
+# ── SYSTEM agent ──────────────────────────────────────────────────────
+
+def test_system_pending_tier_blocked():
+    v = validate_section({
+        "section_id": "sys-pending",
+        "agent": "SYSTEM",
+        "declared_tier": "PENDING",
+        "content_summary": "Waiting for model ID.",
+        "pending_tool_name": "get_model_id",
+    })
+    assert any(r["rule"] == "AGENT_TIER_CONSTRAINT_VIOLATED" for r in v)
+
+
+def test_system_synthesized_with_basis_is_clean():
+    v = validate_section({
+        "section_id": "sys-rationale",
+        "agent": "SYSTEM",
+        "declared_tier": "SYNTHESIZED",
+        "content_summary": (
+            "Deliberation ran in triage mode due to prior convergence."
+        ),
+        "synthesis_basis": "mode elicitation logic",
+    })
+    assert v == []
