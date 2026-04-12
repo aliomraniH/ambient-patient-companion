@@ -9,7 +9,10 @@ The Ambient Patient Companion connects Claude to a live clinical intelligence la
 - **Real patient data** from a 34-table PostgreSQL warehouse (Synthea + HealthEx FHIR)
 - **Dual-LLM Deliberation Engine** — Claude Sonnet + GPT-4o independently analyze clinical context, cross-critique across multiple rounds, then synthesize into 5 structured output categories
 - **3-Layer Clinical Guardrail Pipeline** — input validation → escalation rules → output safety on every AI call
-- **19 MCP tools** across 3 servers, all accessible to Claude via OAuth-authenticated HTTPS
+- **5 Data Quality Validators (F1–F5)** — FHIR conformance, clinical plausibility, source anchoring, self-consistency, clinical text sanitization; flagging written to `transfer_log.quality_status`
+- **Convergence Gate** — deliberation synthesis only proceeds when Claude + GPT-4o agree (score ≥ 0.40); low-convergence results return `recommendation=null` with provider note
+- **Batch API Model Router** — task-type-to-model routing (Haiku for classification, Sonnet for extraction, Opus for deliberation/synthesis)
+- **46 MCP tools** across 3 servers, all accessible to Claude via OAuth-authenticated HTTPS
 
 ---
 
@@ -32,13 +35,13 @@ Next.js 16 (port 5000)
            /register  /authorize  /token
       │
       ├── MCP Server 1 — ambient-clinical-intelligence (port 8001)
-      │   19 tools · 3-layer guardrails · Dual-LLM Deliberation · Flag Lifecycle
+      │   23 tools · 3-layer guardrails · Dual-LLM Deliberation · Gap-Aware · Flag Lifecycle
       │
       ├── MCP Server 2 — ambient-skills-companion (port 8002)
-      │   18 tools · 10 skill modules · OBT Score · SDOH · pre-visit brief
+      │   20 tools · 10 skill modules · OBT Score · SDOH · pre-visit brief · Freshness Orchestration
       │
       └── MCP Server 3 — ambient-ingestion (port 8003)
-          1 tool · HealthEx ETL pipeline (5 format parsers)
+          3 tools · HealthEx ETL pipeline (5 format parsers) · Staleness Detection · Extended Search
       │
       └── PostgreSQL Warehouse — 34 tables
           patients · biometrics · deliberations · flags · ingestion_plans · …
@@ -52,10 +55,10 @@ Next.js 16 (port 5000)
 ambient-patient-companion/
 │
 ├── server/                      ← Server 1: ambient-clinical-intelligence (port 8001)
-│   ├── mcp_server.py            ← FastMCP("ambient-clinical-intelligence") — 19 tools + REST wrappers
+│   ├── mcp_server.py            ← FastMCP("ambient-clinical-intelligence") — 23 tools + REST wrappers
 │   ├── guardrails/              ← input_validator · output_validator · clinical_rules
 │   └── deliberation/            ← Dual-LLM Deliberation Engine
-│       ├── engine.py            ← 5-phase orchestrator (+ Phase 0.5, 3.25, 3.5)
+│       ├── engine.py            ← 6-phase orchestrator (+ Phase 0.1, 0.5, 3.25, 3.5, 5.5)
 │       ├── planner.py           ← Phase 0.5: pre-deliberation agenda builder (Haiku)
 │       ├── context_compiler.py  ← Phase 0: assemble patient EHR context
 │       ├── tiered_context_loader.py  ← 3-tier budget-capped loading (11K limit)
@@ -64,16 +67,21 @@ ambient-patient-companion/
 │       ├── synthesizer.py       ← Phase 3: unified synthesis → DeliberationResult
 │       ├── synthesis_reviewer.py← Phase 3.25: post-synthesis domain review (Haiku)
 │       ├── output_safety.py     ← Phase 3.5: guardrail wrapper on deliberation output
+│       ├── convergence_gate.py  ← Convergence Gate: score < 0.40 → null recommendations
 │       ├── behavioral_adapter.py← Phase 4: SMS/push nudge formatting
 │       ├── knowledge_store.py   ← Phase 5: atomic DB commit
+│       ├── gap_validation.py    ← Phase 0.1 (pre-dispatch) + Phase 5.5 (gap artifact collection)
 │       ├── flag_reviewer.py     ← LLM-powered flag lifecycle review (Haiku)
 │       ├── flag_writer.py       ← Flag registry writes with data provenance
 │       ├── data_request_parser.py  ← Parse agent data requests between rounds
 │       ├── json_utils.py        ← strip_markdown_fences() + safe_json_loads()
 │       ├── schemas.py           ← 20+ Pydantic models
+│       ├── batch/               ← Batch API model tiering
+│       │   ├── model_router.py  ← Task→model routing (Haiku/Sonnet/Opus)
+│       │   └── pre_encounter_batch.py ← Multi-patient batch builder + chunker
 │       ├── prompts/             ← XML LLM prompt templates
-│       ├── migrations/001–004   ← Deliberation + flag lifecycle tables
-│       └── tests/               ← 109 deliberation unit tests
+│       ├── migrations/001–006   ← Deliberation + flag lifecycle + gap-aware + quality tables
+│       └── tests/               ← 290+ deliberation unit tests
 │
 ├── mcp-server/                  ← Server 2: ambient-skills-companion (port 8002)
 │   ├── server.py                ← FastMCP("ambient-skills-companion") — auto-discovers skills
@@ -85,7 +93,7 @@ ambient-patient-companion/
 │   │   ├── generate_checkins.py
 │   │   ├── generate_patient.py
 │   │   ├── generate_vitals.py
-│   │   ├── ingestion_tools.py   ← 8 tools: freshness · ingestion · conflicts · data tracks
+│   │   ├── ingestion_tools.py   ← 10 tools: freshness · ingestion · conflicts · data tracks · orchestrate_refresh · register_healthex_patient
 │   │   ├── previsit_brief.py
 │   │   └── sdoh_assessment.py
 │   ├── db/schema.sql            ← 22-table PostgreSQL base schema (source of truth)
@@ -94,18 +102,28 @@ ambient-patient-companion/
 │   └── tests/                   ← 92 backend tests
 │
 ├── ingestion/                   ← Server 3: ambient-ingestion (port 8003)
-│   ├── server.py                ← FastMCP("ambient-ingestion") — trigger_ingestion tool
+│   ├── server.py                ← FastMCP("ambient-ingestion") — 3 tools
 │   ├── pipeline.py              ← ETL orchestrator
 │   ├── conflict_resolver.py     ← Multi-source conflict resolution
+│   ├── validators/              ← F1–F5 Data Quality Validators
+│   │   ├── fhir_validator.py    ← F1: FHIR R4 conformance check → quality_status flagging
+│   │   ├── plausibility.py      ← F2: Clinical range / decimal plausibility checks
+│   │   ├── source_anchor.py     ← F3: Source provenance anchoring validator
+│   │   ├── self_consistency.py  ← F4: Cross-field consistency checks
+│   │   └── __init__.py          ← Exports all 4 validators
+│   ├── sanitization/
+│   │   └── clinical_sanitizer.py← F5: Preserves A+/°C/HGVS/<0.01; strips prompt injection
+│   ├── context/
+│   │   └── critical_value_injector.py ← Injects Gold-tier critical values with source="__critical_values__"
 │   └── adapters/healthex/
 │       ├── format_detector.py   ← detect_format() → 5 formats (A/B/C/D/JSON-dict)
-│       ├── ingest.py            ← adaptive_parse() entry point
+│       ├── ingest.py            ← adaptive_parse() + F1–F5 validator chain
 │       ├── planner.py           ← Two-phase ingest planner (ingestion_plans table)
 │       ├── executor.py          ← Phase 2 worker + TracedWriter audit trail
 │       ├── content_router.py    ← TEXT/STRUCT/REF content classification
 │       ├── llm_fallback.py      ← Claude fallback for unrecognised payloads (+ PHI scan)
 │       ├── transfer_planner.py  ← Size-aware TransferPlan + TransferRecord
-│       ├── traced_writer.py     ← Per-record async writer + transfer_log
+│       ├── traced_writer.py     ← Per-record async writer + transfer_log + quality_status
 │       └── parsers/             ← format_a/b/c/d + json_dict parsers
 │
 ├── replit-app/                  ← Next.js 16 frontend (port 5000)
@@ -167,9 +185,9 @@ All three are proxied through Next.js (port 5000). Claude connects via OAuth PKC
 
 | FastMCP Name | Port | Public Path | Tools | Health |
 |---|---|---|---|---|
-| `ambient-clinical-intelligence` | 8001 | `/mcp` | 19 | `GET /health` |
-| `ambient-skills-companion` | 8002 | `/mcp-skills` | 18 | `GET /health` |
-| `ambient-ingestion` | 8003 | `/mcp-ingestion` | 1 | `GET /health` |
+| `ambient-clinical-intelligence` | 8001 | `/mcp` | 23 | `GET /health` |
+| `ambient-skills-companion` | 8002 | `/mcp-skills` | 20 | `GET /health` |
+| `ambient-ingestion` | 8003 | `/mcp-ingestion` | 3 | `GET /health` |
 
 **Public base URL:** `https://[your-replit-domain]`
 
