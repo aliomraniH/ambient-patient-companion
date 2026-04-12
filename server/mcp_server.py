@@ -49,7 +49,7 @@ import anthropic
 import asyncpg
 from fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from server.guardrails.input_validator import validate_input
 from server.guardrails.output_validator import validate_output
@@ -1982,10 +1982,10 @@ async def rest_flag_drug_interaction(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/tools/get_synthetic_patient", methods=["GET"])
-async def rest_get_synthetic_patient(request: Request) -> JSONResponse:
+async def rest_get_synthetic_patient(request: Request) -> Response:
     mrn = request.query_params.get("mrn", "")
     result = await get_synthetic_patient(mrn=mrn)
-    return JSONResponse(result)
+    return Response(json.dumps(result, default=str), media_type="application/json")
 
 
 @mcp.custom_route("/tools/use_healthex", methods=["POST"])
@@ -2387,6 +2387,13 @@ async def get_flag_review_status(patient_id: str) -> dict:
             "needs_human_review": [dict(r) for r in human_needed],
             "has_pending_clarifications": len(human_needed) > 0,
         }
+
+
+@mcp.custom_route("/tools/get_flag_review_status", methods=["POST"])
+async def rest_get_flag_review_status(request: Request) -> Response:
+    body = await request.json()
+    result = await get_flag_review_status(patient_id=body.get("patient_id", ""))
+    return Response(json.dumps(result, default=str), media_type="application/json")
 
 
 @mcp.tool()
