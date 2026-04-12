@@ -3,15 +3,43 @@
 import logging
 import os
 import sys
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
+# Allow imports from the repo root (shared/provenance lives there).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import asyncpg
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 mcp = FastMCP("ambient-ingestion")
+
+
+# ---------------------------------------------------------------------------
+# Process-local asyncpg pool for the provenance audit writer.
+# Existing tools in this server create ephemeral per-call pools; we keep
+# one cached singleton only for verify_output_provenance to avoid pool
+# churn on every audit.
+# ---------------------------------------------------------------------------
+_provenance_pool: asyncpg.Pool | None = None
+
+
+async def _get_provenance_pool() -> asyncpg.Pool:
+    global _provenance_pool
+    if _provenance_pool is None:
+        dsn = os.environ.get("DATABASE_URL", "")
+        if not dsn:
+            raise RuntimeError("DATABASE_URL not set")
+        _provenance_pool = await asyncpg.create_pool(
+            dsn, min_size=1, max_size=3
+        )
+    return _provenance_pool
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -234,6 +262,19 @@ async def search_patient_data_extended(
         "not_found": not_found,
         "gap_resolved": gap_resolved,
     }, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Shared provenance tool (registered on all three MCP servers)
+# ---------------------------------------------------------------------------
+
+from shared.provenance import register_provenance_tool  # noqa: E402
+
+register_provenance_tool(
+    mcp,
+    source_server="ambient-ingestion",
+    get_pool=_get_provenance_pool,
+)
 
 
 # ---------------------------------------------------------------------------
