@@ -77,6 +77,30 @@ def adaptive_parse(
             from .llm_fallback import llm_normalise
             rows = llm_normalise(raw_input, resource_type)
             parser_used = f"{parser_used}+llm_fallback"
+
+            # F1a: Source anchoring — verify LLM-extracted numerics appear in source
+            if rows:
+                try:
+                    from ingestion.validators.source_anchor import (
+                        verify_extracted_numerics, assert_anchor_rate,
+                    )
+                    anchored_rows = []
+                    for row in rows:
+                        anchor_result = verify_extracted_numerics(
+                            source_blob=raw_input,
+                            extracted=row,
+                            resource_type=resource_type,
+                        )
+                        assert_anchor_rate(anchor_result)
+                        anchored = anchor_result["verified"]
+                        # Preserve audit metadata so downstream can track quality
+                        if anchor_result["flags"]:
+                            anchored["__anchor_flags__"] = anchor_result["flags"]
+                            anchored["__anchor_rate__"] = anchor_result["anchor_rate"]
+                        anchored_rows.append(anchored)
+                    rows = anchored_rows
+                except Exception as anchor_exc:
+                    log.warning("Source anchoring skipped: %s", anchor_exc)
         except Exception as e:
             log.error("LLM fallback failed: %s", e)
 

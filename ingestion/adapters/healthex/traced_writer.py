@@ -30,17 +30,16 @@ log = logging.getLogger(__name__)
 def sanitize_text_field(value: str, max_len: int = 10_000) -> str:
     """
     Clean any string field before it reaches the DB.
+    - Protects clinical notation (blood types, comparators, gene variants, etc.)
+    - Removes injection vectors (Unicode smuggling, LLM control tokens, role injection)
     - Replaces double-quotes with single-quotes (fixes the ultrasound narrative bug)
     - Strips null bytes that break JSON serialization
     - Truncates to max_len to prevent context blowout
     """
     if not isinstance(value, str):
         return value
-    value = value.replace('"', "'")
-    value = value.replace('\x00', '')
-    if len(value) > max_len:
-        value = value[:max_len - 3] + "..."
-    return value
+    from ingestion.sanitization.clinical_sanitizer import clinical_sanitize
+    return clinical_sanitize(value, max_len=max_len)
 
 
 def sanitize_row(row: dict) -> dict:
@@ -480,9 +479,40 @@ async def execute_transfer_plan_async(pool, plan: TransferPlan,
                     fhir_res = _native_to_fhir_one(plan.resource_type, sanitized)
                     if fhir_res is None:
                         raise ValueError("normalize returned None")
+
+                    # F1c: FHIR structural validation (annotates, never discards)
+                    try:
+                        from ingestion.validators.fhir_validator import validate_fhir_resource
+                        is_valid, fhir_issues = validate_fhir_resource(sanitized, plan.resource_type)
+                        if not is_valid:
+                            log.warning(
+                                "FHIR validation issues for %s: %s",
+                                tr.record_key, fhir_issues[:3],
+                            )
+                    except Exception as _fhir_exc:
+                        log.debug("FHIR validator skipped: %s", _fhir_exc)
+
                     db_rec = _fhir_to_db_one(plan.resource_type, fhir_res, patient_id)
                     if db_rec is None:
                         raise ValueError("transform returned None")
+
+                    # F3: Clinical plausibility validation for labs (annotates)
+                    if plan.resource_type == "labs":
+                        try:
+                            from ingestion.validators.plausibility import validate_plausibility
+                            validate_plausibility(
+                                db_rec, resource_type=plan.resource_type,
+                                patient_mrn=str(patient_id),
+                            )
+                            if db_rec.get("quality_status") == "flagged":
+                                log.warning(
+                                    "Plausibility flagged record %s: %s",
+                                    tr.record_key,
+                                    db_rec.get("quality_flags", [{}])[0].get("note", ""),
+                                )
+                        except Exception as _plaus_exc:
+                            log.debug("Plausibility validator skipped: %s", _plaus_exc)
+
                     tr.extracted_at = now_utc()
                 except Exception as e:
                     records_failed += 1
