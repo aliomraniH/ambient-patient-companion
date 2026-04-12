@@ -2034,54 +2034,216 @@ async def get_deliberation_engine() -> DeliberationEngine:
     return _deliberation_engine
 
 
+# ---------------------------------------------------------------------------
+# Mode selection cache for run_deliberation elicitation (two-call protocol).
+# Ephemeral — same pattern as replit-app/lib/oauth-store.ts. State loss on
+# restart just forces the caller to re-ask; no clinical data is held here.
+# ---------------------------------------------------------------------------
+_MODE_SELECTION_TTL_SEC = 300  # 5 minutes
+_MODE_SELECTION_CACHE: dict[str, dict] = {}
+_VALID_MODES = ("ask", "triage", "progressive", "full")
+_EXECUTABLE_MODES = ("triage", "progressive", "full")
+
+
+def _purge_expired_selection_tokens() -> None:
+    now = _dt.utcnow().timestamp()
+    expired = [
+        tok for tok, entry in _MODE_SELECTION_CACHE.items()
+        if entry.get("expires_at", 0) < now
+    ]
+    for tok in expired:
+        _MODE_SELECTION_CACHE.pop(tok, None)
+
+
+async def _recommend_mode(patient_id: str) -> dict:
+    """Inspect deliberation history and return a mode recommendation.
+
+    Rules (deterministic):
+      - No prior deliberations              -> "triage"   (initial screening)
+      - Latest convergence_score >= 0.75    -> "progressive"
+      - Otherwise                           -> "full"     (re-deliberation worthwhile)
+    """
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, triggered_at, convergence_score, rounds_completed, status
+               FROM deliberations
+               WHERE patient_id = $1
+               ORDER BY triggered_at DESC
+               LIMIT 1""",
+            patient_id,
+        )
+        prior_count_row = await conn.fetchrow(
+            "SELECT COUNT(*) AS n FROM deliberations WHERE patient_id = $1",
+            patient_id,
+        )
+
+    prior_count = int(prior_count_row["n"]) if prior_count_row else 0
+    if prior_count == 0:
+        return {
+            "is_initial_run": True,
+            "prior_deliberations": 0,
+            "latest_convergence": None,
+            "recommended_mode": "triage",
+            "rationale": "No prior deliberations for this patient; start with triage.",
+        }
+
+    latest = rows[0] if rows else None
+    latest_conv = float(latest["convergence_score"]) if latest and latest["convergence_score"] is not None else 0.0
+    if latest_conv >= 0.75:
+        rec = "progressive"
+        rationale = (
+            f"Prior deliberation converged at {latest_conv:.2f} (>= 0.75); "
+            "progressive tiered loading is sufficient for a follow-up pass."
+        )
+    else:
+        rec = "full"
+        rationale = (
+            f"Prior deliberation converged at {latest_conv:.2f} (< 0.75); "
+            "full dual-LLM council recommended for deeper re-analysis."
+        )
+    return {
+        "is_initial_run": False,
+        "prior_deliberations": prior_count,
+        "latest_convergence": latest_conv,
+        "recommended_mode": rec,
+        "rationale": rationale,
+    }
+
+
+def _mode_options() -> list[dict]:
+    return [
+        {
+            "mode": "triage",
+            "description": "Single-LLM screening (Claude Sonnet only). Lowest cost.",
+            "est_latency_sec": 5,
+            "est_llm_calls": 1,
+        },
+        {
+            "mode": "progressive",
+            "description": "Tiered Haiku loop with demand-fetch context. Balanced.",
+            "est_latency_sec": 20,
+            "est_llm_calls": "1-5",
+        },
+        {
+            "mode": "full",
+            "description": "Dual-LLM council (Claude Sonnet + GPT-4o + critic + synthesis).",
+            "est_latency_sec": 90,
+            "est_llm_calls": "6-12",
+        },
+    ]
+
+
 @mcp.tool()
 async def run_deliberation(
     patient_id: str,
     trigger_type: str = "manual",
     max_rounds: int = 3,
-    mode: str = "progressive",
+    mode: str | None = None,
+    selection_token: str | None = None,
 ) -> dict:
     """
-    Trigger a deliberation session for a patient.
+    Trigger a deliberation session for a patient. Supports caller-driven
+    mode elicitation via a two-call protocol.
 
-    Supports two modes:
-      - "progressive" (default): Tiered context loading — starts with minimal
-        data and fetches more on demand. Prevents context overflow crashes.
-      - "full": Original dual-LLM pipeline (Claude + GPT-4 cross-critique).
+    Modes:
+      - "triage":      Minimal single-LLM screening (Claude Sonnet only).
+      - "progressive": Tiered context loading (Haiku, demand-fetch).
+      - "full":        Dual-LLM council (Claude Sonnet + GPT-4o + critic + synthesis).
+      - "ask" | None:  Return a mode-selection prompt with options, history-based
+                       recommendation, and a selection_token. The caller then
+                       re-invokes this tool with the chosen mode and token.
 
     Args:
-        patient_id: Patient MRN or internal ID
-        trigger_type: One of: scheduled_pre_encounter, lab_result_received,
-                      medication_change, missed_appointment, temporal_threshold, manual
-        max_rounds: Maximum deliberation rounds (1-5, default 3)
-        mode: "progressive" (tiered loading) or "full" (dual-LLM pipeline)
+        patient_id: Patient MRN or internal ID.
+        trigger_type: scheduled_pre_encounter | lab_result_received |
+                      medication_change | missed_appointment |
+                      temporal_threshold | manual
+        max_rounds: Maximum deliberation rounds (1-5, default 3). Ignored in triage.
+        mode: "ask" (default when omitted) | "triage" | "progressive" | "full".
+        selection_token: Optional token returned by a prior "ask" call. When
+                         supplied, must match the patient_id and not be expired.
 
     Returns:
-        deliberation_id, status, summary of five output categories,
-        context_stats (progressive mode), convergence_score (full mode)
+        - mode=ask/None: {status:"mode_selection_required", selection_token, options,
+                          recommended_mode, is_initial_run, prior_deliberations, ...}
+        - mode=triage/progressive/full: deliberation result dict.
+        - invalid mode: {status:"invalid_mode", accepted:[...]}
+        - bad token:    {status:"invalid_selection_token"}
     """
+    # Normalize mode. None -> "ask" (elicit).
+    effective_mode = (mode or "ask").strip().lower()
+
+    if effective_mode not in _VALID_MODES:
+        return {
+            "status": "invalid_mode",
+            "accepted": list(_VALID_MODES),
+            "received": mode,
+        }
+
+    # ── Elicitation path ─────────────────────────────────────────────────
+    if effective_mode == "ask":
+        _purge_expired_selection_tokens()
+        recommendation = await _recommend_mode(patient_id)
+        token = _uuid_mod.uuid4().hex
+        now = _dt.utcnow().timestamp()
+        _MODE_SELECTION_CACHE[token] = {
+            "patient_id": patient_id,
+            "trigger_type": trigger_type,
+            "max_rounds": max_rounds,
+            "created_at": now,
+            "expires_at": now + _MODE_SELECTION_TTL_SEC,
+        }
+        return {
+            "status": "mode_selection_required",
+            "selection_token": token,
+            "patient_id": patient_id,
+            "trigger_type": trigger_type,
+            "is_initial_run": recommendation["is_initial_run"],
+            "prior_deliberations": recommendation["prior_deliberations"],
+            "latest_convergence": recommendation["latest_convergence"],
+            "recommended_mode": recommendation["recommended_mode"],
+            "rationale": recommendation["rationale"],
+            "options": _mode_options(),
+            "expires_in_sec": _MODE_SELECTION_TTL_SEC,
+            "instructions": (
+                "Re-invoke run_deliberation with mode=<triage|progressive|full> "
+                "and selection_token=<this token> to execute the chosen mode."
+            ),
+        }
+
+    # ── Selection token validation (optional) ────────────────────────────
+    if selection_token is not None:
+        _purge_expired_selection_tokens()
+        entry = _MODE_SELECTION_CACHE.get(selection_token)
+        if entry is None or entry.get("patient_id") != patient_id:
+            return {
+                "status": "invalid_selection_token",
+                "reason": "token_missing_expired_or_patient_mismatch",
+            }
+        # Consume the token so it cannot be replayed.
+        _MODE_SELECTION_CACHE.pop(selection_token, None)
+
     engine = await get_deliberation_engine()
-
-    if mode == "progressive":
-        return await engine.run_progressive(
-            DeliberationRequest(
-                patient_id=patient_id,
-                trigger_type=trigger_type,
-                max_rounds=max_rounds,
-            )
-        )
-
-    # Full dual-LLM mode (original pipeline)
-    result = await engine.run(
-        DeliberationRequest(
-            patient_id=patient_id,
-            trigger_type=trigger_type,
-            max_rounds=max_rounds
-        )
+    request = DeliberationRequest(
+        patient_id=patient_id,
+        trigger_type=trigger_type,
+        max_rounds=max_rounds,
     )
+
+    # ── Dispatch ─────────────────────────────────────────────────────────
+    if effective_mode == "triage":
+        return await engine.run_triage(request)
+
+    if effective_mode == "progressive":
+        return await engine.run_progressive(request)
+
+    # mode == "full"
+    result = await engine.run(request)
     return {
         "deliberation_id": result.deliberation_id,
         "status": "complete",
+        "mode": "full",
         "patient_id": result.patient_id,
         "convergence_score": result.convergence_score,
         "summary": {

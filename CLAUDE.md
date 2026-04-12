@@ -233,7 +233,8 @@ mcp = FastMCP("ambient-clinical-intelligence")
 @mcp.tool    execute_pending_plans(patient_id)
 @mcp.tool    get_ingestion_plans(patient_id)
 @mcp.tool    get_transfer_audit(patient_id)
-@mcp.tool    run_deliberation(patient_id, mode)         # async fire-and-forget
+@mcp.tool    run_deliberation(patient_id, mode, selection_token)
+             # mode: "ask"|"triage"|"progressive"|"full" (omit/"ask" elicits choice)
 @mcp.tool    get_deliberation_results(patient_id)       # poll for results
 @mcp.tool    get_flag_review_status(patient_id)
 @mcp.tool    get_patient_knowledge(patient_id)
@@ -289,15 +290,44 @@ Phase 5    knowledge_store.py    → Atomic write to DB: deliberations + patient
 
 ### Invocation Pattern
 
-```python
-# Fire-and-forget — returns immediately, runs in background
-await run_deliberation(patient_id="uuid", mode="progressive")  # or mode="full"
+Three execution modes plus an **elicitation** protocol when the caller wants the
+tool to pick (or confirm) the mode based on deliberation history.
 
-# Poll for results
+| Mode          | Agents                                   | Est. cost | When |
+|---------------|------------------------------------------|-----------|------|
+| `triage`      | Claude Sonnet only (planner optional)    | ~1 call   | Initial screening, no prior deliberations |
+| `progressive` | Haiku loop, tiered demand-fetch context  | 1-5 calls | Follow-up pass with high prior convergence |
+| `full`        | Sonnet + GPT-4o + critic + synthesis     | 6-12 calls| Deep re-analysis, low prior convergence |
+
+```python
+# ── Direct call: caller knows the mode ────────────────────────────────
+await run_deliberation(patient_id="uuid", mode="triage")       # or progressive / full
+
+# ── Two-call elicitation: tool asks the caller ────────────────────────
+# Call 1 — omit mode (or pass mode="ask"). Tool inspects deliberations
+# history and returns a recommendation + options + selection_token.
+offer = await run_deliberation(patient_id="uuid")
+# → {"status": "mode_selection_required",
+#    "selection_token": "…", "recommended_mode": "triage",
+#    "is_initial_run": true, "prior_deliberations": 0,
+#    "options": [{mode, description, est_latency_sec, est_llm_calls}, …],
+#    "expires_in_sec": 300, "instructions": "…"}
+
+# Call 2 — re-invoke with the chosen mode and the token.
+await run_deliberation(
+    patient_id="uuid",
+    mode=offer["recommended_mode"],
+    selection_token=offer["selection_token"],
+)
+
+# Poll for results (all modes persist to the deliberations table)
 results = await get_deliberation_results(patient_id="uuid")
-# → {"clinical_findings":[...], "medication_review":[...], "care_gaps":[...],
-#    "behavioral_insights":[...], "care_coordination_actions":[...]}
 ```
+
+Invalid mode strings now return `{"status": "invalid_mode", …}` instead of
+silently falling through to the most expensive (full) path. An expired or
+patient-mismatched `selection_token` returns `{"status": "invalid_selection_token"}`.
+The token cache is in-memory (5-minute TTL); state loss just forces re-asking.
 
 ### Flag Lifecycle
 
