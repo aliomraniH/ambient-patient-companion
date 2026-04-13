@@ -216,7 +216,7 @@ class DeliberationEngine:
                     result.model_dump(), default=str
                 )[:3000]
                 context_summary = (
-                    f"Patient: {context.patient_name}, {context.age}{context.sex}, "
+                    f"Patient: {context.patient_name}, {context.age_display()}{context.sex}, "
                     f"MRN {context.mrn}. "
                     f"Conditions: {', '.join(c.get('display', '') for c in context.active_conditions)}."
                 )
@@ -880,9 +880,9 @@ class DeliberationEngine:
                     f"%{patient_id}%",
                 )
             if row is None:
-                return {"patient_name": "Unknown", "age": 0, "sex": "unknown"}
+                return {"patient_name": "Unknown", "age": None, "sex": "unknown"}
 
-            age = 0
+            age = None
             if row["birth_date"]:
                 bd = row["birth_date"]
                 today = date.today()

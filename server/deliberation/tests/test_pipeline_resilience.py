@@ -228,29 +228,39 @@ def _base_context(**overrides):
 
 
 class TestAgeCoercion:
-    """PatientContextPackage.age must never be None after construction."""
+    """PatientContextPackage.age propagates None → prompts render 'age unknown'.
 
-    def test_age_none_coerced_to_zero(self):
-        """PR-6: None age → 0."""
+    Rationale: silently coercing a missing age to 0 tells the LLM it's
+    reasoning about a newborn, which degrades clinical accuracy more than
+    an explicit 'unknown' signal. See schemas.py _coerce_age docstring.
+    """
+
+    def test_age_none_propagates(self):
+        """PR-6: None age stays None; age_display() renders 'age unknown'."""
         ctx = PatientContextPackage(**_base_context(age=None))
-        assert ctx.age == 0, (
-            "PR-6: age=None must be coerced to 0 so prompts don't emit 'age': null"
+        assert ctx.age is None, (
+            "PR-6: age=None must propagate so prompts can signal 'age unknown' "
+            "rather than treating the patient as a 0-year-old."
         )
+        assert ctx.age_display() == "age unknown"
 
-    def test_age_string_invalid_coerced_to_zero(self):
-        """PR-7: Unparseable string age → 0."""
+    def test_age_string_invalid_propagates_none(self):
+        """PR-7: Unparseable string age → None (no silent 0)."""
         ctx = PatientContextPackage(**_base_context(age="not-a-number"))
-        assert ctx.age == 0
+        assert ctx.age is None
+        assert ctx.age_display() == "age unknown"
 
     def test_age_valid_integer_preserved(self):
         """PR-8: Valid integer passes through unchanged."""
         ctx = PatientContextPackage(**_base_context(age=45))
         assert ctx.age == 45
+        assert ctx.age_display() == "45"
 
     def test_age_zero_preserved(self):
-        """Edge: explicit age=0 stays 0 (not further mutated)."""
+        """Edge: explicit age=0 stays 0 (valid neonate age, not None)."""
         ctx = PatientContextPackage(**_base_context(age=0))
         assert ctx.age == 0
+        assert ctx.age_display() == "0"
 
     def test_age_string_numeric_coerced(self):
         """Edge: '67' as string is coerced to int 67."""

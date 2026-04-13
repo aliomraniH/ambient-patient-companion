@@ -265,6 +265,86 @@ async def search_patient_data_extended(
 
 
 # ---------------------------------------------------------------------------
+# Tier 2.b.v — register_conversation_trigger
+#   Bridges S2's detect_conversation_teachable_moment to the ingestion
+#   pipeline's JITAI trigger system. Persists to jitai_triggers (migration 008).
+# Tier 3.3 — detect_healthex_format
+#   Expose the existing format_detector so clients can inspect routing
+#   decisions from an MCP session.
+# ---------------------------------------------------------------------------
+
+import json as _json         # noqa: E402
+import uuid as _uuid         # noqa: E402
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: E402
+
+
+@mcp.tool
+async def register_conversation_trigger(
+    patient_id: str,
+    signal_type: str,
+    trigger_jitai_type: str,
+    min_signal_strength: float = 0.6,
+    expires_hours: float = 24.0,
+) -> str:
+    """Register a trigger that fires trigger_jitai_nudge when a specific
+    conversation signal is detected for this patient.
+
+    Bridges skills-companion detection (detect_conversation_teachable_moment)
+    to the ingestion pipeline's JITAI trigger system.
+    """
+    pool = await _get_provenance_pool()
+    expires_at = _dt.now(_tz.utc) + _td(hours=expires_hours)
+    trigger_id = str(_uuid.uuid4())
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                """INSERT INTO jitai_triggers
+                   (id, patient_id, signal_type, trigger_jitai_type,
+                    min_signal_strength, status, expires_at)
+                   VALUES ($1,$2,$3,$4,$5,'active',$6)""",
+                _uuid.UUID(trigger_id), patient_id, signal_type,
+                trigger_jitai_type, float(min_signal_strength), expires_at,
+            )
+        except Exception as e:
+            logger.warning("jitai_triggers insert failed: %s", e)
+            return _json.dumps({"status": "error", "error": str(e)})
+    return _json.dumps({
+        "trigger_id": trigger_id,
+        "registered": True,
+        "expires_at": expires_at.isoformat(),
+    })
+
+
+@mcp.tool
+async def detect_healthex_format(raw_response: str) -> str:
+    """Detect the format type of a raw HealthEx API response.
+
+    Delegates to the existing adapters/healthex/format_detector.detect_format()
+    so the routing decision made during ingestion is observable from an MCP
+    session. No change to ingestion pipeline behaviour.
+    """
+    try:
+        from adapters.healthex.format_detector import detect_format  # type: ignore
+    except Exception:
+        try:
+            from ingestion.adapters.healthex.format_detector import detect_format  # type: ignore
+        except Exception as e:
+            return _json.dumps({
+                "status": "error",
+                "error": f"format_detector import failed: {e}",
+            })
+    try:
+        fmt = detect_format(raw_response)
+    except Exception as e:
+        return _json.dumps({"status": "error", "error": str(e)})
+    return _json.dumps({
+        "format_type": str(fmt),
+        "confidence": 1.0,
+        "recommended_parser": f"parsers.{str(fmt).lower()}",
+    })
+
+
+# ---------------------------------------------------------------------------
 # Shared provenance tool (registered on all three MCP servers)
 # ---------------------------------------------------------------------------
 

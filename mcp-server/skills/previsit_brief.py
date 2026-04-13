@@ -23,7 +23,16 @@ async def generate_previsit_brief(
     """Generate a pre-visit brief for an upcoming appointment.
 
     Queries 6 months of interval data including vitals trends,
-    medication changes, care gaps, and patient-reported concerns.
+    medication changes, care gaps, and patient-reported concerns. When a
+    completed deliberation exists within the last 24 hours, its pcp-facing
+    outputs (anticipatory scenarios, predicted patient questions,
+    missing-data flags) are folded into the brief under `recent_deliberation`.
+
+    This tool is a cache-aware READER — it NEVER synchronously triggers
+    `run_deliberation`. If a fresh deliberation is not available, the brief
+    is returned from the 6-month query alone. Callers who want a fresh
+    deliberation must invoke `run_deliberation` separately (fire-and-forget)
+    and poll `get_deliberation_results` before re-requesting the brief.
 
     Args:
         patient_id: UUID of the patient
@@ -183,6 +192,51 @@ async def generate_previsit_brief(
                 "key_flags": [],
                 "patient_questions": [],
             }
+
+            # Recent deliberation (cache-aware reader; NEVER triggers run_deliberation).
+            # Pulls pcp-facing outputs from the most recent COMPLETE deliberation
+            # within the last 24 hours. If none, brief renders 6-month data alone.
+            recent_cutoff = datetime.utcnow() - timedelta(hours=24)
+            delib_row = await conn.fetchrow(
+                """
+                SELECT id, triggered_at, convergence_score, rounds_completed
+                FROM deliberations
+                WHERE patient_id = $1
+                  AND status = 'complete'
+                  AND triggered_at >= $2
+                ORDER BY triggered_at DESC
+                LIMIT 1
+                """,
+                patient_id, recent_cutoff,
+            )
+            if delib_row:
+                pcp_output_types = (
+                    'anticipatory_scenario',
+                    'predicted_patient_question',
+                    'missing_data_flag',
+                    'care_team_nudge',
+                )
+                outputs = await conn.fetch(
+                    """
+                    SELECT output_type, output_data, confidence, priority
+                    FROM deliberation_outputs
+                    WHERE deliberation_id = $1
+                      AND output_type = ANY($2::text[])
+                    """,
+                    delib_row["id"], list(pcp_output_types),
+                )
+                brief["recent_deliberation"] = {
+                    "deliberation_id": str(delib_row["id"]),
+                    "triggered_at": delib_row["triggered_at"].isoformat(),
+                    "age_hours": round(
+                        (datetime.utcnow() - delib_row["triggered_at"]).total_seconds() / 3600, 1
+                    ),
+                    "convergence_score": delib_row["convergence_score"],
+                    "rounds_completed": delib_row["rounds_completed"],
+                    "outputs": [dict(o) for o in outputs],
+                }
+            else:
+                brief["recent_deliberation"] = None
 
             # Generate key flags
             if obt and float(obt["score"]) < 40:

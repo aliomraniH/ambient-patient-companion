@@ -24,16 +24,24 @@ class PatientContextPackage(BaseModel):
     @field_validator("age", mode="before")
     @classmethod
     def _coerce_age(cls, v):
-        """Safety net: coerce missing/invalid age to 0 so downstream prompt
-        JSON never emits 'age': null, which weakens LLM reasoning. Real
-        DOB-based age computation happens upstream in context_compiler.py.
+        """Coerce string/float age to int where possible. Pass None through
+        unchanged so downstream prompts can render 'age unknown' explicitly
+        rather than silently reasoning about a 0-year-old. Unparseable strings
+        also fall back to None. Real DOB-based age computation happens
+        upstream in context_compiler.py.
         """
         if v is None:
-            return 0
+            return None
         try:
             return int(v)
         except (TypeError, ValueError):
-            return 0
+            return None
+
+    def age_display(self) -> str:
+        """Render age for prompt consumption. 'age unknown' when None — never
+        emits the string 'None' into a prompt.
+        """
+        return "age unknown" if self.age is None else str(self.age)
     # Clinical state
     active_conditions: list[dict]       # [{code, display, onset_date}]
     current_medications: list[dict]     # [{name, dose, frequency, start_date}]

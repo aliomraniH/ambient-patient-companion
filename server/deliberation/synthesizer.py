@@ -20,7 +20,7 @@ async def synthesize(
     All five output categories generated in single call for coherence.
     """
     context_summary = (
-        f"Patient: {context.patient_name}, {context.age}{context.sex}, "
+        f"Patient: {context.patient_name}, {context.age_display()}{context.sex}, "
         f"MRN {context.mrn}. "
         f"Conditions: {', '.join(c['display'] for c in context.active_conditions)}. "
         f"Days since last encounter: {context.days_since_last_encounter}."

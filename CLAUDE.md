@@ -213,13 +213,25 @@ All secrets are Replit Secrets (never in `.env` files):
 
 ## 5. MCP Tool Registry
 
-### Server 1 — ambient-clinical-intelligence (19 tools)
+> **Live counts** (post `bd4216f` dedup, 2026-04-13): S1 = 23, S2 = 15, S3 = 4.
+> Re-derive anytime with `curl /tools` on each `/health`-responsive server.
+>
+> `verify_output_provenance` is **registered on all three servers by design**
+> via `shared/provenance/tool_adapter.register_provenance_tool()`. Each server
+> passes its own `source_server` tag (`ambient-clinical-intelligence` |
+> `ambient-skills-companion` | `ambient-ingestion`) so `provenance_audit_log`
+> rows record which pipeline performed the verification. This is NOT a
+> dedup target.
+
+### Server 1 — ambient-clinical-intelligence (23 tools)
 
 ```python
 # server/mcp_server.py
 mcp = FastMCP("ambient-clinical-intelligence")
 
 @mcp.tool    clinical_query(question, patient_id, role)
+             # role: 'pcp' | 'care_manager' | 'patient'
+             # 'lab_tech' NOT YET IMPLEMENTED — ValueError if passed
 @mcp.tool    get_guideline(guideline_id)
 @mcp.tool    check_screening_due(age, sex, conditions)
 @mcp.tool    flag_drug_interaction(medications)
@@ -238,37 +250,76 @@ mcp = FastMCP("ambient-clinical-intelligence")
 @mcp.tool    get_deliberation_results(patient_id)       # poll for results
 @mcp.tool    get_flag_review_status(patient_id)
 @mcp.tool    get_patient_knowledge(patient_id)
-@mcp.tool    get_pending_nudges(patient_id)
+@mcp.tool    get_pending_nudges(patient_id, target)
+             # target: "patient" | "care_team" | ["patient","care_team"]
+             # list form returns {by_target: {...}, total_count} in one call
+# — Gap-aware reasoning tools (shared/gap_aware/*) —
+@mcp.tool    assess_reasoning_confidence(...)
+@mcp.tool    request_clarification(...)                  # enum-validated recipient/urgency
+@mcp.tool    emit_reasoning_gap_artifact(...)            # enum-validated gap_type/severity/agent
+@mcp.tool    register_gap_trigger(...)
+@mcp.tool    verify_output_provenance(payload, ...)      # shared adapter, source_server=S1
 
 # REST wrappers (browser direct-call):
 GET  /health                   → {"ok":true,"server":"ambient-clinical-intelligence","version":"1.0.0"}
 POST /tools/<tool_name>        → same response as MCP tool call
 ```
 
-### Server 2 — ambient-skills-companion (18 tools)
+### Server 2 — ambient-skills-companion (15 tools)
 
-All tools auto-discovered from `mcp-server/skills/` via `load_skills(mcp)`:
+Auto-discovered from `mcp-server/skills/` via `load_skills(mcp)`. Post-`bd4216f`
+the 6 cross-server duplicates (`use_healthex`, `use_demo_data`,
+`switch_data_track`, `get_data_source_status`, `register_healthex_patient`,
+`ingest_from_healthex`) have been removed — those live on S1 only.
 
 ```
 compute_obt_score · compute_provider_risk · run_crisis_escalation · run_food_access_nudge
 generate_daily_checkins · generate_patient · generate_daily_vitals · generate_previsit_brief
-run_sdoh_assessment · use_healthex · use_demo_data · switch_data_track
-get_data_source_status · check_data_freshness · run_ingestion · get_source_conflicts
-ingest_from_healthex · register_healthex_patient
+run_sdoh_assessment · check_data_freshness · run_ingestion · get_source_conflicts
+orchestrate_refresh · search_clinical_knowledge · verify_output_provenance
 
 GET /health → {"ok":true,"server":"ambient-skills-companion","version":"1.0.0"}
 ```
 
-### Server 3 — ambient-ingestion (1 tool)
+**Tool statuses:**
+- `search_clinical_knowledge` — REAL external-API tool (OpenFDA, RxNorm, PubMed
+  via `gap_aware/knowledge_searcher.py`). Fully functional. NOT a vector stub.
+- `generate_previsit_brief` — cache-aware reader. Includes
+  `recent_deliberation` section when a complete deliberation exists within
+  the last 24 hours. NEVER synchronously triggers `run_deliberation`.
+- `check_data_freshness` — **orchestration-phase completeness**: checks that
+  all pipeline stages (ingest, normalize, warehouse write) have run for a
+  patient. Different from S3's `detect_context_staleness` (below).
+- `verify_output_provenance` — shared adapter, `source_server='ambient-skills-companion'`.
+
+### Server 3 — ambient-ingestion (4 tools)
 
 ```python
 # ingestion/server.py
 mcp = FastMCP("ambient-ingestion")
 
 @mcp.tool    trigger_ingestion(patient_id, source, force_refresh)
+@mcp.tool    detect_context_staleness(patient_id, clinical_scenario)
+             # LOINC-keyed clinical freshness per evidence-based thresholds
+             # (pre-encounter vs acute event). Returns freshness_score +
+             # recommended_refreshes. Different from S2's check_data_freshness.
+@mcp.tool    search_patient_data_extended(patient_id, query, ...)
+@mcp.tool    verify_output_provenance(payload, ...)      # shared adapter, source_server=S3
 
 GET /health → {"ok":true,"server":"ambient-ingestion","version":"1.0.0"}
 ```
+
+**[PLANNED — not yet implemented]** — see plan file for the full T/P/C/R
+dimension-getter batch (Tier 2.a, 10 read-only tools) and the behavioral
+science stack (Tier 2.b, 12 tools + migration 008).
+
+### Planned vector-store stub — `_VectorStorePlaceholder`
+
+Defined in `server/mcp_server.py` and consumed by `context_compiler.py` §12
+(`applicable_guidelines` pre-fetch). Returns `[]` until migration
+`009_pgvector_guidelines.sql` + MedCPT embeddings are loaded. Downstream
+deliberation tolerates empty results. Unrelated to `search_clinical_knowledge`
+above, which is a real external-API tool.
 
 ---
 
