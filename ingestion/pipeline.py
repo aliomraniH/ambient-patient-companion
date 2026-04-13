@@ -35,6 +35,45 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 
+# BUG 3: raw_fhir_cache.raw_json is JSONB. PostgreSQL JSONB rejects
+# embedded null bytes (\u0000), and lone UTF-16 surrogates will trip
+# downstream json.loads() on read. Strip them before any write.
+_JSONB_BAD_CHARS = {"\x00"}
+
+
+def _sanitize_str_for_jsonb(s: str) -> str:
+    """Remove characters PG JSONB cannot store or that break json.loads.
+
+    - Drops NUL bytes (\\x00) — hard JSONB error.
+    - Replaces lone high/low surrogates with the Unicode replacement char.
+    - Leaves all other text intact (does NOT strip control chars; JSON
+      escapes them fine via \\uXXXX).
+    """
+    if not s:
+        return s
+    if any(c in s for c in _JSONB_BAD_CHARS):
+        s = "".join(c for c in s if c not in _JSONB_BAD_CHARS)
+    # Fix lone surrogates (U+D800..U+DFFF) that aren't part of a valid pair.
+    # Python strings can legally contain them (e.g. from bad bytes decode),
+    # but PG JSONB and strict json decoders reject them.
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("utf-8", errors="replace").decode("utf-8")
+
+
+def sanitize_for_jsonb(obj):
+    """Deep-sanitize a dict/list/string for safe JSONB storage."""
+    if isinstance(obj, str):
+        return _sanitize_str_for_jsonb(obj)
+    if isinstance(obj, dict):
+        return {k: sanitize_for_jsonb(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_jsonb(v) for v in obj]
+    return obj
+
+
 @dataclass
 class IngestionResult:
     """Result of a single ingestion pipeline run."""
@@ -106,7 +145,7 @@ class IngestionPipeline:
                 patient_id,
                 self.adapter_name,
                 resource_type,
-                json.dumps(resource),
+                json.dumps(sanitize_for_jsonb(resource)),
                 fhir_resource_id,
                 datetime.utcnow(),
                 False,

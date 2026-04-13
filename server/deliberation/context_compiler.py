@@ -16,11 +16,14 @@ Table mapping (actual Replit PostgreSQL schema):
 Note: patient_conditions/medications/biometrics/etc use internal UUID patient_id.
       patient_knowledge uses patient_id as TEXT (MRN).
 """
+import logging
 import re
 import sys
 from datetime import datetime, timedelta, date
 from typing import Optional
 from .schemas import PatientContextPackage
+
+log = logging.getLogger(__name__)
 
 try:
     from ingestion.adapters.healthex.content_router import sanitize_for_context, _deep_sanitize
@@ -106,13 +109,24 @@ async def compile_patient_context(
         internal_id = patient["id"]          # UUID for FK lookups
         mrn_str = patient["mrn"]             # canonical MRN for patient_knowledge
 
-        # Compute age from birth_date
+        # Compute age from birth_date. The patients table has no `age`
+        # column — age MUST be derived from birth_date at read time.
+        # If birth_date is NULL we warn loudly (BUG 2): the PatientContextPackage
+        # validator coerces age to 0, but age=0 silently weakens LLM reasoning,
+        # so operators need to know to re-ingest DOB.
         age = None
         if patient["birth_date"]:
             bd = patient["birth_date"]
             today = date.today()
             age = today.year - bd.year - (
                 (today.month, today.day) < (bd.month, bd.day)
+            )
+        else:
+            log.warning(
+                "Patient %s has NULL birth_date — deliberation age will be "
+                "coerced to 0. Re-ingest DOB (orchestrate_refresh(force=True)) "
+                "to restore accurate age-based reasoning.",
+                patient["mrn"] or patient["id"],
             )
 
         # 2. Active conditions (patient_conditions)

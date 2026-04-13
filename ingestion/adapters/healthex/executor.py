@@ -115,7 +115,11 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
         if cache_row is None:
             raise ValueError(f"cache_id {cache_id} not found in raw_fhir_cache")
 
-        # Get raw text — prefer raw_text, fall back to raw_json
+        # Get raw text — prefer raw_text, fall back to raw_json.
+        # BUG 3: raw_json is JSONB — asyncpg returns it as a string (no codec
+        # registered). If a codec ever returns a dict, json.dumps() serializes
+        # it back; either way, strip NUL bytes so downstream json.loads() in
+        # _extract_routable_resources() cannot crash on the stored document.
         raw = cache_row.get("raw_text")
         if not raw:
             raw_json = cache_row.get("raw_json")
@@ -123,6 +127,8 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
                 raw = json.dumps(raw_json) if not isinstance(raw_json, str) else raw_json
             else:
                 raw = ""
+        if isinstance(raw, str) and "\x00" in raw:
+            raw = raw.replace("\x00", "")
 
         if not raw:
             raise ValueError("Empty raw text in cache")
@@ -528,7 +534,17 @@ def _extract_routable_resources(raw: str) -> list[dict]:
         return []
     try:
         parsed = json.loads(raw)
-    except Exception:
+    except json.JSONDecodeError as exc:
+        # BUG 3: previously swallowed silently. Log enough context to
+        # diagnose unescaped-char crashes without leaking full payload.
+        preview = raw[:120] if isinstance(raw, str) else repr(raw)[:120]
+        log.warning(
+            "routable-resource JSON parse failed at col=%s msg=%s preview=%r",
+            getattr(exc, "colno", "?"), exc.msg, preview,
+        )
+        return []
+    except Exception as exc:
+        log.warning("routable-resource parse error: %s", exc)
         return []
 
     resources = []
