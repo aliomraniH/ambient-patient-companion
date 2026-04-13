@@ -16,9 +16,19 @@ Table mapping (actual Replit PostgreSQL schema):
 
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 
 log = logging.getLogger(__name__)
+
+# Recognizes canonical 8-4-4-4-12 UUIDs. Used to guard against non-UUID
+# values (e.g. a raw date string "2025-06-26") being passed to asyncpg
+# as the $2::uuid parameter for clinical_events.id lookups — which would
+# crash the deliberation pipeline. See BUG 1.
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 # Hard character budget per tier
 TIER1_BUDGET = 2_000    # ~500 tokens — always fits, always safe
@@ -416,6 +426,14 @@ class TieredContextLoader:
 
             elif req_type == "encounter_detail":
                 enc_id = resource_id
+                if enc_id and not _UUID_RE.match(str(enc_id)):
+                    log.warning(
+                        "Skipping encounter_detail request: resource_id "
+                        "%r is not a UUID (likely a date string leaked "
+                        "from ingest). Upstream fix: transfer_planner.py",
+                        enc_id,
+                    )
+                    enc_id = None
                 if enc_id:
                     enc = await conn.fetchrow(
                         """SELECT event_date, event_type, description, source_system

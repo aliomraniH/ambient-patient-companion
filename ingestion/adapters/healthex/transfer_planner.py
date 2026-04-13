@@ -8,10 +8,21 @@ each clinical item. Pure Python — no DB interaction.
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _is_uuid(v) -> bool:
+    return isinstance(v, str) and bool(_UUID_RE.match(v))
 
 
 def now_utc() -> datetime:
@@ -56,9 +67,18 @@ class TransferRecord:
             return (f"{self.row.get('name', 'unknown')}"
                     f"::{self.row.get('onset_date', '') or self.row.get('onset', '')}")
         elif rt == "encounters":
-            eid = (self.row.get("encounter_id")
-                   or self.row.get("encounter_date")
-                   or self.row.get("date", ""))
+            # encounter_id must be a UUID so downstream queries against
+            # clinical_events.id (UUID column) succeed. If the source payload
+            # does not carry one, derive a deterministic UUID from the
+            # encounter date/type/patient — NEVER fall back to a raw date
+            # string (see BUG 1: "2025-06-26" bound as $2::uuid crash).
+            eid = self.row.get("encounter_id")
+            if not _is_uuid(eid):
+                enc_date = (self.row.get("encounter_date")
+                            or self.row.get("date", ""))
+                enc_type = self.row.get("encounter_type", "")
+                seed = f"encounter::{enc_date}::{enc_type}"
+                eid = str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
             return f"encounter::{eid}"
         elif rt == "medications":
             return (f"{self.row.get('name', 'unknown')}"

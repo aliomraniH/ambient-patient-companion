@@ -1506,6 +1506,16 @@ async def ingest_from_healthex(
 
             raw_text = fhir_json if isinstance(fhir_json, str) else json.dumps(fhir_json)
 
+            # BUG 3: sanitize before JSONB write (strip NUL bytes and lone
+            # surrogates that PostgreSQL JSONB rejects / that crash json.loads
+            # on read).
+            try:
+                from ingestion.pipeline import _sanitize_str_for_jsonb as _jsonb_sanitize
+            except Exception:
+                def _jsonb_sanitize(s: str) -> str:
+                    return s.replace("\x00", "") if isinstance(s, str) else s
+            raw_text = _jsonb_sanitize(raw_text)
+
             # Detect format deterministically (fast)
             try:
                 from ingestion.adapters.healthex.format_detector import detect_format as _detect_fmt
