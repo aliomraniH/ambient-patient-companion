@@ -697,13 +697,13 @@ def register(mcp: FastMCP):
                 logger.error("Failed to log skill execution error")
             return f"Error: {e}"
 
-    @mcp.tool
     async def get_data_source_status() -> str:
         """Check active data track and freshness status across all patients.
 
-        Call this at the start of every Claude session to decide whether
-        to use HealthEx real records or Synthea synthetic data.
-        Returns active_track, patient count, and per-source freshness rows.
+        Internal helper used by orchestrate_refresh — not registered as an MCP
+        tool on this server to avoid name collision with the Server 1 version.
+        Server 1 (ambient-clinical-intelligence) exposes get_data_source_status
+        as the canonical MCP tool.
         """
         pool = await get_pool()
         try:
@@ -747,21 +747,17 @@ def register(mcp: FastMCP):
             logger.error("get_data_source_status failed: %s", e)
             return f"Error: {e}"
 
-    mcp.tool(register_healthex_patient)
-
-    @mcp.tool
     async def ingest_from_healthex(
         patient_id: str,
         resource_type: str,
         fhir_json: str,
     ) -> str:
-        """Accept a HealthEx MCP tool response and write it to the warehouse.
+        """Internal helper: write a HealthEx FHIR payload to the warehouse.
 
-        Claude calls the HealthEx tools (Get Lab Results, Get Medications,
-        Get Conditions, Get Encounters, General Health Summary) in the
-        session where HealthEx is authenticated, then passes each response
-        here. This tool runs pipeline stages 4-8 only — raw cache,
-        normalize, conflict resolve, warehouse write, freshness update.
+        Not registered as an MCP tool on this server — use Server 1's
+        ingest_from_healthex (ambient-clinical-intelligence) to avoid name
+        collision. Called internally by orchestrate_refresh pipeline stages 4-8:
+        raw cache, normalize, conflict resolve, warehouse write, freshness update.
 
         Args:
             patient_id:    UUID of the patient in the database
@@ -1051,12 +1047,11 @@ def register(mcp: FastMCP):
                 logger.error("Failed to log ingest_from_healthex error")
             return f"Error: {e}"
 
-    @mcp.tool
     async def switch_data_track(track: str) -> str:
         """Switch the active data track for all future pipeline runs.
 
-        Persists the choice to system_config so the orchestrator and
-        seed pipeline pick up the correct adapter on the next run.
+        Internal helper used by use_healthex / use_demo_data. Not registered as
+        an MCP tool on this server to avoid name collision with Server 1's version.
 
         Args:
             track: "synthea" for synthetic data, "healthex" for real records
@@ -1076,17 +1071,11 @@ def register(mcp: FastMCP):
             logger.error("switch_data_track failed: %s", e)
             return f"Error: {e}"
 
-    @mcp.tool
     async def use_healthex() -> str:
         """Switch to HealthEx real patient records.
 
-        Call this when the user wants to use real clinical data from
-        HealthEx instead of synthetic demo data. Trigger phrases:
-        "use healthex", "switch to real data", "connect healthex",
-        "use real records", "switch to healthex".
-
-        Note: HealthEx requires a Claude web session with the HealthEx
-        MCP server authenticated. It will not work in Claude Code.
+        Internal helper — not registered as an MCP tool on this server to avoid
+        name collision with Server 1's use_healthex. Call Server 1's version directly.
         """
         try:
             await _set_data_track("healthex", "use_healthex")
@@ -1100,14 +1089,11 @@ def register(mcp: FastMCP):
             logger.error("use_healthex failed: %s", e)
             return f"Error: {e}"
 
-    @mcp.tool
     async def use_demo_data() -> str:
         """Switch to Synthea synthetic demo data.
 
-        Call this when the user wants to use synthetic demo data
-        instead of real records. Trigger phrases: "use demo data",
-        "switch to synthea", "use synthetic data", "go back to demo",
-        "use fake data", "switch to demo mode".
+        Internal helper — not registered as an MCP tool on this server to avoid
+        name collision with Server 1's use_demo_data. Call Server 1's version directly.
         """
         try:
             await _set_data_track("synthea", "use_demo_data")

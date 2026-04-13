@@ -2704,6 +2704,10 @@ async def assess_reasoning_confidence(
     return result
 
 
+_VALID_CLARIFICATION_RECIPIENTS = frozenset({"provider", "patient", "peer_agent", "synthesis"})
+_VALID_CLARIFICATION_URGENCY = frozenset({"blocking", "preferred", "optional"})
+
+
 @mcp.tool()
 async def request_clarification(
     deliberation_id: str,
@@ -2721,7 +2725,38 @@ async def request_clarification(
 ) -> dict:
     """Pause agent execution and emit a structured clarification request to a
     provider, patient, or peer agent. Returns immediately with a clarification_id;
-    the deliberation engine polls for resolution."""
+    the deliberation engine polls for resolution.
+
+    Args:
+        deliberation_id: Active deliberation session UUID.
+        requesting_agent: Agent ID emitting the request (e.g. ARIA, MIRA, THEO).
+        recipient: Who should answer — one of: provider, patient, peer_agent, synthesis.
+        urgency: one of: blocking (halts pipeline), preferred, optional.
+        question_text: The clarifying question to present.
+        clinical_rationale: Why this information is needed clinically.
+        gap_id: The reasoning gap ID this clarification resolves.
+        suggested_options: Optional list of answer choices.
+        default_if_unanswered: Value to use if no response received before timeout.
+        timeout_minutes: Minutes to wait before applying fallback (default 60).
+        fallback_behavior: Action if unanswered — default escalate_to_synthesis.
+        recipient_agent_id: If recipient=peer_agent, the specific agent UUID.
+    """
+    if recipient not in _VALID_CLARIFICATION_RECIPIENTS:
+        return {
+            "status": "error",
+            "error": (
+                f"recipient must be one of: "
+                f"{sorted(_VALID_CLARIFICATION_RECIPIENTS)}. Got: {recipient!r}"
+            ),
+        }
+    if urgency not in _VALID_CLARIFICATION_URGENCY:
+        return {
+            "status": "error",
+            "error": (
+                f"urgency must be one of: "
+                f"{sorted(_VALID_CLARIFICATION_URGENCY)}. Got: {urgency!r}"
+            ),
+        }
     req = {
         "deliberation_id": deliberation_id,
         "requesting_agent": requesting_agent,
@@ -2750,6 +2785,15 @@ async def request_clarification(
     }
 
 
+_VALID_GAP_TYPES = frozenset({
+    "missing_data", "stale_data", "conflicting_evidence", "ambiguous_context",
+    "guideline_uncertainty", "drug_interaction_unknown",
+    "patient_preference_unknown", "social_determinant_unknown",
+})
+_VALID_GAP_SEVERITY = frozenset({"critical", "high", "medium", "low"})
+_VALID_GAP_EMITTING_AGENTS = frozenset({"ARIA", "MIRA", "THEO"})
+
+
 @mcp.tool()
 async def emit_reasoning_gap_artifact(
     deliberation_id: str,
@@ -2770,7 +2814,52 @@ async def emit_reasoning_gap_artifact(
     """Persist a structured reasoning gap artifact to the warehouse.
     SYNTHESIS reads all artifacts before merging agent outputs.
     Call when a gap cannot be resolved inline and must be communicated
-    to the orchestrator."""
+    to the orchestrator.
+
+    Args:
+        deliberation_id: Active deliberation session UUID.
+        emitting_agent: Must be one of: ARIA, MIRA, THEO.
+        gap_id: Unique identifier for this gap (e.g. gap-hba1c-001).
+        gap_type: One of: missing_data, stale_data, conflicting_evidence,
+            ambiguous_context, guideline_uncertainty, drug_interaction_unknown,
+            patient_preference_unknown, social_determinant_unknown.
+        severity: One of: critical, high, medium, low.
+        description: Human-readable description of the gap.
+        impact_statement: Clinical impact if gap is not resolved.
+        confidence_without_resolution: Confidence score 0–1 without resolving the gap.
+        confidence_with_resolution: Confidence score 0–1 if the gap were resolved.
+        recommended_action_for_synthesis: Directive for SYNTHESIS, e.g.
+            include_caveat_in_output, trigger_order_recommendation,
+            add_to_care_gap_list, block_output_pending_resolution.
+        patient_mrn: Patient MRN (optional, defaults to 'unknown').
+        attempted_resolutions: List of resolutions already tried.
+        caveat_text: Pre-written caveat text for SYNTHESIS to include.
+        expires_at: ISO timestamp after which this gap is stale.
+    """
+    if emitting_agent not in _VALID_GAP_EMITTING_AGENTS:
+        return {
+            "status": "error",
+            "error": (
+                f"emitting_agent must be one of: "
+                f"{sorted(_VALID_GAP_EMITTING_AGENTS)}. Got: {emitting_agent!r}"
+            ),
+        }
+    if gap_type not in _VALID_GAP_TYPES:
+        return {
+            "status": "error",
+            "error": (
+                f"gap_type must be one of: "
+                f"{sorted(_VALID_GAP_TYPES)}. Got: {gap_type!r}"
+            ),
+        }
+    if severity not in _VALID_GAP_SEVERITY:
+        return {
+            "status": "error",
+            "error": (
+                f"severity must be one of: "
+                f"{sorted(_VALID_GAP_SEVERITY)}. Got: {severity!r}"
+            ),
+        }
     artifact = {
         "gap_type": gap_type,
         "severity": severity,
@@ -2944,6 +3033,117 @@ async def rest_register_gap_trigger(request: Request) -> JSONResponse:
         return JSONResponse(result if isinstance(result, dict) else json.loads(result))
     except Exception as e:
         logger.error("[register_gap_trigger] error: %s", e)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
+# ---------------------------------------------------------------------------
+# Provenance REST test route (MCP tool exposed for HTTP smoke testing)
+# ---------------------------------------------------------------------------
+
+@mcp.custom_route("/tools/verify_output_provenance", methods=["POST"])
+async def rest_verify_output_provenance(request: Request) -> JSONResponse:
+    """HTTP wrapper for verify_output_provenance — allows REST smoke testing.
+
+    Body fields:
+      payload        — JSON string (or object) with a 'sections' array.
+      deliberation_id — optional UUID string.
+      patient_mrn     — optional MRN (hashed before storage).
+      strict_mode     — bool, default true.
+
+    Returns the same provenance report structure as the MCP tool:
+      { gate_decision, section_results, summary, provenance_report_id, ... }
+    """
+    try:
+        from shared.provenance.verifier import (
+            validate_section,
+            render_recommendation,
+            build_gate_decision,
+            hash_mrn,
+        )
+        import uuid as _uuid
+        from datetime import datetime as _datetime, timezone as _tz
+
+        body = await request.json()
+        payload_raw = body.get("payload", "{}")
+        deliberation_id = body.get("deliberation_id", "")
+        patient_mrn = body.get("patient_mrn", "")
+        strict_mode = bool(body.get("strict_mode", True))
+
+        try:
+            data = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+        except json.JSONDecodeError as e:
+            return JSONResponse(
+                {"status": "error", "error": f"Invalid payload JSON: {e}"},
+                status_code=422,
+            )
+
+        report_id = str(_uuid.uuid4())
+        assessed_at = _datetime.now(_tz.utc).isoformat()
+        output_id = data.get("output_id", "unknown")
+        sections = data.get("sections", [])
+        if not isinstance(sections, list):
+            sections = []
+
+        section_results = []
+        all_pending_tools = []
+
+        for section in sections:
+            violations = validate_section(section)
+            for v in violations:
+                pt = v.get("pending_tool")
+                if pt and pt not in all_pending_tools:
+                    all_pending_tools.append(pt)
+            if section.get("declared_tier") == "PENDING":
+                pt = section.get("pending_tool_name")
+                if pt and pt not in all_pending_tools:
+                    all_pending_tools.append(pt)
+            tier_confirmed = (
+                section.get("declared_tier") in {"TOOL", "RETRIEVAL", "SYNTHESIZED", "PENDING"}
+                and not any(v["severity"] == "BLOCK" for v in violations)
+            )
+            section_results.append({
+                "section_id": section.get("section_id", "unknown"),
+                "agent": section.get("agent", "unknown"),
+                "declared_tier": section.get("declared_tier"),
+                "violations": violations,
+                "tier_confirmed": tier_confirmed,
+                "render_recommendation": render_recommendation(section, violations),
+            })
+
+        total = len(section_results)
+        blocked = sum(
+            1 for s in section_results
+            if any(v["severity"] == "BLOCK" for v in s["violations"])
+        )
+        warned = sum(
+            1 for s in section_results
+            if (
+                any(v["severity"] == "WARN" for v in s["violations"])
+                and not any(v["severity"] == "BLOCK" for v in s["violations"])
+            )
+        )
+        approved = total - blocked - warned
+        gate_decision, block_reason = build_gate_decision(section_results, strict_mode)
+
+        report = {
+            "provenance_report_id": report_id,
+            "deliberation_id": deliberation_id,
+            "output_id": output_id,
+            "assessed_at": assessed_at,
+            "gate_decision": gate_decision,
+            "block_reason": block_reason,
+            "section_results": section_results,
+            "summary": {
+                "total_sections": total,
+                "approved": approved,
+                "warned": warned,
+                "blocked": blocked,
+                "pending_tools_needed": all_pending_tools,
+            },
+        }
+        return JSONResponse(report)
+    except Exception as e:
+        logger.error("[verify_output_provenance] REST error: %s", e)
         return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
 
 
