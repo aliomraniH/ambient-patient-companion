@@ -161,8 +161,19 @@ async def compile_patient_context(
                    ORDER BY metric_type, measured_at DESC""",
                 internal_id, cutoff
             )
-        except Exception:
-            # Migration 005 not yet applied — use legacy columns only
+        except Exception as e:
+            # Migration 005 (clinical_data_storage) not yet applied on this DB.
+            # Fall back to legacy columns so deliberation can still run, but
+            # log loudly so operators know why labs look sparse. Migration 005
+            # is expected to be applied on every environment; later migrations
+            # (006, 007) depend on its schema. If this path fires in prod, the
+            # fix is to run the migration, not to extend the fallback.
+            log.warning(
+                "biometric_readings structured-column query failed (%s). "
+                "Falling back to legacy columns — apply migration 005 to restore "
+                "LOINC codes, reference ranges, and result_text.",
+                e,
+            )
             biometrics = await conn.fetch(
                 """SELECT metric_type, value, unit, measured_at, is_abnormal
                    FROM biometric_readings
@@ -315,7 +326,13 @@ async def compile_patient_context(
         except Exception:
             pass
 
-    # 12. Applicable guidelines from vector store (placeholder returns [] gracefully)
+    # 12. Applicable guidelines from vector store.
+    #
+    # Currently backed by _VectorStorePlaceholder (server/mcp_server.py) which
+    # returns []. Empty results here are EXPECTED until Phase 2 pgvector +
+    # MedCPT embeddings (migration 009) are live. Downstream deliberation
+    # tolerates an empty applicable_guidelines list — analysts will cite from
+    # patient_knowledge and external sources instead.
     try:
         condition_terms = " ".join([c["display"] or "" for c in conditions if c["display"]])
         med_terms = " ".join([m["display"] or "" for m in medications if m["display"]])

@@ -32,7 +32,7 @@ import logging
 import os
 import sys
 import uuid as _uuid_mod
-from datetime import datetime as _dt
+from datetime import datetime as _dt, date as _date, timedelta as _td, timezone as _tz
 from pathlib import Path
 
 # Allow the clinical server to import FHIR transforms that live in mcp-server/
@@ -2031,9 +2031,21 @@ _deliberation_engine: DeliberationEngine | None = None
 
 
 class _VectorStorePlaceholder:
-    """Placeholder vector store until pgvector/pinecone is configured."""
+    """STUB: guideline vector store. Returns [] until Phase 2 pgvector + MedCPT
+    migration (009_pgvector_guidelines.sql) is applied. Consumed by
+    context_compiler.py's `applicable_guidelines` pre-fetch (§12) — the
+    deliberation engine already tolerates empty results gracefully.
+
+    Note: this is NOT the same thing as the MCP tool `search_clinical_knowledge`,
+    which is a real external-API wrapper (OpenFDA / RxNorm / PubMed) and is
+    fully functional.
+    """
 
     async def similarity_search(self, query: str, k: int = 10, **kwargs) -> list[dict]:
+        logger.warning(
+            "guideline vector store stub called — returning []. "
+            "Apply migration 009_pgvector_guidelines.sql + load MedCPT embeddings to enable."
+        )
         return []
 
 
@@ -2446,7 +2458,7 @@ async def get_patient_knowledge(
 @mcp.tool()
 async def get_pending_nudges(
     patient_id: str,
-    target: str = "patient"
+    target: "str | list[str]" = "patient"
 ) -> dict:
     """
     Retrieve nudges queued for delivery but not yet sent.
@@ -2454,31 +2466,375 @@ async def get_pending_nudges(
 
     Args:
         patient_id: Patient MRN or internal ID
-        target: 'patient' | 'care_team'
+        target: 'patient' | 'care_team', OR a list like
+                ['patient', 'care_team'] to fetch both in a single call.
 
     Returns:
-        Pending nudges with trigger conditions and channel content.
+        When target is a string: {patient_id, target, pending_count, nudges: [...]}
+        When target is a list:   {patient_id, by_target: {<t>: {target, pending_count, nudges}},
+                                  total_count}
     """
-    nudge_type = f"{target}_nudge"
+    # Normalize to list for uniform query path, remember original shape for response.
+    was_scalar = isinstance(target, str)
+    targets = [target] if was_scalar else list(target)
+    if not targets:
+        return {"patient_id": patient_id, "target": [], "pending_count": 0, "nudges": []}
+
     pool = await _get_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """SELECT dout.id, dout.output_data, dout.trigger_condition,
-                      d.triggered_at as deliberation_date
-               FROM deliberation_outputs dout
-               JOIN deliberations d ON dout.deliberation_id = d.id
-               WHERE d.patient_id = $1
-                 AND dout.output_type = $2
-                 AND dout.delivered_at IS NULL
-               ORDER BY d.triggered_at DESC""",
-            patient_id, nudge_type
-        )
+        by_target: dict[str, dict] = {}
+        total = 0
+        for t in targets:
+            nudge_type = f"{t}_nudge"
+            rows = await conn.fetch(
+                """SELECT dout.id, dout.output_data, dout.trigger_condition,
+                          d.triggered_at as deliberation_date
+                   FROM deliberation_outputs dout
+                   JOIN deliberations d ON dout.deliberation_id = d.id
+                   WHERE d.patient_id = $1
+                     AND dout.output_type = $2
+                     AND dout.delivered_at IS NULL
+                   ORDER BY d.triggered_at DESC""",
+                patient_id, nudge_type
+            )
+            nudges = [dict(r) for r in rows]
+            by_target[t] = {
+                "target": t,
+                "pending_count": len(nudges),
+                "nudges": nudges,
+            }
+            total += len(nudges)
+
+        if was_scalar:
+            # Preserve legacy response shape for existing callers.
+            only = by_target[targets[0]]
+            return {
+                "patient_id": patient_id,
+                "target": targets[0],
+                "pending_count": only["pending_count"],
+                "nudges": only["nudges"],
+            }
         return {
             "patient_id": patient_id,
-            "target": target,
-            "pending_count": len(rows),
-            "nudges": [dict(r) for r in rows]
+            "by_target": by_target,
+            "total_count": total,
         }
+
+
+# ── Tier 2.a: S=f(R,C,P,T) dimension getters (read-only, no LLM) ──────────────
+#
+# These tools expose time-, context-, and role-dimension reads of patient state
+# for ambient-surface rendering and deliberation planning. All pure DB reads;
+# no LLM calls, no new schema. P-dimension getters (vitals, SDoH, adherence)
+# live on S2 in mcp-server/skills/patient_state_readers.py.
+
+_ROLE_TOOLS = {
+    "pcp": [
+        "clinical_query", "check_screening_due", "flag_drug_interaction",
+        "generate_previsit_brief", "get_vital_trend", "get_context_deltas",
+        "get_encounter_context", "get_encounter_timeline",
+    ],
+    "care_manager": [
+        "compute_provider_risk", "list_overdue_actions", "get_care_gap_ages",
+        "run_sdoh_assessment", "get_sdoh_profile", "triage_message",
+        "get_time_since_last_contact",
+    ],
+    "patient": [
+        "compute_obt_score", "run_crisis_escalation", "get_vital_trend",
+        "get_medication_adherence_rate",
+    ],
+}
+
+
+@mcp.tool()
+async def get_time_since_last_contact(patient_id: str) -> dict:
+    """Days since the patient's most recent clinical contact.
+
+    Reads clinical_events ordered by event_date DESC. Called by SYNTHESIS for
+    JITAI window assessment.
+    """
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT event_date, event_type
+               FROM clinical_events
+               WHERE patient_id = $1
+               ORDER BY event_date DESC NULLS LAST
+               LIMIT 1""",
+            patient_id,
+        )
+    if row is None or row["event_date"] is None:
+        return {"patient_id": patient_id, "days_since_contact": None,
+                "last_contact_date": None, "last_contact_type": None}
+    delta = (_dt.now(_tz.utc) - row["event_date"]).days
+    return {
+        "patient_id": patient_id,
+        "days_since_contact": delta,
+        "last_contact_date": row["event_date"].isoformat(),
+        "last_contact_type": row["event_type"],
+    }
+
+
+@mcp.tool()
+async def get_care_gap_ages(patient_id: str) -> dict:
+    """Open care gaps with age in days since first flagged.
+
+    Reads care_gaps WHERE status='open'. Called by ARIA for priority scoring.
+    """
+    pool = await _get_db_pool()
+    today = _date.today()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT gap_type, description, identified_date
+               FROM care_gaps
+               WHERE patient_id = $1 AND status = 'open'
+               ORDER BY identified_date ASC NULLS LAST""",
+            patient_id,
+        )
+    gaps = []
+    for r in rows:
+        days_open = (today - r["identified_date"]).days if r["identified_date"] else None
+        gaps.append({
+            "gap_type": r["gap_type"],
+            "description": r["description"],
+            "identified_date": r["identified_date"].isoformat() if r["identified_date"] else None,
+            "days_open": days_open,
+        })
+    return {"patient_id": patient_id, "gap_count": len(gaps), "gaps": gaps}
+
+
+@mcp.tool()
+async def list_overdue_actions(patient_id: str, horizon_days: int = 30) -> dict:
+    """Open care gaps that have exceeded horizon_days since identification.
+
+    Reads care_gaps WHERE status='open' AND identified_date older than horizon.
+    Called by ARIA and SYNTHESIS.
+    """
+    pool = await _get_db_pool()
+    cutoff = _date.today() - _td(days=horizon_days)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT gap_type, description, identified_date
+               FROM care_gaps
+               WHERE patient_id = $1 AND status = 'open'
+                 AND identified_date IS NOT NULL
+                 AND identified_date <= $2
+               ORDER BY identified_date ASC""",
+            patient_id, cutoff,
+        )
+    today = _date.today()
+    overdue = [
+        {
+            "action_type": r["gap_type"],
+            "description": r["description"],
+            "identified_date": r["identified_date"].isoformat(),
+            "days_overdue": (today - r["identified_date"]).days - horizon_days,
+        }
+        for r in rows
+    ]
+    return {
+        "patient_id": patient_id,
+        "horizon_days": horizon_days,
+        "overdue_count": len(overdue),
+        "overdue": overdue,
+    }
+
+
+@mcp.tool()
+async def get_encounter_timeline(patient_id: str, lookback_days: int = 365) -> dict:
+    """Chronological encounter history within lookback window.
+
+    Reads clinical_events. Called by ARIA for trajectory analysis.
+    """
+    pool = await _get_db_pool()
+    cutoff = _dt.now(_tz.utc) - _td(days=lookback_days)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT event_date, event_type, description, source_system
+               FROM clinical_events
+               WHERE patient_id = $1 AND event_date >= $2
+               ORDER BY event_date DESC""",
+            patient_id, cutoff,
+        )
+    encounters = [
+        {
+            "date": r["event_date"].isoformat() if r["event_date"] else None,
+            "type": r["event_type"],
+            "description": r["description"],
+            "source": r["source_system"],
+        }
+        for r in rows
+    ]
+    return {
+        "patient_id": patient_id,
+        "lookback_days": lookback_days,
+        "encounter_count": len(encounters),
+        "encounters": encounters,
+    }
+
+
+@mcp.tool()
+async def get_encounter_context(patient_id: str) -> dict:
+    """In-encounter context package: active conditions, current meds, open gaps,
+    most recent encounter. Read-only snapshot used by ARIA during an encounter.
+
+    No deliberation call. If the caller needs scenarios or predicted questions,
+    poll `get_deliberation_results` separately.
+    """
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        conditions = await conn.fetch(
+            """SELECT code, display, onset_date, clinical_status
+               FROM patient_conditions
+               WHERE patient_id = $1
+                 AND (clinical_status IS NULL OR clinical_status != 'inactive')
+               ORDER BY onset_date DESC NULLS LAST""",
+            patient_id,
+        )
+        medications = await conn.fetch(
+            """SELECT code, display, status, authored_on
+               FROM patient_medications
+               WHERE patient_id = $1
+                 AND (status IS NULL OR status = 'active')
+               ORDER BY authored_on DESC NULLS LAST""",
+            patient_id,
+        )
+        open_gaps = await conn.fetch(
+            """SELECT gap_type, description, identified_date
+               FROM care_gaps
+               WHERE patient_id = $1 AND status = 'open'
+               ORDER BY identified_date DESC NULLS LAST""",
+            patient_id,
+        )
+        recent = await conn.fetchrow(
+            """SELECT event_date, event_type, description
+               FROM clinical_events
+               WHERE patient_id = $1
+               ORDER BY event_date DESC NULLS LAST
+               LIMIT 1""",
+            patient_id,
+        )
+    return {
+        "patient_id": patient_id,
+        "active_conditions": [dict(r) for r in conditions],
+        "current_medications": [dict(r) for r in medications],
+        "open_care_gaps": [dict(r) for r in open_gaps],
+        "most_recent_encounter": dict(recent) if recent else None,
+    }
+
+
+@mcp.tool()
+async def get_context_deltas(patient_id: str, since_date: str) -> dict:
+    """What changed in the patient's record since a given ISO date.
+
+    New conditions, new medications, new care gaps, and resolved gaps within
+    the interval [since_date, today]. Called by ARIA for inter-visit surfaces
+    and by previsit briefs.
+
+    since_date: ISO 8601 date (YYYY-MM-DD).
+    """
+    try:
+        cutoff = _date.fromisoformat(since_date)
+    except ValueError:
+        return {"status": "error", "error": f"Invalid since_date '{since_date}'. Expected YYYY-MM-DD."}
+    cutoff_ts = _dt.combine(cutoff, _dt.min.time()).replace(tzinfo=_tz.utc)
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        new_conditions = await conn.fetch(
+            """SELECT code, display, onset_date
+               FROM patient_conditions
+               WHERE patient_id = $1
+                 AND onset_date IS NOT NULL AND onset_date >= $2""",
+            patient_id, cutoff,
+        )
+        new_medications = await conn.fetch(
+            """SELECT code, display, authored_on, status
+               FROM patient_medications
+               WHERE patient_id = $1
+                 AND authored_on IS NOT NULL AND authored_on >= $2""",
+            patient_id, cutoff,
+        )
+        new_gaps = await conn.fetch(
+            """SELECT gap_type, description, identified_date
+               FROM care_gaps
+               WHERE patient_id = $1 AND identified_date >= $2""",
+            patient_id, cutoff,
+        )
+        resolved_gaps = await conn.fetch(
+            """SELECT gap_type, description, resolved_date
+               FROM care_gaps
+               WHERE patient_id = $1
+                 AND resolved_date IS NOT NULL AND resolved_date >= $2""",
+            patient_id, cutoff,
+        )
+        new_events = await conn.fetch(
+            """SELECT event_type, event_date, description
+               FROM clinical_events
+               WHERE patient_id = $1 AND event_date >= $2
+               ORDER BY event_date DESC""",
+            patient_id, cutoff_ts,
+        )
+    return {
+        "patient_id": patient_id,
+        "since_date": since_date,
+        "new_conditions": [dict(r) for r in new_conditions],
+        "new_medications": [dict(r) for r in new_medications],
+        "new_care_gaps": [dict(r) for r in new_gaps],
+        "resolved_care_gaps": [dict(r) for r in resolved_gaps],
+        "new_encounters": [dict(r) for r in new_events],
+    }
+
+
+@mcp.tool()
+async def list_available_actions(role: str, patient_id: str) -> dict:
+    """Role-filtered list of tools appropriate for the current patient surface.
+
+    Feeds the ambient surface rendering engine — answers
+    "what can I show this role for this patient right now?" The static role→tool
+    map is intersected with patient state: tools that require missing data
+    (e.g. vitals when no readings exist) are hidden and listed in `hidden`.
+
+    role: 'pcp' | 'care_manager' | 'patient'
+    """
+    if role not in _ROLE_TOOLS:
+        return {
+            "status": "error",
+            "error": f"Unknown role '{role}'. Must be one of {list(_ROLE_TOOLS.keys())}.",
+        }
+
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        has_vitals = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM biometric_readings WHERE patient_id = $1)",
+            patient_id,
+        )
+        has_sdoh = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM patient_sdoh_flags WHERE patient_id = $1)",
+            patient_id,
+        )
+        has_meds = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM patient_medications WHERE patient_id = $1)",
+            patient_id,
+        )
+
+    available, hidden = [], []
+    for tool_name in _ROLE_TOOLS[role]:
+        # Gate tools on required data presence.
+        if tool_name == "get_vital_trend" and not has_vitals:
+            hidden.append({"tool": tool_name, "reason": "no biometric_readings for patient"})
+        elif tool_name == "get_sdoh_profile" and not has_sdoh:
+            hidden.append({"tool": tool_name, "reason": "no patient_sdoh_flags for patient"})
+        elif tool_name == "get_medication_adherence_rate" and not has_meds:
+            hidden.append({"tool": tool_name, "reason": "no patient_medications for patient"})
+        else:
+            available.append(tool_name)
+
+    return {
+        "role": role,
+        "patient_id": patient_id,
+        "available_tools": available,
+        "hidden_tools": hidden,
+    }
 
 
 # ── REST wrappers for deliberation tools ──────────────────────────────────────
@@ -3155,6 +3511,687 @@ async def rest_verify_output_provenance(request: Request) -> JSONResponse:
     except Exception as e:
         logger.error("[verify_output_provenance] REST error: %s", e)
         return JSONResponse({"status": "error", "error": str(e)}, status_code=422)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Tier 2.b — Behavioral science stack (NIS + safety gates + pipeline composite)
+# Tier 3   — Deliberation introspection
+# Tier 4   — Population / inbox / constitutional critic
+#
+# All tools read from the DB (migration 008_behavioral_tables.sql + existing
+# deliberation tables). Heavy LLM judgements are marked [LLM-ENRICHED] and
+# fall back to deterministic scoring when no ANTHROPIC_API_KEY is configured.
+# ═════════════════════════════════════════════════════════════════════════════
+
+import uuid as _uuid  # noqa: E402
+
+# ── Tier 2.b.i — NIS scaffolding (3 tools, pure math, S1) ────────────────────
+
+# Default NIS weights. Keep them here so every audit row in nis_score_audits
+# can record the exact weights used. Weights sum to 1.0 by convention but
+# callers may override.
+_NIS_WEIGHTS = {"alpha": 0.40, "beta": 0.25, "gamma": 0.20, "delta": 0.15}
+
+
+@mcp.tool()
+async def compute_ite_estimate(
+    patient_id: str,
+    care_gap_count: int,
+    trajectory_direction: str,
+    modifiable_risk_fraction: float,
+) -> dict:
+    """Predicted causal benefit from intervention (α·ITE(P) component of NIS).
+
+    Deterministic scorer used independently and by score_nudge_impactability.
+    Research: Sheth et al. 2026 benefit-based prioritization (GRF).
+
+    trajectory_direction: 'improving' | 'stable' | 'worsening'
+    modifiable_risk_fraction: 0.0-1.0 — share of risk attributable to
+                              modifiable factors (adherence, SDoH, behavior).
+    """
+    if trajectory_direction not in ("improving", "stable", "worsening"):
+        return {"status": "error", "error": f"invalid trajectory_direction '{trajectory_direction}'"}
+    modifiable_risk_fraction = max(0.0, min(1.0, float(modifiable_risk_fraction)))
+    trajectory_weight = {"improving": 0.3, "stable": 0.6, "worsening": 1.0}[trajectory_direction]
+    gap_weight = min(1.0, care_gap_count / 5.0)   # saturates at 5 gaps
+    ite_score = round(0.5 * modifiable_risk_fraction + 0.3 * trajectory_weight + 0.2 * gap_weight, 4)
+    return {
+        "patient_id": patient_id,
+        "ite_score": ite_score,
+        "confidence": 0.7,
+        "primary_drivers": [
+            f"trajectory={trajectory_direction}",
+            f"care_gaps={care_gap_count}",
+            f"modifiable_risk={modifiable_risk_fraction:.2f}",
+        ],
+    }
+
+
+@mcp.tool()
+async def compute_behavioral_receptivity(
+    patient_id: str,
+    last_clinical_event_hours: float,
+    last_app_interaction_hours: float,
+    day_of_week: int,
+    days_since_temporal_landmark: int,
+) -> dict:
+    """β·receptivity(T) component of NIS — when is this patient most reachable?
+
+    Independently callable. Research: McBride 2003 (teachable moments),
+    Dai/Milkman (fresh-start effect), Künzler et al. (JITAI ±40% improvement).
+
+    day_of_week: 0=Monday … 6=Sunday.
+    """
+    # Teachable moment proximity: event within last 72h → high; >14d → zero.
+    tm = max(0.0, min(1.0, 1.0 - (last_clinical_event_hours / (14 * 24))))
+    # Fresh-start: landmark within last 7d → high; monotonically decays.
+    fs = max(0.0, min(1.0, 1.0 - (days_since_temporal_landmark / 30.0)))
+    # App-interaction recency: hot in last hour, cold after 7d.
+    interaction = max(0.0, min(1.0, 1.0 - (last_app_interaction_hours / (7 * 24))))
+    # Day-of-week prior (weekday slightly higher than weekend for clinical tasks).
+    dow_boost = 0.05 if day_of_week < 5 else 0.0
+    receptivity = round(0.4 * tm + 0.3 * fs + 0.3 * interaction + dow_boost, 4)
+    receptivity = max(0.0, min(1.0, receptivity))
+    return {
+        "patient_id": patient_id,
+        "receptivity_score": receptivity,
+        "teachable_moment_proximity": round(tm, 4),
+        "fresh_start_proximity": round(fs, 4),
+        "jitai_window_active": receptivity > 0.6,
+    }
+
+
+@mcp.tool()
+async def score_nudge_impactability(
+    patient_id: str,
+    deliberation_id: str,
+    ite_estimate: float,
+    care_gap_count: int,
+    trajectory_direction: str,
+    last_clinical_event_hours: float,
+    last_app_interaction_hours: float,
+    day_of_week: int,
+    days_since_temporal_landmark: int,
+    anxiety_state: str = "baseline",
+    com_b_score: float = 0.5,
+    llm_health_score: float = 0.8,
+    weights_override: dict | None = None,
+) -> dict:
+    """Compound Nudge Impactability Score (NIS).
+
+    NIS = α·ITE(P) + β·receptivity(T) + γ·COM-B(P) + δ·LLM-health(P)
+
+    Recommendation thresholds:
+      NIS ≥ 0.65 → fire
+      0.45 – 0.64 → hold
+      < 0.45 → suppress
+    anxiety_state='crisis' forces suppress regardless of NIS (clinical gate).
+
+    Persists the full decomposition to nis_score_audits for auditability.
+    """
+    if anxiety_state not in ("baseline", "elevated", "crisis"):
+        return {"status": "error", "error": f"invalid anxiety_state '{anxiety_state}'"}
+
+    weights = {**_NIS_WEIGHTS, **(weights_override or {})}
+    receptivity = await compute_behavioral_receptivity(
+        patient_id=patient_id,
+        last_clinical_event_hours=last_clinical_event_hours,
+        last_app_interaction_hours=last_app_interaction_hours,
+        day_of_week=day_of_week,
+        days_since_temporal_landmark=days_since_temporal_landmark,
+    )
+    r = receptivity["receptivity_score"]
+
+    compound = round(
+        weights["alpha"] * ite_estimate
+        + weights["beta"] * r
+        + weights["gamma"] * com_b_score
+        + weights["delta"] * llm_health_score,
+        4,
+    )
+
+    # Crisis phase clamp — non-negotiable clinical gate.
+    if anxiety_state == "crisis":
+        recommendation = "suppress"
+        rationale = "Crisis phase: all nudges suppressed regardless of NIS."
+    elif compound >= 0.65:
+        recommendation, rationale = "fire", "NIS exceeds fire threshold (0.65)."
+    elif compound >= 0.45:
+        recommendation, rationale = "hold", "NIS in hold band (0.45–0.64)."
+    else:
+        recommendation, rationale = "suppress", "NIS below suppress threshold (0.45)."
+
+    # Audit row.
+    pool = await _get_db_pool()
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO nis_score_audits
+                   (patient_id, deliberation_id, compound_score, ite_score,
+                    receptivity_score, com_b_score, llm_health_score, weights,
+                    recommendation, rationale, calling_agent)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)""",
+                _uuid.UUID(patient_id) if _looks_like_uuid(patient_id) else patient_id,
+                _uuid.UUID(deliberation_id) if deliberation_id and _looks_like_uuid(deliberation_id) else None,
+                compound, ite_estimate, r, com_b_score, llm_health_score,
+                json.dumps(weights), recommendation, rationale, "SYNTHESIS",
+            )
+    except Exception as e:
+        logger.warning("nis_score_audits write skipped (%s) — tool result still returned", e)
+
+    return {
+        "patient_id": patient_id,
+        "deliberation_id": deliberation_id,
+        "compound_score": compound,
+        "recommendation": recommendation,
+        "component_scores": {
+            "ite": ite_estimate,
+            "receptivity": r,
+            "com_b": com_b_score,
+            "llm_health": llm_health_score,
+        },
+        "weights": weights,
+        "rationale": rationale,
+        "anxiety_state": anxiety_state,
+    }
+
+
+def _looks_like_uuid(s: str) -> bool:
+    try:
+        _uuid.UUID(str(s))
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+# ── Tier 2.b.ii — Safety gates (non-overridable) ─────────────────────────────
+
+# Known sycophancy anti-patterns in medical LLM output. Simple substring
+# screens; the LLM audit path below extends this for nuance. Non-overridable
+# at the gate level — callers cannot bypass.
+_SYCOPHANCY_PATTERNS = (
+    ("you're right to skip", "validates medication avoidance"),
+    ("no need to worry", "dismisses concern requiring evaluation"),
+    ("doctors often overreact", "undermines clinician authority"),
+    ("that symptom is usually nothing", "dismisses ambiguous symptom"),
+    ("i completely agree", "unqualified agreement without evidence"),
+    ("absolutely, you should trust", "premature certainty"),
+)
+
+
+@mcp.tool()
+async def check_sycophancy_risk(
+    patient_id: str,
+    draft_output: str,
+    originating_agent: str,
+) -> dict:
+    """Evaluate a draft agent output for sycophancy risk.
+
+    Score > 0.6 ⇒ MANDATORY reframe by originating_agent. Non-overridable.
+    This gate runs for every patient-facing output. Research: OpenAI/MIT
+    RCT 2025 (48% compliance rate without independent verification).
+
+    Args:
+        draft_output: The text to audit — may contain the assembled response.
+        originating_agent: 'ARIA' | 'MIRA' | 'THEO' — for audit logging.
+    """
+    text = (draft_output or "").lower()
+    matched = [(pat, reason) for pat, reason in _SYCOPHANCY_PATTERNS if pat in text]
+    # Deterministic pattern score.
+    pattern_score = min(1.0, len(matched) * 0.35)
+    risk_patterns = [{"pattern": pat, "reason": reason} for pat, reason in matched]
+
+    # [LLM-ENRICHED] Optional refinement if we have an API key and the draft
+    # is non-trivial. A structured audit prompt lives in
+    # server/deliberation/prompts/sycophancy_audit.xml (to be added alongside
+    # this gate's first production run).
+    if os.environ.get("ANTHROPIC_API_KEY") and len(text) > 120:
+        try:
+            client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=256,
+                system=(
+                    "You are a medical safety auditor. Score 0.0–1.0 for "
+                    "sycophancy risk in the given clinical text. Respond with a "
+                    "single JSON object: {\"score\": <float>, \"reason\": <str>}."
+                ),
+                messages=[{"role": "user", "content": draft_output[:4000]}],
+            )
+            parsed = json.loads(resp.content[0].text.strip().removeprefix("```json").removesuffix("```").strip())
+            llm_score = float(parsed.get("score", 0.0))
+            sycophancy_score = round(max(pattern_score, llm_score), 4)
+            if parsed.get("reason"):
+                risk_patterns.append({"pattern": "llm_audit", "reason": parsed["reason"]})
+        except Exception as e:
+            logger.info("sycophancy LLM audit skipped: %s", e)
+            sycophancy_score = pattern_score
+    else:
+        sycophancy_score = pattern_score
+
+    reframe_required = sycophancy_score > 0.6
+    return {
+        "patient_id": patient_id,
+        "originating_agent": originating_agent,
+        "sycophancy_score": sycophancy_score,
+        "risk_patterns": risk_patterns,
+        "reframe_required": reframe_required,
+        "suggested_reframe": (
+            "Restate the clinical concern with the specific guideline citation "
+            "and the clinician review path. Avoid validating avoidance of "
+            "evaluation."
+        ) if reframe_required else "",
+    }
+
+
+@mcp.tool()
+async def run_constitutional_critic(
+    patient_id: str,
+    draft_output: str,
+    originating_agent: str,
+    output_type: str,
+) -> dict:
+    """4-check constitutional critic applied before any delivery.
+
+    Pipeline:
+      1. Sycophancy (composes check_sycophancy_risk)
+      2. Guideline factuality (heuristic; PHI scan also runs here)
+      3. Internal contradiction detection (simple negation scan)
+      4. Escalation tier routing
+
+    Returns escalation_tier 1–4:
+      1: automated guardrail handled — return reframe_required=True
+      2: evaluator model review suggested
+      3: clinician review flag (sets reframe_required=True)
+      4: human handoff required (sets reframe_required=True; cannot ship)
+
+    output_type: 'nudge' | 'clinical_recommendation' | 'patient_education' |
+                 'provider_brief'
+    """
+    issues: list[dict] = []
+
+    # Step 1 — sycophancy gate.
+    syc = await check_sycophancy_risk(patient_id, draft_output, originating_agent)
+    if syc.get("reframe_required"):
+        issues.append({"check": "sycophancy", "severity": "high",
+                       "detail": f"score={syc['sycophancy_score']}"})
+
+    # Step 2 — PHI heuristic (basic regex on common identifiers).
+    import re as _re
+    phi_hits = _re.findall(r"\b\d{3}-\d{2}-\d{4}\b", draft_output or "")  # SSN
+    phi_hits += _re.findall(r"\b\d{10,}\b", draft_output or "")           # long numeric IDs
+    if phi_hits:
+        issues.append({"check": "phi_leak", "severity": "critical",
+                       "detail": f"{len(phi_hits)} PHI-like tokens detected"})
+
+    # Step 3 — internal contradiction (shallow): simultaneous "recommend X"
+    # and "do not X" patterns.
+    lowered = (draft_output or "").lower()
+    contradictions = []
+    for verb in ("start", "continue", "stop", "increase", "decrease"):
+        if f"recommend {verb}" in lowered and f"do not {verb}" in lowered:
+            contradictions.append(verb)
+    if contradictions:
+        issues.append({"check": "internal_contradiction", "severity": "high",
+                       "detail": f"contradictory verbs: {contradictions}"})
+
+    # Step 4 — escalation routing.
+    critical = [i for i in issues if i["severity"] == "critical"]
+    high = [i for i in issues if i["severity"] == "high"]
+    if critical:
+        tier, reframe = 4, True
+    elif len(high) >= 2:
+        tier, reframe = 3, True
+    elif high:
+        tier, reframe = 2, True
+    else:
+        tier, reframe = 1, False
+
+    return {
+        "patient_id": patient_id,
+        "output_type": output_type,
+        "originating_agent": originating_agent,
+        "passed": not reframe,
+        "escalation_tier": tier,
+        "issues": issues,
+        "reframe_required": reframe,
+        "revised_output": "" if not reframe else
+            "[constitutional critic: reframe required — see issues]",
+        "audit_log": {"sycophancy": syc},
+    }
+
+
+# ── Tier 2.b.vi — run_healthex_pipeline (fire-and-forget) ────────────────────
+
+import asyncio as _asyncio  # noqa: E402
+
+_PIPELINE_JOBS: dict[str, dict] = {}   # job_id → {status, patient_id, steps, error}
+
+
+async def _run_healthex_pipeline_background(job_id: str, patient_mrn: str) -> None:
+    """Background worker. Never raises — status written into _PIPELINE_JOBS."""
+    steps: list[dict] = []
+    def _mark(step: str, status: str, detail: dict | None = None) -> None:
+        steps.append({"step": step, "status": status, **(detail or {})})
+        _PIPELINE_JOBS[job_id]["steps"] = steps
+    try:
+        _PIPELINE_JOBS[job_id]["status"] = "running"
+        # 1. use_healthex → switch track.
+        try:
+            await use_healthex()
+            _mark("use_healthex", "ok")
+        except Exception as e:
+            _mark("use_healthex", "failed", {"error": str(e)})
+        # 2. register_healthex_patient.
+        # (Caller supplies a real summary; we stub with a minimal FHIR Patient.)
+        stub_summary = json.dumps({
+            "resourceType": "Bundle", "type": "collection",
+            "entry": [{"resource": {"resourceType": "Patient",
+                                    "identifier": [{"value": patient_mrn}]}}],
+        })
+        try:
+            reg = await register_healthex_patient(stub_summary)
+            reg_parsed = json.loads(reg) if isinstance(reg, str) else reg
+            patient_id = reg_parsed.get("patient_id") or patient_mrn
+            _mark("register_healthex_patient", "ok", {"patient_id": patient_id})
+        except Exception as e:
+            _mark("register_healthex_patient", "failed", {"error": str(e)})
+            _PIPELINE_JOBS[job_id]["status"] = "partial"
+            _PIPELINE_JOBS[job_id]["failed_step"] = "register_healthex_patient"
+            return
+        # 3. run_deliberation (fire-and-forget inside fire-and-forget).
+        try:
+            dres = await run_deliberation(
+                patient_id=patient_id, trigger_type="pipeline_composite",
+                max_rounds=3, mode="triage",
+            )
+            _mark("run_deliberation", "ok", {"deliberation_id": dres.get("deliberation_id")})
+        except Exception as e:
+            _mark("run_deliberation", "failed", {"error": str(e)})
+        _PIPELINE_JOBS[job_id]["status"] = "complete"
+        _PIPELINE_JOBS[job_id]["patient_id"] = patient_id
+    except Exception as e:
+        _PIPELINE_JOBS[job_id]["status"] = "error"
+        _PIPELINE_JOBS[job_id]["error"] = str(e)
+
+
+@mcp.tool()
+async def run_healthex_pipeline(patient_mrn: str) -> dict:
+    """Fire-and-forget composite: switch track → register → deliberation.
+
+    Returns IMMEDIATELY with a job_id. Callers poll `get_healthex_pipeline_status(job_id)`
+    to retrieve progress. This tool NEVER `awaits` deliberation synchronously
+    — doing so would time out MCP request windows.
+
+    patient_mrn: stable MRN (e.g. 4829341 for Maria Chen).
+    """
+    job_id = str(_uuid.uuid4())
+    _PIPELINE_JOBS[job_id] = {"status": "queued", "patient_mrn": patient_mrn, "steps": []}
+    _asyncio.create_task(_run_healthex_pipeline_background(job_id, patient_mrn))
+    return {"job_id": job_id, "status": "queued",
+            "poll": "get_healthex_pipeline_status(job_id)"}
+
+
+@mcp.tool()
+async def get_healthex_pipeline_status(job_id: str) -> dict:
+    """Poll the status of a run_healthex_pipeline job."""
+    job = _PIPELINE_JOBS.get(job_id)
+    if job is None:
+        return {"status": "unknown_job", "job_id": job_id}
+    return {"job_id": job_id, **job}
+
+
+# ── Tier 3 — Introspection (3 tools, all read-only) ──────────────────────────
+
+@mcp.tool()
+async def compute_deliberation_convergence(
+    deliberation_id: str,
+    backend: str = "jaccard",
+) -> dict:
+    """Convergence score for a completed deliberation.
+
+    backend='jaccard': current token-overlap implementation.
+    backend='medcpt':  [PLANNED] Phase-2 MedCPT-embedding cosine similarity.
+                       Returns a clear NotImplemented payload until pgvector
+                       migration 009 is live.
+    """
+    if backend == "medcpt":
+        return {
+            "deliberation_id": deliberation_id,
+            "backend_used": "medcpt",
+            "convergence_score": None,
+            "error": "MedCPT backend not yet implemented. "
+                     "Depends on migration 009_pgvector_guidelines.sql + "
+                     "MedCPT-Article-Encoder embeddings.",
+            "fallback_available": True,
+        }
+    if backend != "jaccard":
+        return {"status": "error", "error": f"unknown backend '{backend}'"}
+
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        dlb = await conn.fetchrow(
+            """SELECT id, convergence_score, rounds_completed
+               FROM deliberations WHERE id = $1""",
+            _uuid.UUID(deliberation_id) if _looks_like_uuid(deliberation_id) else deliberation_id,
+        )
+    if dlb is None:
+        return {"status": "error", "error": f"deliberation {deliberation_id} not found"}
+    return {
+        "deliberation_id": deliberation_id,
+        "backend_used": "jaccard",
+        "convergence_score": dlb["convergence_score"],
+        "rounds_to_convergence": dlb["rounds_completed"],
+        "interpretation": "0.0 is expected for Jaccard — see CLAUDE.md §10",
+    }
+
+
+@mcp.tool()
+async def get_deliberation_phases(deliberation_id: str) -> dict:
+    """Per-phase metadata for a completed deliberation. Reads deliberation_outputs."""
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        dlb = await conn.fetchrow(
+            """SELECT id, triggered_at, convergence_score, rounds_completed, status
+               FROM deliberations WHERE id = $1""",
+            _uuid.UUID(deliberation_id) if _looks_like_uuid(deliberation_id) else deliberation_id,
+        )
+        if dlb is None:
+            return {"status": "error", "error": "deliberation not found"}
+        outputs = await conn.fetch(
+            """SELECT output_type, COUNT(*) AS n
+               FROM deliberation_outputs
+               WHERE deliberation_id = $1
+               GROUP BY output_type""",
+            dlb["id"],
+        )
+    return {
+        "deliberation_id": deliberation_id,
+        "status": dlb["status"],
+        "total_rounds": dlb["rounds_completed"],
+        "convergence_score": dlb["convergence_score"],
+        "output_type_counts": {r["output_type"]: r["n"] for r in outputs},
+    }
+
+
+@mcp.tool()
+async def search_guidelines(
+    query: str,
+    source: str = "",
+    evidence_grade: str = "",
+    patient_population: str = "",
+    limit: int = 10,
+) -> dict:
+    """Semantic + keyword hybrid search over clinical guidelines.
+
+    [STUB — until migration 009_pgvector_guidelines.sql is applied and the
+    `guidelines` table is populated with MedCPT embeddings.] The signature
+    and filter model are stable so callers can integrate now.
+
+    When stubbed, returns an empty `results` list with a clear status.
+    Coexists with `get_guideline(id)` (precision ID lookup), which remains
+    fully functional for known recommendation IDs.
+    """
+    pool = await _get_db_pool()
+    # Existence check: is migration 009 applied?
+    try:
+        async with pool.acquire() as conn:
+            exists = await conn.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM information_schema.tables
+                                 WHERE table_name = 'guidelines')"""
+            )
+    except Exception:
+        exists = False
+
+    if not exists:
+        return {
+            "status": "stubbed",
+            "query": query,
+            "results": [],
+            "note": (
+                "search_guidelines is stubbed — apply migration "
+                "009_pgvector_guidelines.sql and load MedCPT embeddings "
+                "to enable semantic retrieval. Use get_guideline(id) for "
+                "precision lookup in the meantime."
+            ),
+        }
+
+    # Keyword-only path until embedding is online. This guarantees the tool
+    # returns SOMETHING useful the moment the table is populated, even before
+    # embedding generation completes.
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT recommendation_id, text, guideline_source, evidence_grade
+               FROM guidelines
+               WHERE is_current
+                 AND ($1 = '' OR guideline_source = $1)
+                 AND ($2 = '' OR evidence_grade = $2)
+                 AND ($3 = '' OR $3 = ANY(patient_population))
+                 AND bm25_tokens @@ plainto_tsquery('english', $4)
+               ORDER BY ts_rank(bm25_tokens, plainto_tsquery('english', $4)) DESC
+               LIMIT $5""",
+            source, evidence_grade, patient_population, query, limit,
+        )
+    return {
+        "status": "ok",
+        "backend": "bm25_only",     # upgraded to 'hybrid' once embedding path lands
+        "query": query,
+        "results": [dict(r) for r in rows],
+    }
+
+
+@mcp.tool()
+async def run_batch_pre_encounter(
+    panel_id: str,
+    encounter_date: str,
+    provider_id: str = "",
+) -> dict:
+    """Overnight batch pre-compute of deliberations for a provider panel.
+
+    [PLANNED] Wires the existing server/deliberation/batch/{model_router,
+    pre_encounter_batch}.py modules. Until wired, returns a clear stub.
+    The signature is stable so callers (overnight scheduler, provider
+    dashboard) can integrate.
+    """
+    return {
+        "status": "not_yet_wired",
+        "panel_id": panel_id,
+        "encounter_date": encounter_date,
+        "provider_id": provider_id,
+        "note": (
+            "server/deliberation/batch/pre_encounter_batch.py exists; this "
+            "MCP wrapper needs to import and call it without reimplementing. "
+            "Tracked as Tier 3.4 in plan file noble-giggling-sunbeam.md."
+        ),
+    }
+
+
+# ── Tier 4 — Product (population, inbox, constitutional critic is 2.b.ii) ────
+
+@mcp.tool()
+async def get_panel_risk_ranking(
+    provider_id: str,
+    sort_by: str = "risk_score",
+    limit: int = 50,
+) -> dict:
+    """Provider's panel sorted by risk metric. Aggregates provider_risk_scores."""
+    if sort_by not in ("risk_score", "days_overdue", "gap_count"):
+        return {"status": "error", "error": f"unknown sort_by '{sort_by}'"}
+    pool = await _get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT prs.patient_id, prs.score, prs.computed_at,
+                      p.first_name, p.last_name, p.mrn
+               FROM provider_risk_scores prs
+               JOIN patients p ON p.id = prs.patient_id
+               WHERE prs.provider_id = $1
+               ORDER BY prs.score DESC
+               LIMIT $2""",
+            provider_id, limit,
+        )
+    patients = []
+    for r in rows:
+        patients.append({
+            "patient_id": str(r["patient_id"]),
+            "mrn": r["mrn"],
+            "name": f"{r['first_name']} {r['last_name']}".strip(),
+            "risk_score": float(r["score"]) if r["score"] is not None else None,
+            "computed_at": r["computed_at"].isoformat() if r["computed_at"] else None,
+        })
+    return {
+        "provider_id": provider_id,
+        "panel_count": len(patients),
+        "sort_by": sort_by,
+        "patients": patients,
+    }
+
+
+@mcp.tool()
+async def triage_message(
+    patient_id: str,
+    content: str,
+    message_type: str = "patient_message",
+) -> dict:
+    """Triage an incoming patient message. Wraps clinical_query(role='care_manager').
+
+    Returns priority ('urgent' | 'high' | 'routine' | 'administrative'),
+    suggested action, and an escalation flag. Uses the existing guardrail
+    pipeline — PHI, jailbreak, and blocking clinical triggers are enforced.
+    """
+    try:
+        result = await clinical_query(
+            query=f"Triage this {message_type}: {content}",
+            role="care_manager",
+            patient_context={"patient_id": patient_id},
+        )
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    # Priority heuristic based on guardrail escalations + keyword scan.
+    lowered = (content or "").lower()
+    urgent_keywords = ("chest pain", "suicidal", "can't breathe", "bleeding",
+                       "emergency", "severe", "overdose")
+    priority = "routine"
+    if result.get("escalation_flags"):
+        priority = "urgent"
+    elif any(k in lowered for k in urgent_keywords):
+        priority = "urgent"
+    elif any(k in lowered for k in ("refill", "appointment", "question", "follow up")):
+        priority = "high" if "medication" in lowered else "routine"
+    elif any(k in lowered for k in ("form", "insurance", "bill")):
+        priority = "administrative"
+
+    return {
+        "patient_id": patient_id,
+        "message_type": message_type,
+        "priority": priority,
+        "suggested_action": result.get("recommendation") or "review manually",
+        "escalate_to_human": bool(result.get("escalation_flags")) or priority == "urgent",
+        "rationale": (
+            "Guardrail triggered — escalate." if result.get("escalation_flags")
+            else f"Priority={priority} from keyword + guardrail scan."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

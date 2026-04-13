@@ -296,7 +296,12 @@ erDiagram
 
 ## Four Interaction Contracts
 
-The `S=f(R,C,P,T)` formula produces four distinct interaction patterns:
+The `S=f(R,C,P,T)` formula produces four distinct interaction patterns.
+Three (PCP, Care Manager, Patient) are live today — their role-specific
+system prompts live in `config/system_prompts/`. The Lab Technician
+contract is on the roadmap but **not yet implemented**: there is no
+`lab_tech.xml` system prompt, and `clinical_query(role='lab_tech')` will
+raise `ValueError` until one is added.
 
 ```mermaid
 graph TD
