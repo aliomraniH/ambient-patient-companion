@@ -680,3 +680,77 @@ The skill is auto-discovered by `load_skills(mcp)` on server startup — no regi
 ### Update DN tests
 
 After adding tools, update `tests/test_mcp_discovery.py` if tool counts are asserted anywhere.
+
+---
+
+## 15. Behavioral atom detection — dual-mode system (added 2026-04)
+
+### Architecture overview
+The behavioral health surface now has two output modes driven by
+`behavioral_phenotypes.evidence_mode`:
+
+- **primary_evidence (Mode B)** — ATOM signals exist, no formal PHQ-9 on
+  file. Atoms ARE the clinical evidence. A row is written to
+  `behavioral_screening_gaps` and the phenotype is upserted with
+  `evidence_mode = 'primary_evidence'`. MIRA / SYNTHESIS surface atoms
+  directly to the care team with a screening recommendation.
+- **contextual (Mode A)** — PHQ-9 exists. Atoms serve as historical
+  context that enriches score interpretation. Atoms never reach the
+  patient surface in this mode.
+
+### New tables (migration 010_behavioral_atoms.sql)
+- `behavioral_signal_atoms` — extracted behavioral signals from
+  clinical notes (pgvector embedding column for Phase 2 RAG)
+- `behavioral_screening_gaps` — tracks Mode B patients until a formal
+  screen arrives
+- `behavioral_phenotypes` — per-patient evidence_mode state
+- `phq9_observations` — structured PHQ-9 score history
+- `atom_pressure_scores` (materialized view) — time-decayed
+  (120-day half-life) signal density per patient
+
+### New MCP tools (ambient-skills-companion)
+- `get_behavioral_context(patient_id)` — returns mode-aware behavioral
+  context (`mode`, `atoms`, `recommended_instruments`, …)
+- `run_behavioral_gap_check(patient_id)` — idempotent gap-detector call;
+  safe to run on every note ingest
+
+### Deliberation engine integration
+- `server/deliberation/schemas.py::DeliberationResult.behavioral_section`
+  — new optional dict field populated post-synthesis.
+- `server/deliberation/behavioral_section_builder.py::augment_result_with_behavioral_section`
+  — called by `engine.py` between Phase 3.25 and Phase 3.5. Role is
+  derived from `context.deliberation_trigger`; defaults to `pcp`.
+
+### Ingestion pipeline hook
+- `ingestion/adapters/healthex/executor.py::_post_process_notes_for_atoms`
+  runs after `route_and_write_resources()`. Queries clinical_notes rows
+  newly written in this batch (by `ingested_at >= start_dt`), calls the
+  extractor, inserts atoms, refreshes the pressure-score view, and runs
+  the gap detector. Best-effort — never fails the ingest plan.
+
+### Key thresholds (configurable in `behavioral_gap_detector.py`)
+- `PRESSURE_THRESHOLD = 2.5` — minimum pressure score to trigger a gap
+- `MIN_ATOM_COUNT = 3` — minimum distinct present atoms required
+- `SCREENING_LOOKBACK_MONTHS = 12` — stale-screening window
+
+### Temporal confidence levels
+- `high` — latest atom < 1 year old
+- `moderate` — 1–3 years
+- `low` — 3–7 years
+- `very_low` — > 7 years (suppressed from patient surface; PCP opt-in required)
+
+### PHI rules for this module
+- `signal_value` (the raw extracted phrase) is stored in DB but NEVER logged
+- LLM extraction prompts contain NO patient identifiers — only the chunked
+  note text and a section-type hint. `patient_id` UUID is used for DB
+  linking only
+- Mode B outputs never reach the patient surface with clinical framing —
+  the patient builder emits a `behavioral_routing` message instead
+- `very_low` temporal-confidence atoms never reach the patient companion
+
+### PHQ-9 writer — not yet wired
+No PHQ-9 ingest code exists at time of introduction. `resolve_gap_on_new_screening`
+is implemented and ready; see the TODO marker in
+`mcp-server/skills/behavioral_gap_detector.py`. Until a PHQ-9 writer is added,
+`run_behavioral_gap_check` idempotency plus the nightly
+`run_batch_gap_detector` keep state consistent.

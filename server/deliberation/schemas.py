@@ -202,3 +202,6 @@ class DeliberationResult(BaseModel):
     gap_artifacts: list[dict] = Field(default_factory=list)
     gap_summary: str = ""
     context_validation: dict = Field(default_factory=dict)
+    # ATOM-first behavioral detection — set by engine after synthesis via
+    # behavioral_section_builder. Empty dict when no phenotype exists.
+    behavioral_section: dict = Field(default_factory=dict)

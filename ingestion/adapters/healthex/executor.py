@@ -11,10 +11,80 @@ All functions are async (asyncpg).
 
 import json
 import logging
+import sys
 import time
 import uuid as _uuid_mod
+from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# Allow importing behavioral library modules that live under mcp-server/skills/.
+# The ingestion server runs from the repo root; the skills modules are shared
+# Python libraries (they take a `conn` parameter and do not import the
+# mcp-server-specific `db.connection` module).
+_MCP_SKILLS_ROOT = Path(__file__).resolve().parents[3] / "mcp-server"
+if str(_MCP_SKILLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MCP_SKILLS_ROOT))
+
+
+async def _post_process_notes_for_atoms(pool, patient_id: str, batch_start_ts) -> int:
+    """Extract behavioral-signal atoms from clinical_notes just written in this
+    batch. Refreshes the pressure-score view and runs the gap detector when
+    atoms are inserted. Returns total atoms inserted.
+
+    Best-effort: never raises. Failures are logged without PHI.
+    """
+    try:
+        from skills.behavioral_atom_extractor import (
+            extract_atoms_from_note, insert_atoms,
+        )
+        from skills.behavioral_atom_pressure import refresh_pressure_scores
+        from skills.behavioral_gap_detector import run_gap_detector_for_patient
+    except Exception as e:
+        log.warning("behavioral libs unavailable: %s", type(e).__name__)
+        return 0
+
+    total_inserted = 0
+    try:
+        async with pool.acquire() as conn:
+            note_rows = await conn.fetch(
+                """SELECT id, note_text, note_date
+                     FROM clinical_notes
+                    WHERE patient_id = $1::uuid
+                      AND ingested_at >= $2
+                      AND note_text IS NOT NULL
+                      AND char_length(note_text) > 50
+                    ORDER BY ingested_at ASC""",
+                patient_id, batch_start_ts,
+            )
+            for row in note_rows:
+                note_date = row["note_date"]
+                if note_date is None:
+                    continue
+                # clinical_notes.note_date is TIMESTAMPTZ — take the date part.
+                from datetime import datetime as _dt
+                if isinstance(note_date, _dt):
+                    clinical_d = note_date.date()
+                else:
+                    clinical_d = note_date
+                atoms = await extract_atoms_from_note(
+                    note_text=row["note_text"],
+                    note_date=clinical_d,
+                    source_note_id=str(row["id"]),
+                    patient_id=patient_id,
+                )
+                if atoms:
+                    total_inserted += await insert_atoms(conn, atoms)
+
+            if total_inserted > 0:
+                await refresh_pressure_scores(conn)
+                try:
+                    await run_gap_detector_for_patient(conn, patient_id)
+                except Exception as e:
+                    log.warning("gap detector failed: %s", type(e).__name__)
+    except Exception as e:
+        log.warning("atom post-processing failed: %s", type(e).__name__)
+    return total_inserted
 
 
 async def execute_pending_plans(
@@ -94,7 +164,9 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
             plan_id,
         )
 
+    from datetime import datetime, timezone
     start_ms = int(time.time() * 1000)
+    start_dt = datetime.now(timezone.utc)
 
     try:
         # Fetch raw text from cache
@@ -197,6 +269,18 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
         except Exception as e:
             log.warning("content router supplemental step failed: %s", e)
 
+        # Supplemental: extract behavioral signal atoms from any clinical_notes
+        # that were just written for this patient. Best-effort — never fails
+        # the ingestion plan.
+        atoms_written = 0
+        try:
+            if media_result.get("notes_written", 0) > 0:
+                atoms_written = await _post_process_notes_for_atoms(
+                    pool, patient_id, batch_start_ts=start_dt,
+                )
+        except Exception as e:
+            log.warning("behavioral atom extraction step failed: %s", type(e).__name__)
+
         async with pool.acquire() as conn:
             await conn.execute(
                 """UPDATE ingestion_plans
@@ -219,6 +303,7 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
             "strategy": tw_result.get("strategy", ""),
             "notes_written": media_result.get("notes_written", 0),
             "refs_written": media_result.get("refs_written", 0),
+            "behavioral_atoms_written": atoms_written,
         }
 
     except Exception as e:
