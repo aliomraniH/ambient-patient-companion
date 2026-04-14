@@ -152,19 +152,21 @@ def register(mcp) -> None:
     @mcp.tool()
     async def prepare_behavioral_cards(
         patient_id: str,
+        role: Optional[str] = None,
         requesting_role: Optional[str] = None,
     ) -> dict:
-        """Generate behavioral insight cards for a patient, filtered by requesting role.
+        """Generate behavioral insight cards for a patient, filtered by role.
 
         Cards surface open screening gaps with pressure context, severity,
         and recommended instruments. Cards visible to the patient exclude
         clinical jargon and very-low-confidence signals.
 
         Args:
-            patient_id:       UUID of the patient.
-            requesting_role:  Role of the caller: 'patient'|'pcp'|'care_manager'|
-                              'behavioral_health'|None (returns all cards with
-                              their full role set for admin views).
+            patient_id:      UUID of the patient.
+            role:            Role of the caller: 'patient'|'pcp'|'care_manager'|
+                             'behavioral_health'|None (returns all cards with
+                             their full role set for admin views).
+            requesting_role: Deprecated alias for ``role``.
 
         Returns:
             {patient_id, card_count, cards: [{domain, gap_type, phenotype_label,
@@ -173,6 +175,9 @@ def register(mcp) -> None:
         """
         from db.connection import get_pool
         from skills.behavioral_gap_detector import get_open_gaps_for_patient
+
+        # Support both `role` (preferred) and legacy `requesting_role`.
+        requesting_role = role or requesting_role
 
         pool = await get_pool()
         gaps = await get_open_gaps_for_patient(pool, patient_id)

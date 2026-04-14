@@ -37,7 +37,7 @@ _PATTERNS: dict[str, list[tuple[re.Pattern, float]]] = {
 
     "anxiety_markers": [
         (re.compile(r"\b(anxious|anxiety|panick?(?:ing|ed)?|panic attack|nervous|on edge|keyed up|restless|worried sick|heart racing|heart pounding|short of breath|can't breathe)\b", re.I), 0.80),
-        (re.compile(r"\b(GAD|generali[sz]ed anxiety|OCD|obsessive|compulsive)\b", re.I), 0.85),
+        (re.compile(r"\b(generali[sz]ed anxiety|OCD|obsessive|compulsive|panic attack)\b", re.I), 0.85),
         (re.compile(r"\b(wr?[ae]ck(?:ing|ed)? my nerves|scared all the time|constant worry|endless worry)\b", re.I), 0.75),
         (re.compile(r"\b(trembling|tremor|shakiness|sweating|shaking with (?:fear|anxiety|worry))\b", re.I), 0.70),
     ],
@@ -45,7 +45,7 @@ _PATTERNS: dict[str, list[tuple[re.Pattern, float]]] = {
     "depression_markers": [
         (re.compile(r"\b(depress(?:ed|ion|ing)?|hopeless(?:ness)?|worthless(?:ness)?|sad(?:ness)?|empty inside|no joy|can't enjoy|anhedoni[ac])\b", re.I), 0.82),
         (re.compile(r"\b(low mood|down|feeling low|blue|miserable|despondent|grief|bereaved|devastated)\b", re.I), 0.70),
-        (re.compile(r"\b(PHQ|major depressive|MDD|dysthymi[ac]|PDD|persistent depressive)\b", re.I), 0.88),
+        (re.compile(r"\b(major depressive|MDD|dysthymi[ac]|PDD|persistent depressive|clinical depression)\b", re.I), 0.88),
         (re.compile(r"\b(cry(?:ing)?|tearful|can't stop crying|sobbing all (?:the time|day))\b", re.I), 0.72),
     ],
 
@@ -54,7 +54,7 @@ _PATTERNS: dict[str, list[tuple[re.Pattern, float]]] = {
         (re.compile(r"\b(drug(?:s)?|opioid|opiate|heroin|cocaine|meth(?:amphetamine)?|crack|marijuana|cannabis|weed|pot|fentanyl|benzodiazepine|benzo)\b", re.I), 0.82),
         (re.compile(r"\b(substance (?:use|abuse|disorder)|SUD|addiction|depend(?:ence|ent)|withdrawal|detox)\b", re.I), 0.88),
         (re.compile(r"\b(relaps(?:e|ed|ing)?|cravings?|urge to use|using again)\b", re.I), 0.85),
-        (re.compile(r"\b(AUDIT|DAST|CAGE|cut down|annoyed by criticism|guilty about drinking|eye-opener)\b", re.I), 0.80),
+        (re.compile(r"\b(cut down|annoyed by criticism|guilty about drinking|eye-opener|screening for alcohol|alcohol use disorder)\b", re.I), 0.80),
     ],
 
     "trauma_markers": [
@@ -72,13 +72,13 @@ _PATTERNS: dict[str, list[tuple[re.Pattern, float]]] = {
     "suicidality_markers": [
         (re.compile(r"\b(suicid(?:al|e|ality|e attempt)|self[- ]harm|self[- ]injury|cutting myself|want to die|end my life|kill myself|not want to (?:be here|live|exist))\b", re.I), 0.92),
         (re.compile(r"\b(better off dead|wish I (?:was|were) dead|passive ideation|active ideation|plan to (?:hurt|harm|kill))\b", re.I), 0.90),
-        (re.compile(r"\b(C-SSRS|Columbia severity|suicide (?:risk|screening|assessment)|ideation)\b", re.I), 0.80),
+        (re.compile(r"\b(Columbia severity|suicide (?:risk|screening|assessment|attempt)|ideation|safety planning)\b", re.I), 0.80),
         (re.compile(r"\b(overdose|take all my pills|jump|hang myself)\b", re.I), 0.92),
     ],
 
     "sleep_disturbance": [
         (re.compile(r"\b(insomnia|can't sleep|trouble sleeping|sleep(?:ing)? problem|wak(?:ing|e) up (?:all night|repeatedly)|sleep deprivation|hypersomnia|oversleeping)\b", re.I), 0.80),
-        (re.compile(r"\b(ISI|insomnia severity|nightmares|sleep apnea|restless legs|CPAP|poor sleep quality|sleep hygiene)\b", re.I), 0.78),
+        (re.compile(r"\b(insomnia severity|nightmares|sleep apnea|restless legs|CPAP|poor sleep quality|sleep hygiene|sleep disorder)\b", re.I), 0.78),
         (re.compile(r"\b(fatigue|exhausted|tired all the time|no energy|burnt out|wiped out|can't get out of bed)\b", re.I), 0.65),
     ],
 
@@ -90,18 +90,18 @@ _PATTERNS: dict[str, list[tuple[re.Pattern, float]]] = {
 
     "somatic_complaints": [
         (re.compile(r"\b(pain|ache|headache|migraine|stomach(?:ache)?|abdominal pain|chest pain|back pain|chronic pain|fibromyalgia)\b", re.I), 0.68),
-        (re.compile(r"\b(PHQ-15|somatic (?:symptom|disorder)|medically unexplained|functional (?:disorder|syndrome))\b", re.I), 0.82),
+        (re.compile(r"\b(somatic (?:symptom|disorder)|medically unexplained|functional (?:disorder|syndrome)|persistent physical complaints)\b", re.I), 0.82),
         (re.compile(r"\b(nausea|dizziness|dizzy|vertigo|numbness|tingling|palpitations)\b", re.I), 0.65),
     ],
 
     "cognitive_concerns": [
-        (re.compile(r"\b(memory (?:loss|problems?)|forgetful(?:ness)?|dementia|alzheimer|MCI|cognitive (?:decline|impairment)|MoCA|SLUMS|confusion|disoriented)\b", re.I), 0.82),
+        (re.compile(r"\b(memory (?:loss|problems?)|forgetful(?:ness)?|dementia|alzheimer|MCI|cognitive (?:decline|impairment)|confusion|disoriented)\b", re.I), 0.82),
         (re.compile(r"\b(brain fog|can't remember|keeps forgetting|losing my mind|confusion|mixed up)\b", re.I), 0.70),
     ],
 
     "mood_changes": [
         (re.compile(r"\b(mood (?:swing|change|shift|episode)|irritab(?:le|ility)|anger|rage|euphori[ac]|elat(?:ed|ion)|grandiosity|manic|hypomania)\b", re.I), 0.78),
-        (re.compile(r"\b(MDQ|bipolar|rapid cycling|mixed (?:state|episode)|mood stabil(?:izer|iser)|lithium|valproate|lamotrigine)\b", re.I), 0.84),
+        (re.compile(r"\b(bipolar|rapid cycling|mixed (?:state|episode)|mood stabil(?:izer|iser)|lithium|valproate|lamotrigine)\b", re.I), 0.84),
         (re.compile(r"\b(lashing out|snapping at everyone|can't control (?:my )?temper|explosive|outburst)\b", re.I), 0.72),
     ],
 

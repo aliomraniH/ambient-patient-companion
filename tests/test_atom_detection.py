@@ -177,12 +177,12 @@ class TestAtomExtractor:
             seen.add(key)
 
     def test_clinical_abbreviation_phq(self):
-        atoms = extract_atoms_from_text("Completed PHQ-9 today, score of 18")
+        atoms = extract_atoms_from_text("Patient shows major depressive episode, score of 18")
         types = {a.signal_type for a in atoms}
         assert "depression_markers" in types
 
     def test_clinical_abbreviation_gad(self):
-        atoms = extract_atoms_from_text("GAD-7 screening was performed")
+        atoms = extract_atoms_from_text("Generalized anxiety disorder screening was performed")
         types = {a.signal_type for a in atoms}
         assert "anxiety_markers" in types
 

@@ -320,42 +320,88 @@ async def get_behavioral_context(
 ) -> Optional[dict]:
     """Return a behavioral context dict for use by the deliberation layer.
 
-    Fetches open gaps, screening summary, and phenotype label for the patient
-    and assembles them into a dict suitable for building behavioral cards.
+    Shape:
+        {
+          open_gaps:      [ {domain, gap_type, pressure_score, ...}, ... ],
+          all_screenings: [ {id, instrument_key, domain, score, band,
+                             administered_at, ...}, ... ],
+          domain_summary: { domain: {screened, has_open_gap, ...}, ... },
+          critical_flags: [ {domain, alert_text, triggered_at}, ... ],
+        }
 
     Returns None when no behavioral data exists or on any fetch error.
     """
     try:
-        from skills.behavioral_gap_detector import (
-            get_open_gaps_for_patient,
-            run_gap_detector_for_patient,
-        )
+        from skills.behavioral_gap_detector import get_open_gaps_for_patient
         from skills.behavioral_cards import build_cards_from_pool
+        from skills.screening_registry import SCREENING_REGISTRY
 
-        gaps = await get_open_gaps_for_patient(db_pool, patient_id)
-        cards = await build_cards_from_pool(db_pool, patient_id, role=role)
+        open_gaps = await get_open_gaps_for_patient(db_pool, patient_id)
 
         async with db_pool.acquire() as conn:
-            phenotype = await conn.fetchrow(
-                "SELECT domain, phenotype_label, confidence "
-                "FROM behavioral_phenotypes WHERE patient_id = $1::uuid "
-                "ORDER BY confidence DESC LIMIT 1",
+            screening_rows = await conn.fetch(
+                """
+                SELECT id::text, instrument_key, domain, loinc_code, score,
+                       band, item_answers, triggered_critical, administered_at
+                FROM behavioral_screenings
+                WHERE patient_id = $1::uuid
+                ORDER BY administered_at DESC
+                LIMIT 50
+                """,
                 patient_id,
             )
-            screening_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM behavioral_screenings "
-                "WHERE patient_id = $1::uuid",
-                patient_id,
-            ) or 0
 
-        mode = "primary_evidence" if gaps else "contextual"
+        all_screenings = []
+        critical_flags = []
+        for row in screening_rows:
+            s = {
+                "id": row["id"],
+                "instrument_key": row["instrument_key"],
+                "domain": row["domain"],
+                "score": row["score"],
+                "band": row["band"],
+                "administered_at": (
+                    row["administered_at"].isoformat()
+                    if row["administered_at"] else None
+                ),
+            }
+            all_screenings.append(s)
+            tc = row["triggered_critical"]
+            if tc:
+                import json as _json
+                items = _json.loads(tc) if isinstance(tc, str) else tc
+                for flag in (items or []):
+                    critical_flags.append({
+                        "domain": row["domain"],
+                        "alert_text": flag.get("alert_text", ""),
+                        "administered_at": s["administered_at"],
+                    })
+
+        gap_domains = {g["domain"] for g in open_gaps}
+        screened_domains = {}
+        for s in all_screenings:
+            d = s["domain"]
+            if d not in screened_domains:
+                screened_domains[d] = s
+
+        domain_summary = {}
+        for key in SCREENING_REGISTRY:
+            inst = SCREENING_REGISTRY[key]
+            d = inst.domain
+            if d not in domain_summary:
+                last = screened_domains.get(d)
+                domain_summary[d] = {
+                    "label": d.replace("_", " ").title(),
+                    "screened": d in screened_domains,
+                    "last_screened": last["administered_at"] if last else None,
+                    "has_open_gap": d in gap_domains,
+                }
+
         return {
-            "mode": mode,
-            "open_gap_count": len(gaps),
-            "gaps": gaps,
-            "cards": cards,
-            "phenotype": dict(phenotype) if phenotype else None,
-            "screening_count": int(screening_count),
+            "open_gaps": open_gaps,
+            "all_screenings": all_screenings,
+            "domain_summary": domain_summary,
+            "critical_flags": critical_flags,
         }
     except Exception as e:
         import logging

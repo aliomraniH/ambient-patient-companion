@@ -214,19 +214,7 @@ async def run_gap_detector_for_patient(
 
         gap_id = str(uuid.uuid4())
 
-        gap = {
-            "gap_id": gap_id,
-            "domain": domain,
-            "gap_type": gap_type,
-            "pressure_score": round(dp["pressure_score"], 3),
-            "atom_count": dp["atom_count"],
-            "temporal_confidence": temporal_confidence,
-            "suggested_instruments": suggested,
-            "phenotype_label": phenotype,
-        }
-        gaps.append(gap)
-
-        # ── 5a. Upsert phenotype ──────────────────────────────────────────
+        # ── 5a. Upsert phenotype (always, regardless of gap newness) ─────────
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -242,7 +230,7 @@ async def run_gap_detector_for_patient(
                 gap_id, patient_id, domain, phenotype, dp["pressure_score"],
             )
 
-        # ── 5b. Insert gap row (skip if already open) ─────────────────────
+        # ── 5b. Insert gap row only if no existing open gap (idempotent) ──────
         async with pool.acquire() as conn:
             existing = await conn.fetchval(
                 """
@@ -253,8 +241,8 @@ async def run_gap_detector_for_patient(
                 """,
                 patient_id, domain,
             )
-            if not existing:
-                import json as _json
+            is_new_gap = not existing
+            if is_new_gap:
                 await conn.execute(
                     """
                     INSERT INTO behavioral_screening_gaps
@@ -268,6 +256,19 @@ async def run_gap_detector_for_patient(
                     suggested,
                     phenotype, temporal_confidence, data_source,
                 )
+
+        # Only append newly detected gaps (skip existing-open ones).
+        if is_new_gap:
+            gaps.append({
+                "gap_id": gap_id,
+                "domain": domain,
+                "gap_type": gap_type,
+                "pressure_score": round(dp["pressure_score"], 3),
+                "atom_count": dp["atom_count"],
+                "temporal_confidence": temporal_confidence,
+                "suggested_instruments": suggested,
+                "phenotype_label": phenotype,
+            })
 
     return gaps
 
