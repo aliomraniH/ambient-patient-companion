@@ -3923,7 +3923,7 @@ async def run_healthex_pipeline(patient_mrn: str) -> dict:
     to retrieve progress. This tool NEVER `awaits` deliberation synchronously
     — doing so would time out MCP request windows.
 
-    patient_mrn: stable MRN (e.g. 4829341 for Maria Chen).
+    patient_mrn: stable MRN string identifying the patient record.
     """
     job_id = str(_uuid.uuid4())
     _PIPELINE_JOBS[job_id] = {"status": "queued", "patient_mrn": patient_mrn, "steps": []}
