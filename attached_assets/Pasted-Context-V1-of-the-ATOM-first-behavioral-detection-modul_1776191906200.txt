@@ -1,0 +1,246 @@
+Context
+V1 of the ATOM-first behavioral detection module shipped in commit
+de59990 (merged via PR #22) and introduced a phq9_observations table,
+a PHQ-9-specific gap detector, and Mode A/B routing in the deliberation
+engine. That v1 commit has not yet been deployed to the Replit instance.
+V1 has three silent failure modes baked into its PHQ-9-coupled design:
+
+A GAD-7 positive patient with no PHQ-9 on file still fires a gap
+as "no formal screening".
+An AUDIT-C positive patient with substance-use atoms still gets a
+PHQ-9 recommendation (wrong tool).
+A PC-PTSD-5 positive patient with trauma atoms is ignored because
+only phq9_observations is consulted.
+
+V2 replaces every hardcoded instrument reference with calls against a
+single SCREENING_REGISTRY module (17 instruments across 11 domains).
+Gap detection becomes domain-based — a gap fires only when the
+patient's atom signals suggest a domain AND no instrument in that domain
+has been administered inside the domain's lookback window. Multiple
+simultaneous domain gaps per patient become possible. Adding a new
+instrument in the future = adding one dict entry.
+Intended outcome: the behavioral surface correctly handles any FHIR
+Observation whose LOINC code is in the registry, closes the gap for the
+matching domain only, and emits role-appropriate framing via the same
+Mode A/B builder.
+
+Scope & non-goals
+In scope:
+
+New SCREENING_REGISTRY module + lookup helpers.
+New generic behavioral_screenings table; migrate existing
+phq9_observations rows and drop the legacy table.
+Rewrite behavioral_gap_detector.py to be domain-driven.
+Generic FHIR Observation and QuestionnaireResponse ingestor
+keyed off LOINC. Must parse item-level answers for every registry
+instrument and every SDoH screener (PRAPARE, AHC-HRSN, Hunger
+Vital Sign) — individual item answers become structured context
+available to all agents, not just the total score.
+pgvector retrieval of atoms: populate the existing
+behavioral_signal_atoms.embedding vector(768) column at insert time
+and expose a search_similar_atoms MCP tool that uses the already-
+created HNSW index for cosine-similarity retrieval. This closes the
+loop so gap-aware agents can pull historically similar atoms as
+reasoning context.
+Update get_behavioral_context to return multi-domain.
+Update behavioral_section_builder.fetch_behavioral_context and
+_build_mode_a_section to read behavioral_screenings.
+Card-list resurfacing tool: a new prepare_behavioral_cards MCP
+tool returns a list[Card] — each card is a structured dict that any
+agent or LLM can render as text/UI. The deliberation section builder
+consumes these cards directly instead of emitting bespoke Mode A/B
+shapes.
+Wire the ingestor into the content-router pipeline.
+Port v1 tests; add v2 registry tests (target: 14 verification checks
+
+vector-retrieval smoke + QuestionnaireResponse item parsing test).
+
+
+
+Out of scope:
+
+UI code changes in replit-app/. Cards are data, not components —
+downstream LLM/UI agents render them.
+MedCPT weight download automation. Plan uses a pluggable embedder
+interface; the chosen model can be swapped without code changes.
+
+
+Files to create
+PathPurposemcp-server/skills/screening_registry.pySCREENING_REGISTRY dict + ScreeningInstrument / SeverityBand / CriticalItem dataclasses + lookup helpers. Pure data — no DB, no imports from other app modules. Sits under mcp-server/skills/ so existing skill files can from skills.screening_registry import … with the same import style they use today. Include a register(mcp) no-op so the skill loader ignores it.mcp-server/skills/behavioral_screening_ingestor.pyparse_fhir_observation_to_screening(), parse_questionnaire_response_to_screening(), insert_screening(). LOINC-keyed, returns None on unknown codes (never raises). Item-level answers extracted from QuestionnaireResponse.item[] (linkId-indexed) and from Observation.component[]; stored in behavioral_screenings.item_scores and .item_answers JSONB columns. Also maps critical_items so item-9 / item-10 / ASQ-item-4 flags fire automatically.mcp-server/skills/sdoh_registry.pySDoH instrument registry mirroring the screening registry: PRAPARE, AHC-HRSN, Hunger Vital Sign, WHO-QoL-BREF (subset), SEEK. Item-level answer schemas + LOINC panels. Parsed by the same ingestor; written to a sibling table sdoh_screenings with the same shape as behavioral_screenings.mcp-server/skills/atom_embedder.pyThin wrapper around an embedding backend (MedCPT if MEDCPT_MODEL_PATH env is set, else falls back to OpenAI text-embedding-3-small truncated/projected to 768 dims, else a deterministic hash-based stub for CI). Exposes embed_signal_value(text: str) -> list[float] and embed_batch(texts) -> list[list[float]]. Called from the atom extractor insert path.mcp-server/skills/atom_vector_search.pyMCP tool `search_similar_atoms(patient_id, query_text=None, query_signal_type=None, top_k=10, scope='patient'mcp-server/skills/behavioral_cards.pyMCP tool prepare_behavioral_cards(patient_id, role='pcp'). Returns {"cards": [Card, ...]} — a resurfacing list consumable by any downstream LLM or UI agent. Each Card is a flat dict: {card_id, card_type, title, subtitle, domain, priority, body_text, evidence[], actions[], critical_flags[], temporal_confidence, show_to_roles[]}. One card per open gap, one per recent positive screening, one per active critical flag. See "Card schema" section below.server/migrations/011_behavioral_screenings.sqlCreates behavioral_screenings + sdoh_screenings + indexes; adds triggered_domains TEXT[] column to behavioral_screening_gaps; adds item_answers JSONB column to both screening tables for raw answer payloads (alongside numeric item_scores). Migrates any existing phq9_observations rows into behavioral_screenings (INSERT … SELECT … ON CONFLICT DO NOTHING) and drops the legacy table — all inside one transaction.tests/test_screening_registry_v2.py14-test spec suite + additional checks: QuestionnaireResponse item-level parsing for PHQ-9 (item_9=1 triggers critical flag), GAD-7, AUDIT-C with gender thresholds, PRAPARE SDoH parsing, search_similar_atoms round-trip (insert 3 atoms, query, assert nearest neighbor), prepare_behavioral_cards schema validation.
+Files to modify
+PathChangemcp-server/skills/behavioral_gap_detector.pyFull rewrite. Keep PRESSURE_THRESHOLD, MIN_ATOM_COUNT, compute_temporal_confidence(). Delete INSTRUMENT_SUGGESTION_MAP, suggest_instruments(), SCREENING_LOOKBACK_MONTHS. Add DOMAIN_LOOKBACK_DAYS per-domain dict. Change run_gap_detector_for_patient return type from Optional[dict] → list[dict] (one entry per newly detected domain gap). Change resolve_gap_on_new_screening signature to (conn, patient_id, new_screening_id, instrument_key, domain, screening_date) — item_9_score param dropped; critical-item flags now come from behavioral_screenings.triggered_critical JSONB.mcp-server/skills/behavioral_atoms.pyUpdate run_behavioral_gap_check to handle the new list return type — emit {"status": "gaps_detected", "gaps": [...]} when non-empty, {"status": "no_gap"} otherwise. Rewrite get_behavioral_context per Step 5 of the spec: emit all domains, all screenings, all critical flags, full atom history. Drop direct phq9_observations reads; replace with behavioral_screenings.server/deliberation/behavioral_section_builder.pyDelete _build_mode_a_section / _build_mode_b_section local builders. Replace build_behavioral_section with a thin adapter that calls prepare_behavioral_cards (via pool, not MCP round-trip — extract the card-building helper into a shared function) and returns the card list. Update fetch_behavioral_context to read behavioral_screenings / sdoh_screenings. Update augment_result_with_behavioral_section to assign result.behavioral_section = cards.server/deliberation/schemas.pyUpdate the type annotation of DeliberationResult.behavioral_section from Optional[dict] → Optional[list[dict]] (card list).mcp-server/skills/behavioral_atom_extractor.pyinsert_atoms call path — embed signal_value via atom_embedder.embed_batch before INSERT so the embedding column is populated. Wrap in try/except that falls back to NULL embedding if the embedder fails (HNSW index tolerates NULL rows).ingestion/adapters/healthex/executor.py_post_process_notes_for_atoms at line 278 — update to handle the new list return type from run_gap_detector_for_patient. Add a new hook on_fhir_resources_ingested after route_and_write_resources() that iterates fhir_resources, dispatches Observation and QuestionnaireResponse resources to the registry ingestor (behavioral_screenings + sdoh_screenings both), then triggers resolve_gap_on_new_screening and run_gap_detector_for_patient. Best-effort — wrap in try/except like the existing atom hook.tests/test_atom_detection.pyUpdate test_instrument_suggestion to use suggest_instruments_from_atoms from the registry. Remove v1 INSTRUMENT_SUGGESTION_MAP import. Update test_gap_resolution_transitions_mode to insert into behavioral_screenings (not phq9_observations) and pass domain='depression' to resolve_gap_on_new_screening. Add a test for the new list-of-cards behavioral_section shape.CLAUDE.mdAppend the new "Behavioral screening registry (updated 2026-04)" section from Step 7 of the spec, listing the 17 instruments/11 domains and explaining the registry-first rule.
+Files NOT to change
+
+mcp-server/skills/behavioral_atom_pressure.py — pressure view refresh logic unchanged.
+Migration 010_behavioral_atoms.sql — keep as-is; v2 lives in 011_*. The embedding vector(768) column and HNSW index were already provisioned there, so v2 only starts populating them.
+server/deliberation/engine.py — call at line 277 is unchanged; the builder handles the new card-list shape internally.
+replit-app/ — no UI code changes. Cards are structured data; rendering is a downstream concern.
+
+
+Card schema (emitted by prepare_behavioral_cards)
+Each card is a flat dict designed to be rendered by any agent (LLM text,
+future UI, SMS nudge). Shape:
+pythonCard = {
+    "card_id": str,                  # stable UUID; card_type + source_id hash
+    "card_type": str,                # 'screening_gap' | 'positive_screen'
+                                     #  | 'critical_flag' | 'sdoh_need'
+                                     #  | 'atom_pattern'
+    "title": str,                    # e.g. "Anxiety screening overdue"
+    "subtitle": str | None,          # e.g. "GAD-7 recommended — 3 signals in 90d"
+    "domain": str,                   # registry DOMAINS key
+    "priority": str,                 # 'critical' | 'high' | 'medium' | 'low'
+    "body_text": str,                # free-form paragraph; role-adapted
+    "evidence": [                    # structured, agent-readable evidence
+        {"type": "atom", "date": "2026-01-12",
+         "signal_type": "anxiety_markers", "confidence": 0.82},
+        {"type": "screening", "instrument": "GAD-7",
+         "date": "2024-03-01", "score": 12, "band": "moderate"},
+        ...
+    ],
+    "actions": [                     # actionable next steps
+        {"action_id": "administer_gad7",
+         "label": "Administer GAD-7 at next visit",
+         "instrument_key": "gad7"},
+        ...
+    ],
+    "critical_flags": [              # from triggered_critical items
+        {"instrument": "PHQ-9", "item_number": 9,
+         "alert_text": "passive SI", "actual_score": 1},
+    ],
+    "temporal_confidence": str,      # 'high'|'moderate'|'low'|'very_low'
+    "show_to_roles": [str],          # ['pcp','care_manager'] — filters out
+                                     # suppressed cards for patient surface
+    "source": {                      # traceability
+        "gap_id": uuid | None,
+        "screening_id": uuid | None,
+        "atom_ids": [uuid],
+    },
+}
+Role-based visibility is enforced inside the tool:
+
+very_low temporal confidence → show_to_roles excludes patient.
+Mode B (primary_evidence) cards → show_to_roles excludes patient
+(they get a single behavioral_routing card instead).
+Critical flags (any SI item triggered) → always high priority,
+always include pcp and care_manager.
+
+
+pgvector retrieval details
+
+behavioral_signal_atoms.embedding vector(768) already exists
+(migration 010). HNSW index (idx_bsa_embedding) already built.
+atom_embedder.embed_signal_value returns a 768-dim float list.
+Configuration priority:
+
+MedCPT local model (preferred for clinical relevance) if
+MEDCPT_MODEL_PATH env var points to a valid checkpoint.
+OpenAI text-embedding-3-small → truncate/pad to 768 dims
+(1536 → 768 via simple projection matrix seeded deterministically).
+Deterministic hash-based 768-d vector for unit tests / CI where
+no embedding provider is available. Clearly labeled as stub.
+
+
+Insert path: behavioral_atom_extractor.insert_atoms embeds each
+atom's signal_value before the INSERT. Embedding failures → NULL,
+never raise.
+Retrieval tool search_similar_atoms:
+
+scope='patient' → cosine similarity within one patient's atoms.
+scope='cohort' → aggregate cohort pattern search; returns counts
+only, no raw signal_value text (PHI protection).
+Called by gap-aware agents to pull relevant historical context into
+deliberation prompts.
+
+
+
+
+Reusable building blocks in the existing repo
+
+Atom extractor emits 15 signal types; all 15 are referenced in the new registry's atom_signals fields so the suggest_instruments_from_atoms() helper has full coverage.
+atom_pressure_scores materialized view (migration 010:130) is unchanged — gap detector keeps reading pressure_score and present_atom_count from it.
+_upsert_phenotype() helper (behavioral_gap_detector.py:65) — keep as-is; the rewrite only changes when and with what args it is called.
+_jsonable() / _row_to_dict() helpers in mcp-server/skills/behavioral_atoms.py:32 — reuse for the rewritten get_behavioral_context response.
+db.connection.get_pool() is the existing DB entry point — used by both the MCP tools and (indirectly via db_pool arg) the deliberation builder.
+
+
+Execution order
+
+Create mcp-server/skills/screening_registry.py. Verify python -c "from skills.screening_registry import SCREENING_REGISTRY; print(len(SCREENING_REGISTRY))" prints 17.
+Create mcp-server/skills/sdoh_registry.py (PRAPARE, AHC-HRSN, Hunger Vital Sign, WHO-QoL-BREF subset, SEEK).
+Author migration server/migrations/011_behavioral_screenings.sql. Apply against dev DB. Verify tables + columns exist; verify phq9 rows copied; verify legacy table dropped.
+Create mcp-server/skills/atom_embedder.py (pluggable backend).
+Update mcp-server/skills/behavioral_atom_extractor.py to embed-on-insert.
+Create mcp-server/skills/atom_vector_search.py — register search_similar_atoms MCP tool.
+Create mcp-server/skills/behavioral_screening_ingestor.py (Observation + QuestionnaireResponse, item-level).
+Rewrite mcp-server/skills/behavioral_gap_detector.py (domain-driven, list return, triggered_domains).
+Create mcp-server/skills/behavioral_cards.py — register prepare_behavioral_cards MCP tool.
+Update mcp-server/skills/behavioral_atoms.py: get_behavioral_context multi-domain output; run_behavioral_gap_check list handling.
+Update server/deliberation/behavioral_section_builder.py to delegate to the card builder.
+Update server/deliberation/schemas.py type annotation.
+Update ingestion/adapters/healthex/executor.py — adapt atom call site and add the Observation / QuestionnaireResponse hook.
+Update tests/test_atom_detection.py; add tests/test_screening_registry_v2.py with the extended checks (item-level parsing, vector search, cards).
+Append the v2 section to CLAUDE.md.
+
+
+Verification
+Unit (no DB required)
+bashpython -m pytest tests/test_screening_registry_v2.py -v
+python -m pytest tests/test_atom_detection.py -v -k "not db and not llm_api"
+Expected: all 14 v2 registry checks pass; v1 section-builder tests still green.
+DB integration
+bash# Apply migration
+psql "$DATABASE_URL" -f server/migrations/011_behavioral_screenings.sql
+
+# Full test suite including DB tests
+python -m pytest tests/test_atom_detection.py -v
+python -m pytest tests/test_screening_registry_v2.py -v
+MCP end-to-end (against running skills server on :8002)
+bashSP=2cfaa9f2-3f47-44be-84e2-16f3a5dc0bbb
+
+# 1. Multi-domain behavioral context
+curl -X POST http://localhost:8002/tools/get_behavioral_context \
+  -H 'content-type: application/json' -d "{\"patient_id\":\"$SP\"}"
+# Verify: mode, open_gaps[], all_screenings[], domain_summary{}, critical_flags[]
+
+# 2. Trigger gap check (list return)
+curl -X POST http://localhost:8002/tools/run_behavioral_gap_check \
+  -H 'content-type: application/json' -d "{\"patient_id\":\"$SP\"}"
+
+# 3. Card-list resurfacing tool
+curl -X POST http://localhost:8002/tools/prepare_behavioral_cards \
+  -H 'content-type: application/json' \
+  -d "{\"patient_id\":\"$SP\", \"role\":\"pcp\"}"
+# Verify: {"cards":[{card_id, card_type, title, domain, priority,
+#                    body_text, evidence, actions, critical_flags, ...}]}
+
+# 4. Vector atom search
+curl -X POST http://localhost:8002/tools/search_similar_atoms \
+  -H 'content-type: application/json' \
+  -d "{\"patient_id\":\"$SP\",\"query_text\":\"trouble sleeping\",\"top_k\":5}"
+# Verify: ranked atoms with cosine distance, no PHI leakage in logs
+Regex guard
+After all edits, the only Python file containing instrument abbreviations
+should be screening_registry.py:
+bashgrep -r "PHQ-9\|GAD-7\|AUDIT-C\|ASRS-5\|C-SSRS" --include="*.py" \
+  | grep -v screening_registry | grep -v __pycache__ | grep -v test_
+# Expected: empty (or comments only in CLAUDE.md)
+Deliberation smoke
+bashpython -m pytest server/deliberation/tests/ -v -k "behavioral"
+Ensure the post-synthesis augment_result_with_behavioral_section hook
+still populates result.behavioral_section for a synthetic patient.
+
+Open questions resolved as defaults (flag to user if wrong)
+
+Registry location: placing at mcp-server/skills/screening_registry.py (not top-level or shared/) because all existing callers live under mcp-server/skills/ and import each other via skills.*.
+phq9_observations handling: user-chosen → migrate rows into behavioral_screenings, then DROP TABLE phq9_observations inside the same migration transaction.
+Multi-gap rendering in Mode B: user-chosen → iterate & emit list. result.behavioral_section becomes list[dict] — one entry per domain gap (Mode A = one-element list). schemas.py type annotation updated accordingly.
+Migration number: 011_behavioral_screenings.sql (next sequential after 010).
+
+Risk notes
+
+run_gap_detector_for_patient return-type change from Optional[dict] → list[dict] is breaking. Callers: behavioral_atoms.py:175 and executor.py (via _post_process_notes_for_atoms). Both updated here.
+result.behavioral_section shape change (dict → list[Card]). Downstream readers of this field (grep for behavioral_section) must be audited during implementation; add a list-shape assertion to the existing deliberation tests.
+Embedding backend availability. The atom_embedder stub fallback prevents CI failures, but production use requires either MEDCPT_MODEL_PATH set or OPENAI_API_KEY present. Confirm one is available before deployment; otherwise vector search degrades to deterministic stub (tests pass, clinical value zero).
+PHI in embeddings. signal_value is sent to whichever embedder is configured. If OpenAI is used, this is an outbound PHI flow — must confirm BAA coverage before enabling OpenAI in production. Stub and MedCPT are local-only.
+behavioral_screening_gaps.gap_type CHECK constraint in v1 allows {no_screening, stale_screening, item9_no_followup}. The rewrite keeps the first two valid; critical-item flags are surfaced via cards instead of gap rows. Leave CHECK constraint untouched.
+Card list in Mode A vs Mode B must not leak atoms to the patient surface when temporal_confidence='very_low' or when a gap is in Mode B — enforced by show_to_roles filtering inside prepare_behavioral_cards, verified by a dedicated test.
