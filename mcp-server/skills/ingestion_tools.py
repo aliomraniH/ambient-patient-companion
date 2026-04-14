@@ -4,6 +4,9 @@ and freshness-gated orchestration pipeline.
 
 from __future__ import annotations
 
+# Module-level registry populated by register() so tests can call inner helpers.
+_helpers: dict = {}
+
 import json
 import logging
 import os
@@ -463,6 +466,54 @@ async def register_healthex_patient(
         return f"Error: {e}"
 
 
+async def get_data_source_status() -> str:
+    """Check active data track and freshness status across all patients.
+
+    Module-level helper — also callable from tests.
+    The canonical MCP-registered version lives in Server 1
+    (ambient-clinical-intelligence) to avoid name collision.
+    """
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            track = await conn.fetchval(
+                "SELECT value FROM system_config WHERE key = $1",
+                "DATA_TRACK",
+            )
+            patients = await conn.fetchval("SELECT COUNT(*) FROM patients")
+            freshness = await conn.fetch(
+                """
+                SELECT source_name,
+                       COUNT(*)                                   AS patient_count,
+                       MAX(last_ingested_at)                      AS latest_pull,
+                       SUM(CASE WHEN is_stale THEN 1 ELSE 0 END) AS stale_count
+                FROM source_freshness
+                GROUP BY source_name
+                ORDER BY source_name
+                """
+            )
+        rows = []
+        for r in freshness:
+            row = dict(r)
+            if row.get("latest_pull"):
+                row["latest_pull"] = str(row["latest_pull"])
+            rows.append(row)
+        result = {
+            "active_track": track or "synthea",
+            "total_patients": int(patients),
+            "sources": rows,
+            "recommendation": (
+                "HealthEx connected — offer to ingest real records"
+                if track == "healthex"
+                else "Running on synthetic data — say 'use healthex' to switch"
+            ),
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error("get_data_source_status failed: %s", e)
+        return f"Error: {e}"
+
+
 def register(mcp: FastMCP):
     @mcp.tool
     async def check_data_freshness(patient_id: str) -> str:
@@ -696,56 +747,6 @@ def register(mcp: FastMCP):
                     )
             except Exception:
                 logger.error("Failed to log skill execution error")
-            return f"Error: {e}"
-
-    async def get_data_source_status() -> str:
-        """Check active data track and freshness status across all patients.
-
-        Internal helper used by orchestrate_refresh — not registered as an MCP
-        tool on this server to avoid name collision with the Server 1 version.
-        Server 1 (ambient-clinical-intelligence) exposes get_data_source_status
-        as the canonical MCP tool.
-        """
-        pool = await get_pool()
-        try:
-            async with pool.acquire() as conn:
-                track = await conn.fetchval(
-                    "SELECT value FROM system_config WHERE key = $1",
-                    "DATA_TRACK",
-                )
-                patients = await conn.fetchval(
-                    "SELECT COUNT(*) FROM patients"
-                )
-                freshness = await conn.fetch(
-                    """
-                    SELECT source_name,
-                           COUNT(*)                                   AS patient_count,
-                           MAX(last_ingested_at)                      AS latest_pull,
-                           SUM(CASE WHEN is_stale THEN 1 ELSE 0 END) AS stale_count
-                    FROM source_freshness
-                    GROUP BY source_name
-                    ORDER BY source_name
-                    """
-                )
-            rows = []
-            for r in freshness:
-                row = dict(r)
-                if row.get("latest_pull"):
-                    row["latest_pull"] = str(row["latest_pull"])
-                rows.append(row)
-            result = {
-                "active_track": track or "synthea",
-                "total_patients": int(patients),
-                "sources": rows,
-                "recommendation": (
-                    "HealthEx connected — offer to ingest real records"
-                    if track == "healthex"
-                    else "Running on synthetic data — say 'use healthex' to switch"
-                ),
-            }
-            return json.dumps(result, indent=2)
-        except Exception as e:
-            logger.error("get_data_source_status failed: %s", e)
             return f"Error: {e}"
 
     async def ingest_from_healthex(
@@ -1105,6 +1106,13 @@ def register(mcp: FastMCP):
         except Exception as e:
             logger.error("use_demo_data failed: %s", e)
             return f"Error: {e}"
+
+    _helpers.update({
+        "ingest_from_healthex": ingest_from_healthex,
+        "switch_data_track": switch_data_track,
+        "use_healthex": use_healthex,
+        "use_demo_data": use_demo_data,
+    })
 
     # ------------------------------------------------------------------
     # orchestrate_refresh — freshness-gated pipeline

@@ -42,20 +42,35 @@ def _get_fixture_file() -> str:
 def _get_skill_function(module, skill_name: str):
     """Extract the async tool function from a skill module.
 
-    Kept for ingestion_tools which still uses register() for its many tools.
+    Resolution order:
+    1. Module-level attribute (promoted helpers such as get_data_source_status).
+    2. _helpers registry populated by register() for inner non-MCP helpers.
+    3. @mcp.tool-decorated functions captured via MockMCP.
     """
+    if hasattr(module, skill_name):
+        return getattr(module, skill_name)
+
     captured = {}
 
     class MockMCP:
-        def tool(self, fn):
-            captured[fn.__name__] = fn
-            return fn
+        def tool(self, fn=None, **_kwargs):
+            if fn is not None:
+                captured[fn.__name__] = fn
+                return fn
+            def decorator(f):
+                captured[f.__name__] = f
+                return f
+            return decorator
 
     try:
         module.register(MockMCP())
     except Exception:
         pass
-    return captured.get(skill_name)
+
+    if skill_name in captured:
+        return captured[skill_name]
+
+    return getattr(module, "_helpers", {}).get(skill_name)
 
 
 # ── S1: generate_patient inserts row, returns OK string ──
@@ -260,7 +275,7 @@ async def test_check_data_freshness(db_pool, test_patient):
 @pytest.mark.asyncio
 async def test_get_data_source_status(db_pool):
     mod = importlib.import_module("skills.ingestion_tools")
-    fn = _get_skill_function(mod, "get_data_source_status")
+    fn = mod.get_data_source_status
     result = await fn()
     assert isinstance(result, str)
     data = json.loads(result)
