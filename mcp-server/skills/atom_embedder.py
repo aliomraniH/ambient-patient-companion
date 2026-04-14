@@ -1,30 +1,39 @@
 """
 atom_embedder.py — Pluggable 768-dim embedder for behavioral signal atoms.
 
-Backend priority (evaluated lazily at first embed call):
-  1. MedCPT — ncats/MedCPT-Article-Encoder (768-dim, biomedical BERT).
-       - If MEDCPT_MODEL_PATH env var points to an existing local directory,
-         that path is used directly (no download attempted).
-       - Otherwise, if MEDCPT_AUTO_DOWNLOAD != "false"/"0"/"no" (default: enabled),
-         the weights are downloaded once via huggingface_hub to
-         MEDCPT_CACHE_DIR (default ~/.cache/medcpt) and cached there.
-       - The loaded tokenizer + model are kept in process memory so
-         subsequent calls are fast (no repeated disk I/O).
-  2. OpenAI text-embedding-3-small — if OPENAI_API_KEY is set; output is
-     1536-dim, projected to 768 via a deterministic projection matrix.
-  3. Deterministic hash-based stub — always available; suitable for CI
-     and unit tests only (no clinical value).
-
-All embed calls are synchronous at the Python level (asyncpg calls
-happen around them). Embedding failures ALWAYS return None — never raise.
+Backend priority (resolved once per process, then cached):
+  1. HF Inference API — if HF_TOKEN (or HUGGINGFACE_TOKEN) is set and
+     MEDCPT_BACKEND is not "local".  Embedding runs in the cloud; no model
+     weights are stored locally and no GPU/RAM is consumed.  Uses the caller's
+     HuggingFace Pro quota and CDN rate limits.  Falls back to the next
+     backend if the model is not available on the serverless tier.
+  2. Local MedCPT — ncats/MedCPT-Article-Encoder (768-dim PubMedBERT).
+       a. MEDCPT_MODEL_PATH env var → use that directory directly.
+       b. HF standard cache (~/.cache/huggingface/hub) already populated →
+          return immediately (no network call).
+       c. Auto-download via snapshot_download (authenticated when HF_TOKEN is
+          present; skipped if MEDCPT_AUTO_DOWNLOAD=false).
+     The tokenizer + model are kept alive in process memory after first load
+     (low_cpu_mem_usage=True reduces peak RAM during loading).
+  3. OpenAI text-embedding-3-small — if OPENAI_API_KEY is set; 1536-dim output
+     is projected to 768 via a deterministic, fixed random matrix.
+  4. Deterministic hash stub — always available; suitable for CI and unit tests
+     only (no clinical value).
 
 Environment variables:
-  MEDCPT_MODEL_PATH     Path to a local MedCPT checkpoint directory.
-  MEDCPT_CACHE_DIR      Where to store auto-downloaded weights
-                        (default: ~/.cache/medcpt).
-  MEDCPT_AUTO_DOWNLOAD  Set to "false", "0", or "no" to disable auto-download
-                        (useful in air-gapped / strict CI environments).
-  OPENAI_API_KEY        Enables the OpenAI fallback backend.
+  HF_TOKEN / HUGGINGFACE_TOKEN   HuggingFace access token (Pro or free).
+                                  huggingface_hub also reads HF_TOKEN natively.
+  MEDCPT_BACKEND                 "api"   — always use Inference API.
+                                 "local" — always use local model.
+                                 "auto"  — (default) API when token present,
+                                           local otherwise.
+  MEDCPT_MODEL_PATH              Path to an existing local checkpoint dir.
+  MEDCPT_AUTO_DOWNLOAD           "false"/"0"/"no" disables auto-download
+                                 (air-gapped / strict CI environments).
+  OPENAI_API_KEY                 Enables the OpenAI fallback backend.
+
+All embed calls are synchronous at the Python level. Failures ALWAYS return
+None — never raise.
 """
 from __future__ import annotations
 
@@ -39,12 +48,70 @@ log = logging.getLogger(__name__)
 
 _EMBED_DIM = 768
 _MEDCPT_HF_REPO = "ncats/MedCPT-Article-Encoder"
-_DEFAULT_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "medcpt")
 
-# ─── MedCPT path resolution (cached) ─────────────────────────────────────────
+# ─── HuggingFace token ────────────────────────────────────────────────────────
 
-_UNRESOLVED = object()          # sentinel: path not yet looked up
-_medcpt_resolved_path: object = _UNRESOLVED  # str | None after first resolution
+def _get_hf_token() -> Optional[str]:
+    """Return the HF access token from env, or None."""
+    return (
+        os.environ.get("HF_TOKEN", "").strip()
+        or os.environ.get("HUGGINGFACE_TOKEN", "").strip()
+        or None
+    )
+
+
+# ─── HF Inference API backend ─────────────────────────────────────────────────
+
+def _hf_api_embed(text: str) -> list[float]:
+    """Embed *text* via the HuggingFace Inference API (no local weights needed).
+
+    Uses the caller's HF Pro quota.  normalize=True and truncate=True are
+    applied server-side so the returned vector is already L2-normalised and
+    fits within the model's 512-token limit.
+    """
+    from huggingface_hub import InferenceClient
+
+    token = _get_hf_token()
+    client = InferenceClient(token=token)
+    output = client.feature_extraction(
+        text,
+        model=_MEDCPT_HF_REPO,
+        normalize=True,
+        truncate=True,
+    )
+
+    # output is list[float] (pooled) or list[list[float]] (token-level).
+    return _to_768(output)
+
+
+def _to_768(output) -> list[float]:
+    """Coerce an Inference API feature-extraction response to a 768-dim vector.
+
+    Handles:
+      • 1-D list[float]  — already pooled; use directly.
+      • 2-D list[list[float]] — token-level; mean-pool then L2-normalise.
+    """
+    if not output:
+        raise ValueError("Empty feature-extraction response from HF API")
+
+    # 1-D pooled output
+    if isinstance(output[0], (int, float)):
+        vec = list(output)
+    else:
+        # 2-D token-level — mean-pool (skip [CLS] at 0 and [SEP] at -1)
+        tokens = output[1:-1] if len(output) > 2 else output
+        n, dim = len(tokens), len(tokens[0])
+        vec = [sum(tokens[t][d] for t in range(n)) / n for d in range(dim)]
+
+    # Ensure L2-normalised (server may or may not have done this)
+    norm = math.sqrt(sum(x * x for x in vec)) or 1.0
+    return [x / norm for x in vec]
+
+
+# ─── MedCPT local model — path resolution (cached) ───────────────────────────
+
+_UNRESOLVED = object()
+_medcpt_resolved_path: object = _UNRESOLVED
 
 
 def _auto_download_enabled() -> bool:
@@ -53,37 +120,25 @@ def _auto_download_enabled() -> bool:
 
 
 def _resolve_medcpt_path() -> Optional[str]:
-    """Return a local directory path to MedCPT weights, or None.
+    """Return a path to local MedCPT weights, downloading if needed.
 
-    Resolution order:
-      1. MEDCPT_MODEL_PATH env var (explicit, no download).
-      2. MEDCPT_CACHE_DIR or default cache already populated (fast re-use).
-      3. Auto-download via huggingface_hub (skipped if disabled).
-    Result is cached module-level so this only runs once per process.
+    Uses HF's standard content-addressed cache so the model is never
+    re-downloaded when it is already on disk.  The token (if available)
+    is passed to snapshot_download for authenticated CDN access.
     """
     global _medcpt_resolved_path
     if _medcpt_resolved_path is not _UNRESOLVED:
         return _medcpt_resolved_path  # type: ignore[return-value]
 
-    # 1. Explicit env var — must point at an existing directory.
+    # 1. Explicit local path.
     explicit = os.environ.get("MEDCPT_MODEL_PATH", "").strip()
     if explicit:
         if os.path.isdir(explicit):
-            log.info("atom_embedder: MedCPT loaded from MEDCPT_MODEL_PATH=%s", explicit)
+            log.info("atom_embedder: MedCPT from MEDCPT_MODEL_PATH=%s", explicit)
             _medcpt_resolved_path = explicit
             return explicit
-        log.warning(
-            "atom_embedder: MEDCPT_MODEL_PATH=%s is not a directory — ignoring", explicit
-        )
+        log.warning("atom_embedder: MEDCPT_MODEL_PATH=%s not found — ignoring", explicit)
 
-    # 2. Previously downloaded cache.
-    cache_dir = os.environ.get("MEDCPT_CACHE_DIR", "").strip() or _DEFAULT_CACHE_DIR
-    if os.path.isdir(cache_dir) and _looks_like_checkpoint(cache_dir):
-        log.info("atom_embedder: MedCPT cache hit at %s", cache_dir)
-        _medcpt_resolved_path = cache_dir
-        return cache_dir
-
-    # 3. Auto-download.
     if not _auto_download_enabled():
         log.debug("atom_embedder: MedCPT auto-download disabled")
         _medcpt_resolved_path = None
@@ -93,31 +148,24 @@ def _resolve_medcpt_path() -> Optional[str]:
         from huggingface_hub import snapshot_download
 
         log.info(
-            "atom_embedder: downloading MedCPT weights (%s) to %s — "
-            "set MEDCPT_AUTO_DOWNLOAD=false to skip",
-            _MEDCPT_HF_REPO, cache_dir,
+            "atom_embedder: downloading/verifying %s via HF cache "
+            "(set MEDCPT_AUTO_DOWNLOAD=false to skip)",
+            _MEDCPT_HF_REPO,
         )
+        # snapshot_download returns immediately from cache when already present.
+        # Passing token enables authenticated (CDN-accelerated) transfers.
         path = snapshot_download(
             repo_id=_MEDCPT_HF_REPO,
-            local_dir=cache_dir,
+            token=_get_hf_token(),
             ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "tf_model*"],
         )
-        log.info("atom_embedder: MedCPT weights ready at %s", path)
+        log.info("atom_embedder: MedCPT weights at %s", path)
         _medcpt_resolved_path = path
         return path
     except Exception as exc:
-        log.info(
-            "atom_embedder: MedCPT auto-download unavailable (%s) — "
-            "falling back to next backend",
-            exc,
-        )
+        log.info("atom_embedder: MedCPT local path unavailable (%s)", exc)
         _medcpt_resolved_path = None
         return None
-
-
-def _looks_like_checkpoint(path: str) -> bool:
-    """Heuristic: directory contains config.json (HF model marker)."""
-    return os.path.isfile(os.path.join(path, "config.json"))
 
 
 # ─── MedCPT in-process model cache ───────────────────────────────────────────
@@ -127,37 +175,85 @@ _medcpt_model = None
 
 
 def _load_medcpt(model_path: str):
-    """Load tokenizer + model from *model_path*, caching in process memory."""
+    """Load tokenizer + model once; keep them alive in process memory.
+
+    low_cpu_mem_usage=True streams weights into RAM instead of allocating a
+    contiguous buffer, materially reducing peak memory during loading.
+    """
     global _medcpt_tokenizer, _medcpt_model
     if _medcpt_model is not None:
         return _medcpt_tokenizer, _medcpt_model
 
     from transformers import AutoModel, AutoTokenizer
 
-    log.info("atom_embedder: loading MedCPT tokenizer + model from %s", model_path)
+    log.info("atom_embedder: loading MedCPT from %s (low_cpu_mem_usage=True)", model_path)
     _medcpt_tokenizer = AutoTokenizer.from_pretrained(model_path)
-    _medcpt_model = AutoModel.from_pretrained(model_path)
+    _medcpt_model = AutoModel.from_pretrained(model_path, low_cpu_mem_usage=True)
     _medcpt_model.eval()
-    log.info("atom_embedder: MedCPT model loaded and cached in process")
+    log.info("atom_embedder: MedCPT model cached in process memory")
     return _medcpt_tokenizer, _medcpt_model
+
+
+def _medcpt_local_embed(text: str, model_path: str) -> list[float]:
+    """Embed *text* using the locally cached MedCPT model."""
+    import torch
+
+    tokenizer, model = _load_medcpt(model_path)
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        max_length=512,
+        truncation=True,
+        padding=True,
+    )
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    hidden = outputs.last_hidden_state           # (1, seq_len, 768)
+    mask = inputs["attention_mask"].unsqueeze(-1).float()
+    pooled = (hidden * mask).sum(1) / mask.sum(1)
+    vec = pooled[0].tolist()
+
+    norm = math.sqrt(sum(x * x for x in vec)) or 1.0
+    return [x / norm for x in vec]
 
 
 # ─── Backend detection ────────────────────────────────────────────────────────
 
 def _detect_backend() -> tuple[str, Optional[str]]:
-    """Return (backend_name, medcpt_path_or_None)."""
+    """Return (backend_name, medcpt_local_path_or_None).
+
+    MEDCPT_BACKEND controls the selection:
+      "api"   — always Inference API (requires HF_TOKEN).
+      "local" — always local model.
+      "auto"  — (default) API when token is present, local otherwise.
+    """
+    mode = os.environ.get("MEDCPT_BACKEND", "auto").strip().lower()
+    token = _get_hf_token()
+
+    if mode == "api":
+        if token:
+            return "hf_api", None
+        log.warning("atom_embedder: MEDCPT_BACKEND=api but no HF_TOKEN — falling back")
+
+    if mode in ("auto", "api") and token:
+        return "hf_api", None
+
+    # Local MedCPT (explicit path or auto-download)
     medcpt_path = _resolve_medcpt_path()
     if medcpt_path:
-        return "medcpt", medcpt_path
+        return "medcpt_local", medcpt_path
+
     if os.environ.get("OPENAI_API_KEY", "").strip():
         return "openai", None
+
     return "stub", None
 
 
 # ─── Hash-based stub embedder ─────────────────────────────────────────────────
 
 def _stub_embed(text: str) -> list[float]:
-    """Deterministic 768-dim embedding from SHA-256 hash. Not clinically valid."""
+    """Deterministic 768-dim embedding from SHA-256. Not clinically valid."""
     digest = hashlib.sha256(text.encode("utf-8", errors="replace")).digest()
     extended = (digest * ((_EMBED_DIM // 32) + 1))[:_EMBED_DIM]
     raw = [struct.unpack("b", bytes([b]))[0] / 128.0 for b in extended]
@@ -172,7 +268,6 @@ _proj_matrix: list[list[float]] | None = None
 
 
 def _make_projection_matrix() -> list[list[float]]:
-    """Create a deterministic 1536×768 projection matrix."""
     import random
 
     rng = random.Random(_PROJ_SEED)
@@ -205,59 +300,52 @@ def _openai_embed(text: str) -> list[float]:
     return _project_1536_to_768(resp.data[0].embedding)
 
 
-# ─── MedCPT embedder ──────────────────────────────────────────────────────────
-
-def _medcpt_embed(text: str, model_path: str) -> list[float]:
-    """Embed *text* using the cached MedCPT model at *model_path*."""
-    import torch
-
-    tokenizer, model = _load_medcpt(model_path)
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        max_length=512,
-        truncation=True,
-        padding=True,
-    )
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    hidden = outputs.last_hidden_state           # (1, seq_len, 768)
-    mask = inputs["attention_mask"].unsqueeze(-1).float()
-    pooled = (hidden * mask).sum(1) / mask.sum(1)
-    vec = pooled[0].numpy().tolist()
-
-    norm = math.sqrt(sum(x * x for x in vec)) or 1.0
-    return [x / norm for x in vec]
-
-
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def embed_signal_value(text: str) -> Optional[list[float]]:
     """Embed a signal_value string. Returns None on any failure.
 
-    Backend is selected once per process (path resolution is cached).
-    The MedCPT model is also kept in memory after first load.
+    Backend and local path are resolved once per process (cached).
+    When using HF Inference API, a fallback to the next available backend
+    is attempted automatically on API errors so callers always get a result
+    if any backend is reachable.
     """
     if not text or not text.strip():
         return None
+
     backend, medcpt_path = _detect_backend()
     try:
-        if backend == "medcpt" and medcpt_path:
-            vec = _medcpt_embed(text, medcpt_path)
+        if backend == "hf_api":
+            try:
+                vec = _hf_api_embed(text)
+            except Exception as api_exc:
+                log.warning(
+                    "atom_embedder: HF API failed (%s) — trying local/OpenAI/stub",
+                    api_exc,
+                )
+                # Retry with the next viable backend without using the API.
+                local_path = _resolve_medcpt_path()
+                if local_path:
+                    vec = _medcpt_local_embed(text, local_path)
+                elif os.environ.get("OPENAI_API_KEY", "").strip():
+                    vec = _openai_embed(text)
+                else:
+                    vec = _stub_embed(text)
+        elif backend == "medcpt_local" and medcpt_path:
+            vec = _medcpt_local_embed(text, medcpt_path)
         elif backend == "openai":
             vec = _openai_embed(text)
         else:
             vec = _stub_embed(text)
+
         if len(vec) != _EMBED_DIM:
             log.warning(
                 "atom_embedder: expected %d dims, got %d (backend=%s) — returning None",
-                _EMBED_DIM,
-                len(vec),
-                backend,
+                _EMBED_DIM, len(vec), backend,
             )
             return None
         return vec
+
     except Exception as exc:
         log.warning("atom_embedder: embed failed (backend=%s): %s", backend, exc)
         return None
@@ -270,7 +358,7 @@ def active_backend() -> str:
 
 
 def reset_medcpt_cache() -> None:
-    """Evict the in-process MedCPT model cache (useful in tests)."""
+    """Evict in-process MedCPT caches (useful in tests that swap backends)."""
     global _medcpt_tokenizer, _medcpt_model, _medcpt_resolved_path
     _medcpt_tokenizer = None
     _medcpt_model = None
