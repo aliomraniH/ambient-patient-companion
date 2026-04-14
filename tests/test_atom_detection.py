@@ -274,7 +274,7 @@ class TestAtomEmbedder:
 
     def test_active_backend_returns_string(self):
         backend = active_backend()
-        assert backend in ("medcpt", "openai", "stub")
+        assert backend in ("hf_api", "medcpt_local", "openai", "stub")
 
     def test_embed_does_not_raise_on_long_text(self):
         long_text = "depression anxiety " * 1000

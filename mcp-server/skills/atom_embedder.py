@@ -47,7 +47,7 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 _EMBED_DIM = 768
-_MEDCPT_HF_REPO = "ncats/MedCPT-Article-Encoder"
+_MEDCPT_HF_REPO = "ncbi/MedCPT-Article-Encoder"
 
 # ─── HuggingFace token ────────────────────────────────────────────────────────
 
@@ -87,18 +87,35 @@ def _hf_api_embed(text: str) -> list[float]:
 def _to_768(output) -> list[float]:
     """Coerce an Inference API feature-extraction response to a 768-dim vector.
 
+    The InferenceClient may return numpy ndarrays; this function always works
+    with plain Python lists internally.
+
     Handles:
-      • 1-D list[float]  — already pooled; use directly.
-      • 2-D list[list[float]] — token-level; mean-pool then L2-normalise.
+      • 3-D ndarray/list [batch, seq_len, dim] — squeeze batch dim first.
+      • 2-D [seq_len, dim]  — token-level; mean-pool [CLS]/[SEP] stripped.
+      • 1-D [dim]           — already pooled; use directly.
     """
+    # Normalise numpy arrays → nested Python lists so bool checks work cleanly.
+    if hasattr(output, "tolist"):
+        output = output.tolist()
+
     if not output:
         raise ValueError("Empty feature-extraction response from HF API")
+
+    # Squeeze an accidental batch dimension: shape [1, seq_len, dim] → [seq_len, dim]
+    if (
+        isinstance(output, list)
+        and isinstance(output[0], list)
+        and isinstance(output[0][0], list)
+        and len(output) == 1
+    ):
+        output = output[0]
 
     # 1-D pooled output
     if isinstance(output[0], (int, float)):
         vec = list(output)
     else:
-        # 2-D token-level — mean-pool (skip [CLS] at 0 and [SEP] at -1)
+        # 2-D token-level — mean-pool (skip [CLS] at index 0 and [SEP] at -1)
         tokens = output[1:-1] if len(output) > 2 else output
         n, dim = len(tokens), len(tokens[0])
         vec = [sum(tokens[t][d] for t in range(n)) / n for d in range(dim)]
