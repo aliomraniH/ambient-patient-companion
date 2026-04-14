@@ -111,9 +111,10 @@ async def compile_patient_context(
 
         # Compute age from birth_date. The patients table has no `age`
         # column — age MUST be derived from birth_date at read time.
-        # If birth_date is NULL we warn loudly (BUG 2): the PatientContextPackage
-        # validator coerces age to 0, but age=0 silently weakens LLM reasoning,
-        # so operators need to know to re-ingest DOB.
+        # If birth_date is NULL, age stays None. PatientContextPackage._coerce_age
+        # passes None through unchanged so prompts render 'age unknown' rather
+        # than silently reasoning about a 0-year-old. Operators should re-ingest
+        # DOB (orchestrate_refresh(force=True)) to restore accurate age reasoning.
         age = None
         if patient["birth_date"]:
             bd = patient["birth_date"]

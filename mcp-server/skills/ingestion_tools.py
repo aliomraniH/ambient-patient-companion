@@ -15,6 +15,7 @@ from datetime import datetime
 from fastmcp import FastMCP
 
 from db.connection import get_pool
+from ingestion.pipeline import sanitize_for_jsonb
 from skills.base import get_data_track, log_skill_execution
 from transforms.fhir_to_schema import _parse_date
 
@@ -817,7 +818,7 @@ def register(mcp: FastMCP):
                                       retrieved_at = NOW(), processed = false
                         """,
                         patient_id, "healthex", resource_type,
-                        json.dumps(str(fhir_data)), _raw_id,
+                        json.dumps(sanitize_for_jsonb(str(fhir_data))), _raw_id,
                     )
 
                 # Route through adaptive_parse to extract structured rows
@@ -866,7 +867,7 @@ def register(mcp: FastMCP):
                                           processed = false
                             """,
                             patient_id, "healthex", resource_type,
-                            json.dumps(resource), fhir_id,
+                            json.dumps(sanitize_for_jsonb(resource)), fhir_id,
                         )
 
                 # Stage 5: normalize FHIR to schema rows
