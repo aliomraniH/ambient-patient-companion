@@ -71,18 +71,19 @@ async def fetch_behavioral_context(
     try:
         async with db_pool.acquire() as conn:
             phenotype = await conn.fetchrow(
-                "SELECT evidence_mode FROM behavioral_phenotypes "
-                "WHERE patient_id = $1::uuid",
+                "SELECT domain, phenotype_label, confidence "
+                "FROM behavioral_phenotypes "
+                "WHERE patient_id = $1::uuid "
+                "ORDER BY confidence DESC LIMIT 1",
                 patient_id,
             )
-            any_screen = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM behavioral_screenings "
-                "WHERE patient_id = $1::uuid)",
+            any_gaps = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM behavioral_screening_gaps "
+                "WHERE patient_id = $1::uuid AND status = 'open')",
                 patient_id,
             )
 
-        mode = (phenotype["evidence_mode"] if phenotype
-                else ("contextual" if any_screen else "contextual"))
+        mode = "primary_evidence" if any_gaps else "contextual"
 
         cards = await build_cards_from_pool(db_pool, patient_id, role=role)
         if not cards and not phenotype:

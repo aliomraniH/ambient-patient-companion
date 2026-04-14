@@ -206,11 +206,11 @@ async def _ingest_sdoh_qr(
 
     for screener_item in (sdoh_screener.items or []):
         ans_val = item_answers.get(screener_item.loinc_code, "")
-        flagged_text = (screener_item.flagged_if or "").lower()
+        flagged_text = (screener_item.positive_if or "").lower()
         if flagged_text and ans_val and (
             flagged_text.startswith("answer =") and ans_val.lower() in flagged_text
         ):
-            d = screener_item.domain
+            d = screener_item.sdoh_domain
             if d and d not in domains_flagged:
                 domains_flagged.append(d)
 

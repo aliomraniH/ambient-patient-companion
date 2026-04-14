@@ -16,6 +16,7 @@ Tools:
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime
 from typing import Optional
 
@@ -238,14 +239,37 @@ def register(mcp) -> None:
             else:
                 card_title = f"{domain.replace('_', ' ').title()} — {gap_type.replace('_', ' ')}"
 
+            instruments = gap.get("suggested_instruments", [])
+            actions = [
+                {
+                    "action_type": "order_screening",
+                    "label": f"Order {inst}",
+                    "instrument_key": inst,
+                }
+                for inst in instruments[:2]
+            ]
             card = {
+                "card_id": str(uuid.uuid4()),
+                "card_type": "gap_alert" if gap_type == "no_screening" else "stale_screening",
                 "domain": domain,
-                "card_title": card_title,
+                "title": card_title,
+                "subtitle": f"{severity_label.capitalize()} priority — {temporal_confidence} confidence",
+                "body_text": (
+                    f"No screening on record for {domain.replace('_', ' ')}."
+                    if gap_type == "no_screening"
+                    else f"Last screening for {domain.replace('_', ' ')} is out of date."
+                ),
+                "evidence": {
+                    "pressure_score": round(pressure, 3),
+                    "atom_count": gap.get("atom_count", 0),
+                    "phenotype_label": phenotype,
+                },
+                "actions": actions,
                 "gap_type": gap_type,
                 "phenotype_label": phenotype,
                 "pressure_score": pressure,
                 "temporal_confidence": temporal_confidence,
-                "suggested_instruments": gap.get("suggested_instruments", []),
+                "suggested_instruments": instruments,
                 "severity_label": severity_label,
                 "visible_to_roles": roles,
                 "show_to_roles": roles,
