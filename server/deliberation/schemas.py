@@ -202,3 +202,5 @@ class DeliberationResult(BaseModel):
     gap_artifacts: list[dict] = Field(default_factory=list)
     gap_summary: str = ""
     context_validation: dict = Field(default_factory=dict)
+    # Behavioral V2 section — list of domain cards from the gap detector
+    behavioral_section: list[dict] = Field(default_factory=list)

@@ -575,3 +575,42 @@ def _extract_routable_resources(raw: str) -> list[dict]:
             filtered.append(r)
 
     return filtered
+
+
+async def _ingest_observation_or_qr(
+    pool,
+    patient_id: str,
+    resource: dict,
+    source_id: str | None = None,
+) -> dict | None:
+    """Route a FHIR Observation or QuestionnaireResponse to the behavioral screening ingestor.
+
+    Returns the ingestor result dict if the resource matched a known screening
+    instrument, else None.  Non-fatal on any import or DB error.
+    """
+    resource_type = resource.get("resourceType", "")
+    if resource_type not in ("Observation", "QuestionnaireResponse"):
+        return None
+    try:
+        import sys
+        from pathlib import Path
+        _root = str(Path(__file__).resolve().parent.parent.parent.parent)
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        _skills_root = str(Path(__file__).resolve().parent.parent.parent.parent / "mcp-server")
+        if _skills_root not in sys.path:
+            sys.path.insert(0, _skills_root)
+        from skills.behavioral_screening_ingestor import ingest_observation_or_qr
+        source_type = (
+            "fhir_observation"
+            if resource_type == "Observation"
+            else "questionnaire_response"
+        )
+        return await ingest_observation_or_qr(
+            pool, patient_id, resource,
+            source_type=source_type,
+            source_id=source_id,
+        )
+    except Exception as exc:
+        log.debug("_ingest_observation_or_qr skipped (non-fatal): %s", exc)
+        return None

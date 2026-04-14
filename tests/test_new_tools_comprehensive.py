@@ -1473,7 +1473,7 @@ class TestDetectHealthexFormat:
 
 class TestToolCountIntegrity:
 
-    def test_total_unique_tools_is_52(self):
+    def test_total_unique_tools_is_62(self):
         import ast
         all_tools: set[str] = set()
 
@@ -1499,7 +1499,7 @@ class TestToolCountIntegrity:
                     if any("mcp.tool" in d for d in decs):
                         all_tools.add(node.name)
 
-        assert len(all_tools) == 52, f"Expected 52 unique tools, got {len(all_tools)}: {sorted(all_tools)}"
+        assert len(all_tools) == 62, f"Expected 62 unique tools, got {len(all_tools)}: {sorted(all_tools)}"
 
     def test_no_duplicate_tool_names(self):
         import ast

@@ -1,0 +1,313 @@
+"""
+behavioral_atoms.py — MCP tools for behavioral signal atom management.
+
+Tools (registered via register(mcp)):
+  - extract_and_store_behavioral_atoms
+  - get_behavioral_atom_pressure
+  - search_behavioral_atoms_cohort
+  - ingest_behavioral_screening_fhir
+  - run_behavioral_gap_detection
+  - get_behavioral_gaps
+  - refresh_behavioral_pressure_view
+"""
+from __future__ import annotations
+
+import json
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
+
+log = logging.getLogger(__name__)
+
+
+def register(mcp) -> None:
+    """Register all behavioral atom MCP tools."""
+
+    # ── extract_and_store_behavioral_atoms ────────────────────────────────────
+
+    @mcp.tool()
+    async def extract_and_store_behavioral_atoms(
+        patient_id: str,
+        text: str,
+        source_type: str = "conversation",
+        source_id: Optional[str] = None,
+        min_confidence: float = 0.60,
+    ) -> dict:
+        """Extract behavioral signal atoms from free text and persist them to the DB.
+
+        Runs the rule-based extractor, embeds each atom's signal_value using the
+        configured backend (MedCPT > OpenAI > stub), and writes rows to
+        behavioral_signal_atoms. Returns a summary of what was stored.
+
+        Args:
+            patient_id:     UUID of the patient.
+            text:           Free text to analyse (conversation turn, note, etc.).
+            source_type:    'conversation'|'clinical_note'|'checkin'.
+            source_id:      UUID of the originating row (optional).
+            min_confidence: Discard atoms below this confidence (default 0.60).
+
+        Returns:
+            {atoms_extracted, atoms_stored, signal_types_found, backend_used}
+        """
+        from db.connection import get_pool
+        from skills.behavioral_atom_extractor import extract_atoms_from_text
+        from skills.atom_embedder import embed_signal_value, active_backend
+
+        pool = await get_pool()
+        atoms = extract_atoms_from_text(
+            text,
+            source_type=source_type,
+            source_id=source_id,
+            min_confidence=min_confidence,
+        )
+
+        if not atoms:
+            return {
+                "atoms_extracted": 0,
+                "atoms_stored": 0,
+                "signal_types_found": [],
+                "backend_used": active_backend(),
+            }
+
+        stored = 0
+        signal_types_found = set()
+
+        async with pool.acquire() as conn:
+            for atom in atoms:
+                embedding = embed_signal_value(atom.signal_value)
+                embedding_str = (
+                    "[" + ",".join(str(x) for x in embedding) + "]"
+                    if embedding else None
+                )
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO behavioral_signal_atoms
+                            (id, patient_id, signal_type, signal_value, confidence,
+                             source_type, source_id, extracted_at, embedding, data_source)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8::vector,$9)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        str(uuid.uuid4()),
+                        patient_id,
+                        atom.signal_type,
+                        atom.signal_value,
+                        atom.confidence,
+                        atom.source_type,
+                        atom.source_id,
+                        embedding_str,
+                        "healthex",
+                    )
+                    stored += 1
+                    signal_types_found.add(atom.signal_type)
+                except Exception as e:
+                    log.warning("store atom failed: %s", e)
+
+        return {
+            "atoms_extracted": len(atoms),
+            "atoms_stored": stored,
+            "signal_types_found": sorted(signal_types_found),
+            "backend_used": active_backend(),
+        }
+
+    # ── get_behavioral_atom_pressure ──────────────────────────────────────────
+
+    @mcp.tool()
+    async def get_behavioral_atom_pressure(
+        patient_id: str,
+        signal_types: Optional[list[str]] = None,
+    ) -> dict:
+        """Read the current behavioral atom pressure for a patient.
+
+        Reads from the atom_pressure_scores materialized view (90-day window).
+        Returns pressure per signal_type with count and recency.
+
+        Args:
+            patient_id:   UUID of the patient.
+            signal_types: Filter to specific signal types (optional).
+
+        Returns:
+            {patient_id, pressure: {signal_type: {pressure_score, present_atom_count, last_atom_at}}}
+        """
+        from db.connection import get_pool
+        from skills.atom_vector_search import get_atom_pressure_for_patient
+
+        pool = await get_pool()
+        pressure = await get_atom_pressure_for_patient(pool, patient_id, signal_types)
+        return {"patient_id": patient_id, "pressure": pressure}
+
+    # ── search_behavioral_atoms_cohort ────────────────────────────────────────
+
+    @mcp.tool()
+    async def search_behavioral_atoms_cohort(
+        query_text: str,
+        signal_type: Optional[str] = None,
+        top_k: int = 10,
+        min_similarity: float = 0.75,
+        days_lookback: int = 90,
+    ) -> dict:
+        """Semantic similarity search over behavioral atoms for the full cohort.
+
+        PRIVACY: Returns aggregated statistics per (patient_id, signal_type) only.
+        Never returns raw signal_value text (PHI).
+
+        Args:
+            query_text:     Text to embed and search against.
+            signal_type:    Optional filter to one signal type.
+            top_k:          Max results.
+            min_similarity: Cosine similarity floor (default 0.75).
+            days_lookback:  Restrict to atoms from the past N days (default 90).
+
+        Returns:
+            {results: [{patient_id, signal_type, atom_count, avg_confidence, avg_similarity, last_seen_at}]}
+        """
+        from db.connection import get_pool
+        from skills.atom_embedder import embed_signal_value
+        from skills.atom_vector_search import search_similar_atoms
+
+        pool = await get_pool()
+        embedding = embed_signal_value(query_text)
+        if not embedding:
+            return {"results": [], "error": "embedding_failed"}
+
+        results = await search_similar_atoms(
+            pool,
+            query_embedding=embedding,
+            patient_id=None,  # cohort scope
+            signal_type=signal_type,
+            top_k=top_k,
+            min_similarity=min_similarity,
+            days_lookback=days_lookback,
+        )
+        # Ensure datetimes are serializable
+        for r in results:
+            for k, v in r.items():
+                if isinstance(v, datetime):
+                    r[k] = v.isoformat()
+        return {"results": results}
+
+    # ── ingest_behavioral_screening_fhir ─────────────────────────────────────
+
+    @mcp.tool()
+    async def ingest_behavioral_screening_fhir(
+        patient_id: str,
+        fhir_resource_json: str,
+        source_type: str = "fhir_observation",
+        source_id: Optional[str] = None,
+    ) -> dict:
+        """Parse a FHIR Observation or QuestionnaireResponse and write to behavioral_screenings.
+
+        Recognises instruments defined in the SCREENING_REGISTRY by their LOINC code.
+        Triggered critical items are detected and returned for downstream escalation.
+
+        Args:
+            patient_id:          UUID of the patient.
+            fhir_resource_json:  JSON string of the FHIR resource.
+            source_type:         'fhir_observation'|'questionnaire_response'.
+            source_id:           UUID of the raw_fhir_cache row (optional).
+
+        Returns:
+            {inserted, instrument_key, domain, score, band, critical_count, triggered_critical}
+        """
+        from db.connection import get_pool
+        from skills.behavioral_screening_ingestor import ingest_observation_or_qr
+
+        pool = await get_pool()
+        try:
+            resource = json.loads(fhir_resource_json)
+        except json.JSONDecodeError as e:
+            return {"inserted": False, "error": f"invalid JSON: {e}"}
+
+        result = await ingest_observation_or_qr(
+            pool, patient_id, resource, source_type, source_id,
+        )
+
+        if result is None:
+            return {"inserted": False, "reason": "loinc_not_in_registry"}
+
+        # Auto-resolve gap if one exists for this domain
+        from skills.behavioral_gap_detector import resolve_gap
+        if result.get("id"):
+            await resolve_gap(pool, patient_id, result["domain"], result["id"])
+
+        return {"inserted": True, **result}
+
+    # ── run_behavioral_gap_detection ──────────────────────────────────────────
+
+    @mcp.tool()
+    async def run_behavioral_gap_detection(
+        patient_id: str,
+        pressure_threshold: float = 0.40,
+    ) -> dict:
+        """Run the behavioral screening gap detector for a patient.
+
+        Identifies domains where atom pressure exceeds the threshold but no
+        qualifying screening has been administered within the lookback window.
+        Writes open gaps to behavioral_screening_gaps and upserts phenotype labels.
+
+        Args:
+            patient_id:         UUID of the patient.
+            pressure_threshold: Atom pressure score above which a gap is triggered.
+                                Default 0.40.
+
+        Returns:
+            {patient_id, gaps_detected, gaps: [{domain, gap_type, pressure_score,
+             temporal_confidence, suggested_instruments, phenotype_label}]}
+        """
+        from db.connection import get_pool
+        from skills.behavioral_gap_detector import run_gap_detector_for_patient
+
+        pool = await get_pool()
+        gaps = await run_gap_detector_for_patient(
+            pool, patient_id, pressure_threshold=pressure_threshold,
+        )
+        return {
+            "patient_id": patient_id,
+            "gaps_detected": len(gaps),
+            "gaps": gaps,
+        }
+
+    # ── get_behavioral_gaps ───────────────────────────────────────────────────
+
+    @mcp.tool()
+    async def get_behavioral_gaps(patient_id: str) -> dict:
+        """Retrieve open behavioral screening gaps for a patient.
+
+        Args:
+            patient_id: UUID of the patient.
+
+        Returns:
+            {patient_id, open_gap_count, gaps: [{domain, gap_type, pressure_score,
+             temporal_confidence, suggested_instruments, phenotype_label, triggered_at}]}
+        """
+        from db.connection import get_pool
+        from skills.behavioral_gap_detector import get_open_gaps_for_patient
+
+        pool = await get_pool()
+        gaps = await get_open_gaps_for_patient(pool, patient_id)
+        for g in gaps:
+            for k, v in g.items():
+                if isinstance(v, datetime):
+                    g[k] = v.isoformat()
+        return {
+            "patient_id": patient_id,
+            "open_gap_count": len(gaps),
+            "gaps": gaps,
+        }
+
+    # ── refresh_behavioral_pressure_view ─────────────────────────────────────
+
+    @mcp.tool()
+    async def refresh_behavioral_pressure_view() -> dict:
+        """Refresh the atom_pressure_scores materialized view.
+
+        Should be called after a batch of atoms are inserted or on a schedule.
+        Returns success status.
+        """
+        from db.connection import get_pool
+        from skills.atom_vector_search import refresh_atom_pressure_view
+
+        pool = await get_pool()
+        ok = await refresh_atom_pressure_view(pool)
+        return {"refreshed": ok}
