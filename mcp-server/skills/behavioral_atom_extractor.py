@@ -238,19 +238,36 @@ async def insert_atoms(conn, atoms: list[dict]) -> int:
 
     `conn` may be either an asyncpg connection or a pool — both expose
     `.execute(...)` with the same signature.
+
+    Each atom's `signal_value` is embedded (best-effort, via atom_embedder)
+    and written to the `embedding vector(768)` column so the pgvector HNSW
+    index can serve similarity queries. Embedding failures yield NULL
+    embeddings — the column accepts NULL and the HNSW index ignores them.
     """
     if not atoms:
         return 0
+
+    # Best-effort batch embed. Never raises — backend falls through to stub.
+    vectors: list[Optional[str]] = [None] * len(atoms)
+    try:
+        from skills.atom_embedder import embed_batch, format_for_pgvector
+        texts = [a.get("signal_value", "") for a in atoms]
+        embeds = embed_batch(texts)
+        if len(embeds) == len(atoms):
+            vectors = [format_for_pgvector(v) for v in embeds]
+    except Exception as e:
+        logger.warning("Atom embedding batch failed: %s", type(e).__name__)
+
     inserted = 0
-    for atom in atoms:
+    for atom, vec_literal in zip(atoms, vectors):
         try:
             await conn.execute(
                 """
                 INSERT INTO behavioral_signal_atoms
                     (patient_id, source_note_id, clinical_date, note_section,
                      signal_type, signal_value, assertion, confidence,
-                     extraction_model, extraction_prompt_ver)
-                VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                     extraction_model, extraction_prompt_ver, embedding)
+                VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::vector)
                 ON CONFLICT DO NOTHING
                 """,
                 atom["patient_id"],
@@ -263,6 +280,7 @@ async def insert_atoms(conn, atoms: list[dict]) -> int:
                 atom["confidence"],
                 atom["extraction_model"],
                 atom["extraction_prompt_ver"],
+                vec_literal,
             )
             inserted += 1
         except Exception as e:

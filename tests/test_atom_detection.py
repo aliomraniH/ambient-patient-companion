@@ -57,8 +57,9 @@ def test_temporal_confidence_function():
 
 
 def test_instrument_suggestion():
-    from skills.behavioral_gap_detector import suggest_instruments
-    instruments = suggest_instruments(
+    # v2: registry-driven suggestion now lives in screening_registry.
+    from skills.screening_registry import suggest_instruments_from_atoms
+    instruments = suggest_instruments_from_atoms(
         ["attention_switching", "device_checking", "anxiety_markers"]
     )
     assert len(instruments) > 0
@@ -80,65 +81,42 @@ def test_strip_fences_removes_markdown():
     assert _strip_fences(raw) == '[{"a": 1}]'
 
 
-def test_build_mode_b_section_patient_is_routing_only():
+def test_build_behavioral_section_returns_list_and_filters_role():
+    """v2: build_behavioral_section now returns a role-filtered card list."""
     from server.deliberation.behavioral_section_builder import build_behavioral_section
     ctx = {
         "mode": "primary_evidence",
-        "gap_type": "no_screening",
-        "temporal_confidence": "high",
-        "atoms": [{"signal_type": "device_checking"}],
-        "recommended_instruments": ["GAD-7"],
-        "atom_count": 1,
-        "headline": "No formal screening on file",
-    }
-    out = build_behavioral_section(ctx, role="patient")
-    assert out["type"] == "behavioral_routing"
-    assert out["show_atoms"] is False
-
-
-def test_build_mode_b_section_very_low_conf_suppressed_for_care_manager():
-    from server.deliberation.behavioral_section_builder import build_behavioral_section
-    ctx = {
-        "mode": "primary_evidence",
-        "temporal_confidence": "very_low",
-        "atoms": [{"signal_type": "device_checking"}],
-        "recommended_instruments": ["GAD-7"],
-        "atom_count": 1,
-    }
-    out = build_behavioral_section(ctx, role="care_manager")
-    assert out["type"] == "behavioral_gap_suppressed"
-
-
-def test_build_mode_b_section_pcp_receives_alert_with_suggestion():
-    from server.deliberation.behavioral_section_builder import build_behavioral_section
-    ctx = {
-        "mode": "primary_evidence",
-        "gap_type": "no_screening",
-        "temporal_confidence": "high",
-        "atoms": [{"signal_type": "attention_switching"}],
-        "recommended_instruments": ["ASRS-5", "GAD-7"],
-        "atom_count": 3,
-    }
-    out = build_behavioral_section(ctx, role="pcp")
-    assert out["type"] == "behavioral_screening_gap"
-    assert out["show_at_top"] is True
-    assert "ASRS-5" in out["pcp_note"] or "GAD-7" in out["pcp_note"]
-
-
-def test_build_mode_a_section_patient_strips_alert_and_atoms():
-    from server.deliberation.behavioral_section_builder import build_behavioral_section
-    ctx = {
-        "mode": "contextual",
-        "headline": "PHQ-9 = 14",
-        "latest_phq9": {"total_score": 14, "observation_date": "2025-10-01"},
-        "item_9_score": 1,
-        "historical_atoms": [{"signal_type": "low_affect"}],
-        "trajectory": "worsening",
+        "cards": [
+            {"card_id": "a1", "card_type": "screening_gap",
+             "title": "Dep", "domain": "depression", "priority": "high",
+             "show_to_roles": ["pcp", "care_manager"],
+             "body_text": "", "evidence": [], "actions": [],
+             "critical_flags": [], "temporal_confidence": "high",
+             "source": {}},
+            {"card_id": "a2", "card_type": "behavioral_routing",
+             "title": "Follow-up at next visit", "domain": "depression",
+             "priority": "medium", "show_to_roles": ["patient"],
+             "body_text": "", "evidence": [], "actions": [],
+             "critical_flags": [], "temporal_confidence": "high",
+             "source": {}},
+        ],
     }
     pt = build_behavioral_section(ctx, role="patient")
-    assert "item9_alert" not in pt
-    assert "historical_atoms" not in pt
-    assert pt["item9_flag"] is True  # flag present; alert suppressed
+    assert isinstance(pt, list) and len(pt) == 1
+    assert pt[0]["card_type"] == "behavioral_routing"
+
+    pcp = build_behavioral_section(ctx, role="pcp")
+    assert isinstance(pcp, list) and len(pcp) == 1
+    assert pcp[0]["card_type"] == "screening_gap"
+
+
+def test_deliberation_result_behavioral_section_is_list():
+    """The schema change — behavioral_section defaults to empty list."""
+    from server.deliberation.schemas import DeliberationResult
+    # DeliberationResult has many required fields; just validate the
+    # default factory produces a list for behavioral_section.
+    field = DeliberationResult.model_fields["behavioral_section"]
+    assert field.default_factory() == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,10 +134,13 @@ async def test_migration_tables_exist():
     import asyncpg
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     try:
+        # v2: behavioral_screenings + sdoh_screenings are the new tables;
+        # phq9_observations has been dropped by migration 011.
         for t in (
             "behavioral_signal_atoms",
             "behavioral_screening_gaps",
-            "phq9_observations",
+            "behavioral_screenings",
+            "sdoh_screenings",
             "behavioral_phenotypes",
         ):
             exists = await conn.fetchval(
@@ -183,13 +164,14 @@ async def test_migration_tables_exist():
 
 @db_required
 async def test_gap_resolution_transitions_mode():
-    """Insert a synthetic open gap, then resolve it; verify Mode B → Mode A."""
+    """Insert a synthetic open gap in the depression domain, ingest a
+    PHQ-9 via behavioral_screenings, and verify the domain gap resolves.
+    """
     import asyncpg
     from skills.behavioral_gap_detector import resolve_gap_on_new_screening
 
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     try:
-        # Ensure the synthetic patient exists in the patients table (no-op if so).
         exists = await conn.fetchval(
             "SELECT EXISTS(SELECT 1 FROM patients WHERE id = $1::uuid)",
             SYNTHETIC_PATIENT_ID,
@@ -201,6 +183,10 @@ async def test_gap_resolution_transitions_mode():
             "DELETE FROM behavioral_screening_gaps WHERE patient_id = $1::uuid",
             SYNTHETIC_PATIENT_ID,
         )
+        await conn.execute(
+            "DELETE FROM behavioral_screenings WHERE patient_id = $1::uuid",
+            SYNTHETIC_PATIENT_ID,
+        )
 
         gap_id = uuid.uuid4()
         await conn.execute(
@@ -208,24 +194,40 @@ async def test_gap_resolution_transitions_mode():
             INSERT INTO behavioral_screening_gaps (
                 id, patient_id, gap_type, atom_count,
                 atom_date_range, atom_ids, pressure_score,
-                output_mode, temporal_confidence
+                output_mode, temporal_confidence, triggered_domains
             ) VALUES (
                 $1::uuid, $2::uuid, 'no_screening', 1,
                 daterange('2016-01-01','2016-12-31','[]'),
-                '{}'::uuid[], 1.5, 'primary_evidence', 'low'
+                '{}'::uuid[], 1.5, 'primary_evidence', 'low',
+                ARRAY['depression']::text[]
             )
             """,
             gap_id, SYNTHETIC_PATIENT_ID,
         )
 
-        await resolve_gap_on_new_screening(
+        screening_id = uuid.uuid4()
+        await conn.execute(
+            """
+            INSERT INTO behavioral_screenings (
+                id, patient_id, instrument_key, instrument_name, domain,
+                observation_date, total_score, source
+            ) VALUES (
+                $1::uuid, $2::uuid, 'phq9', 'PHQ-9', 'depression',
+                $3, 6, 'test'
+            )
+            """,
+            screening_id, SYNTHETIC_PATIENT_ID, date.today(),
+        )
+
+        resolved = await resolve_gap_on_new_screening(
             conn=conn,
             patient_id=SYNTHETIC_PATIENT_ID,
-            new_screening_id=str(uuid.uuid4()),
+            new_screening_id=str(screening_id),
+            instrument_key="phq9",
+            domain="depression",
             screening_date=date.today(),
-            total_score=6,
-            item_9_score=1,
         )
+        assert resolved >= 1
 
         row = await conn.fetchrow(
             "SELECT status, output_mode FROM behavioral_screening_gaps "
@@ -247,6 +249,10 @@ async def test_gap_resolution_transitions_mode():
         # Cleanup
         await conn.execute(
             "DELETE FROM behavioral_screening_gaps WHERE patient_id = $1::uuid",
+            SYNTHETIC_PATIENT_ID,
+        )
+        await conn.execute(
+            "DELETE FROM behavioral_screenings WHERE patient_id = $1::uuid",
             SYNTHETIC_PATIENT_ID,
         )
     finally:

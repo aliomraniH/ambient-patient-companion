@@ -203,5 +203,7 @@ class DeliberationResult(BaseModel):
     gap_summary: str = ""
     context_validation: dict = Field(default_factory=dict)
     # ATOM-first behavioral detection — set by engine after synthesis via
-    # behavioral_section_builder. Empty dict when no phenotype exists.
-    behavioral_section: dict = Field(default_factory=dict)
+    # behavioral_section_builder. A role-filtered list of structured
+    # cards (screening_gap, positive_screen, critical_flag, sdoh_need,
+    # behavioral_routing). Empty list when no phenotype/cards exist.
+    behavioral_section: list[dict] = Field(default_factory=list)

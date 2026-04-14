@@ -3,13 +3,14 @@
 Exposes two tools on `ambient-skills-companion`:
 
 - get_behavioral_context(patient_id)
-    Returns mode-aware behavioral context (Mode A = contextual, Mode B =
-    primary_evidence) for SYNTHESIS / MIRA to render per-role output.
+    Multi-domain behavioral context. Returns all open gaps, every
+    screening on file, all triggered critical items, and the full
+    (bounded) atom history — consumed by MIRA / SYNTHESIS / the cards
+    tool to render per-role output.
 
 - run_behavioral_gap_check(patient_id)
-    Idempotent gap detector — safe to call on every note ingest.
-
-Reads behavioral_phenotypes.evidence_mode to route the response shape.
+    Idempotent domain-driven gap detector — safe to call on every note
+    ingest. Returns a list of newly detected domain gaps.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from fastmcp import FastMCP
 from db.connection import get_pool
 
 from skills.behavioral_gap_detector import run_gap_detector_for_patient
+from skills.screening_registry import DOMAINS
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
@@ -39,7 +41,6 @@ def _jsonable(value: Any) -> Any:
         return [_jsonable(v) for v in value]
     if isinstance(value, dict):
         return {k: _jsonable(v) for k, v in value.items()}
-    # asyncpg Range, UUID, and anything else → string
     return str(value)
 
 
@@ -50,17 +51,26 @@ def _row_to_dict(row) -> dict:
 
 
 async def get_behavioral_context(patient_id: str) -> str:
-    """Get mode-aware behavioral context for a patient.
+    """Return full multi-domain behavioral context for a patient.
 
-    Reads behavioral_phenotypes.evidence_mode and returns either:
-      - Mode B (primary_evidence): atoms + screening-gap as headline
-      - Mode A (contextual): PHQ-9 score + atoms as historical context
-
-    Args:
-        patient_id: UUID of the patient.
-
-    Returns:
-        JSON string with mode, evidence, recommendations, and framing hints.
+    Response shape:
+        {
+          "mode": "primary_evidence" | "contextual",
+          "open_gaps": [ {gap row} ],
+          "all_screenings": [ {screening row} ],
+          "domain_summary": {
+              domain_key: {
+                  latest_screening: {...} | null,
+                  is_overdue: bool,
+                  is_positive: bool,
+                  has_open_gap: bool,
+                  triggered_critical: [...]
+              }, ...
+          },
+          "critical_flags": [...],
+          "atoms": [...],
+          "pressure": {...}
+        }
     """
     try:
         pool = await get_pool()
@@ -69,89 +79,91 @@ async def get_behavioral_context(patient_id: str) -> str:
                 "SELECT * FROM behavioral_phenotypes WHERE patient_id = $1::uuid",
                 patient_id,
             )
-            if not phenotype:
-                return json.dumps({
-                    "status": "no_phenotype",
-                    "patient_id": patient_id,
-                    "mode": "contextual",
-                })
+            open_gaps = await conn.fetch(
+                """SELECT * FROM behavioral_screening_gaps
+                    WHERE patient_id = $1::uuid AND status = 'open'
+                    ORDER BY detected_at DESC""",
+                patient_id,
+            )
+            screenings = await conn.fetch(
+                """SELECT * FROM behavioral_screenings
+                    WHERE patient_id = $1::uuid
+                    ORDER BY observation_date DESC
+                    LIMIT 50""",
+                patient_id,
+            )
+            atoms = await conn.fetch(
+                """SELECT clinical_date, note_section, signal_type,
+                          signal_value, confidence
+                     FROM behavioral_signal_atoms
+                    WHERE patient_id = $1::uuid AND assertion = 'present'
+                    ORDER BY clinical_date DESC
+                    LIMIT 100""",
+                patient_id,
+            )
+            pressure = await conn.fetchrow(
+                "SELECT * FROM atom_pressure_scores WHERE patient_id = $1::uuid",
+                patient_id,
+            )
 
-            mode = phenotype["evidence_mode"] or "contextual"
-
-            if mode == "primary_evidence":
-                gap = await conn.fetchrow(
-                    "SELECT * FROM behavioral_screening_gaps "
-                    "WHERE patient_id = $1::uuid AND status = 'open' "
-                    "ORDER BY detected_at DESC LIMIT 1",
-                    patient_id,
+            # Build domain summary keyed by every domain the registry knows.
+            domain_summary: dict = {}
+            for d in DOMAINS:
+                latest_for_domain = next(
+                    (s for s in screenings if s["domain"] == d), None,
                 )
-                if gap:
-                    atom_rows = await conn.fetch(
-                        "SELECT clinical_date, note_section, signal_type, "
-                        "signal_value, confidence "
-                        "FROM behavioral_signal_atoms "
-                        "WHERE id = ANY($1::uuid[]) AND assertion = 'present' "
-                        "ORDER BY clinical_date ASC",
-                        gap["atom_ids"],
-                    )
-                    drange = gap["atom_date_range"]
-                    earliest = drange.lower if drange else None
-                    latest = drange.upper if drange else None
-                    return json.dumps({
-                        "mode": "primary_evidence",
-                        "status": "screening_gap_open",
-                        "gap_type": gap["gap_type"],
-                        "gap_id": str(gap["id"]),
-                        "temporal_confidence": gap["temporal_confidence"],
-                        "atom_count": gap["atom_count"],
-                        "atom_date_range": {
-                            "earliest": _jsonable(earliest),
-                            "latest": _jsonable(latest),
-                        },
-                        "atoms": [_row_to_dict(a) for a in atom_rows],
-                        "recommended_instruments": list(
-                            gap["recommended_instruments"] or []
-                        ),
-                        "headline": "No formal behavioral health screening on file",
-                        "framing": "clinical_gap",
-                        "patient_surface_allowed":
-                            gap["temporal_confidence"] not in ("low", "very_low"),
+                has_open_gap = any(
+                    d in (g["triggered_domains"] or []) for g in open_gaps
+                )
+                triggered: list = []
+                if latest_for_domain and latest_for_domain["triggered_critical"]:
+                    raw = latest_for_domain["triggered_critical"]
+                    if isinstance(raw, str):
+                        try:
+                            raw = json.loads(raw)
+                        except json.JSONDecodeError:
+                            raw = []
+                    triggered = raw
+                domain_summary[d] = {
+                    "latest_screening": _row_to_dict(latest_for_domain)
+                        if latest_for_domain else None,
+                    "has_open_gap": has_open_gap,
+                    "is_positive": bool(latest_for_domain and
+                                        latest_for_domain["is_positive"]),
+                    "triggered_critical": [_jsonable(t) for t in triggered],
+                }
+
+            # Collect ALL critical flags across screenings.
+            critical_flags: list = []
+            for s in screenings:
+                raw = s["triggered_critical"]
+                if not raw:
+                    continue
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                for item in raw:
+                    critical_flags.append({
+                        **_jsonable(item),
+                        "observation_date": _jsonable(s["observation_date"]),
                     })
-                # Fall through to Mode A if gap was resolved between reads.
-                mode = "contextual"
 
-            # Mode A: structured score exists, atoms as context.
-            latest_phq = await conn.fetchrow(
-                "SELECT * FROM phq9_observations "
-                "WHERE patient_id = $1::uuid "
-                "ORDER BY observation_date DESC LIMIT 1",
-                patient_id,
-            )
-            historical_atoms = await conn.fetch(
-                "SELECT clinical_date, note_section, signal_type, "
-                "signal_value, confidence "
-                "FROM behavioral_signal_atoms "
-                "WHERE patient_id = $1::uuid AND assertion = 'present' "
-                "ORDER BY clinical_date ASC",
-                patient_id,
-            )
+            mode = (phenotype["evidence_mode"] if phenotype
+                    else ("primary_evidence" if open_gaps else "contextual"))
 
-            phq_dict = _row_to_dict(latest_phq) if latest_phq else None
-            item_9 = latest_phq["item_9_score"] if latest_phq else None
-            phenotype_d = _row_to_dict(phenotype)
             return json.dumps({
-                "mode": "contextual",
-                "status": "screening_exists" if latest_phq else "no_screening",
-                "latest_phq9": phq_dict,
-                "item_9_score": item_9,
-                "item_9_flag": (item_9 or 0) >= 1 if latest_phq else False,
-                "trajectory": phenotype_d.get("trajectory_status"),
-                "temporal_confidence": phenotype_d.get("temporal_confidence"),
-                "historical_atoms": [_row_to_dict(a) for a in historical_atoms],
-                "atom_count": len(historical_atoms),
-                "framing": "score_with_history",
-                "headline": (f"PHQ-9 = {latest_phq['total_score']}"
-                             if latest_phq else "No PHQ-9 on file"),
+                "status": "ok",
+                "patient_id": patient_id,
+                "mode": mode,
+                "phenotype": _row_to_dict(phenotype) if phenotype else None,
+                "open_gaps": [_row_to_dict(g) for g in open_gaps],
+                "all_screenings": [_row_to_dict(s) for s in screenings],
+                "domain_summary": domain_summary,
+                "critical_flags": critical_flags,
+                "atoms": [_row_to_dict(a) for a in atoms],
+                "pressure": _row_to_dict(pressure) if pressure else None,
             })
     except Exception as e:
         logger.warning("get_behavioral_context failed: %s", type(e).__name__)
@@ -159,11 +171,10 @@ async def get_behavioral_context(patient_id: str) -> str:
 
 
 async def run_behavioral_gap_check(patient_id: str) -> str:
-    """Run the behavioral screening gap detector for one patient.
+    """Run the domain-driven behavioral screening gap detector.
 
     Idempotent — safe to call on every note ingest. Returns one of:
-      - gap_detected: newly created gap
-      - gap_already_open: a gap is already tracked for this patient
+      - gaps_detected: list of newly created gaps (each with domain key)
       - no_gap: no pressure/atom conditions met
 
     Args:
@@ -172,21 +183,13 @@ async def run_behavioral_gap_check(patient_id: str) -> str:
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            gap = await run_gap_detector_for_patient(conn, patient_id)
-            if gap:
-                return json.dumps({"status": "gap_detected", **gap})
-            existing = await conn.fetchrow(
-                "SELECT id, gap_type, detected_at "
-                "FROM behavioral_screening_gaps "
-                "WHERE patient_id = $1::uuid AND status = 'open'",
-                patient_id,
-            )
-            if existing:
+            gaps = await run_gap_detector_for_patient(conn, patient_id)
+            if gaps:
                 return json.dumps({
-                    "status": "gap_already_open",
-                    "gap_id": str(existing["id"]),
-                    "gap_type": existing["gap_type"],
-                    "detected_at": _jsonable(existing["detected_at"]),
+                    "status": "gaps_detected",
+                    "patient_id": patient_id,
+                    "count": len(gaps),
+                    "gaps": gaps,
                 })
             return json.dumps({"status": "no_gap", "patient_id": patient_id})
     except Exception as e:
