@@ -9,3 +9,8 @@ anthropic
 openai
 pydantic
 httpx
+# MedCPT embedding backend (optional — used only when MEDCPT_MODEL_PATH is set
+# or MEDCPT_AUTO_DOWNLOAD is enabled; stub fallback keeps CI green without these)
+huggingface_hub
+transformers
+torch
