@@ -21,7 +21,7 @@ async def search_similar_atoms(
     query_embedding: list[float],
     patient_id: Optional[str] = None,
     signal_type: Optional[str] = None,
-    top_k: int = 10,
+    top_k: int = 5,
     min_similarity: float = 0.75,
     days_lookback: int = 90,
 ) -> list[dict]:
@@ -180,10 +180,10 @@ def register(mcp) -> None:
         query_text: str,
         patient_id: Optional[str] = None,
         signal_type: Optional[str] = None,
-        top_k: int = 10,
+        top_k: int = 5,
         min_similarity: float = 0.75,
         days_lookback: int = 90,
-        scope: str = "cohort",
+        scope: str = "patient",
     ) -> dict:
         """Search behavioral signal atoms by semantic similarity to query_text.
 

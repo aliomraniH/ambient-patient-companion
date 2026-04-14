@@ -325,9 +325,14 @@ async def resolve_gap_on_new_screening(
     """Resolve open gap(s) for a domain given a newly ingested screening.
 
     Accepts a raw asyncpg connection (executor uses a single conn, not a pool).
-    `domain` is used to identify which gaps to close.
+    Either `domain` or `instrument_key` is required; when only `instrument_key`
+    is supplied the domain is derived from SCREENING_REGISTRY.
     Returns True if any rows were updated.
     """
+    if not domain and instrument_key:
+        inst = SCREENING_REGISTRY.get(instrument_key)
+        if inst:
+            domain = inst.domain
     if not domain:
         return False
     result = await conn.execute(
