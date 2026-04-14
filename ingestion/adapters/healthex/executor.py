@@ -11,10 +11,83 @@ All functions are async (asyncpg).
 
 import json
 import logging
+import sys
 import time
 import uuid as _uuid_mod
+from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# Allow importing behavioral library modules that live under mcp-server/skills/.
+# The ingestion server runs from the repo root; the skills modules are shared
+# Python libraries (they take a `conn` parameter and do not import the
+# mcp-server-specific `db.connection` module).
+_MCP_SKILLS_ROOT = Path(__file__).resolve().parents[3] / "mcp-server"
+if str(_MCP_SKILLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MCP_SKILLS_ROOT))
+
+
+async def _post_process_notes_for_atoms(pool, patient_id: str, batch_start_ts) -> int:
+    """Extract behavioral-signal atoms from clinical_notes just written in this
+    batch. Refreshes the pressure-score view and runs the gap detector when
+    atoms are inserted. Returns total atoms inserted.
+
+    Best-effort: never raises. Failures are logged without PHI.
+    """
+    try:
+        from skills.behavioral_atom_extractor import (
+            extract_atoms_from_note, insert_atoms,
+        )
+        from skills.behavioral_atom_pressure import refresh_pressure_scores
+        from skills.behavioral_gap_detector import run_gap_detector_for_patient
+    except Exception as e:
+        log.warning("behavioral libs unavailable: %s", type(e).__name__)
+        return 0
+
+    total_inserted = 0
+    try:
+        async with pool.acquire() as conn:
+            note_rows = await conn.fetch(
+                """SELECT id, note_text, note_date
+                     FROM clinical_notes
+                    WHERE patient_id = $1::uuid
+                      AND ingested_at >= $2
+                      AND note_text IS NOT NULL
+                      AND char_length(note_text) > 50
+                    ORDER BY ingested_at ASC""",
+                patient_id, batch_start_ts,
+            )
+            for row in note_rows:
+                note_date = row["note_date"]
+                if note_date is None:
+                    continue
+                # clinical_notes.note_date is TIMESTAMPTZ — take the date part.
+                from datetime import datetime as _dt
+                if isinstance(note_date, _dt):
+                    clinical_d = note_date.date()
+                else:
+                    clinical_d = note_date
+                atoms = await extract_atoms_from_note(
+                    note_text=row["note_text"],
+                    note_date=clinical_d,
+                    source_note_id=str(row["id"]),
+                    patient_id=patient_id,
+                )
+                if atoms:
+                    total_inserted += await insert_atoms(conn, atoms)
+
+            if total_inserted > 0:
+                await refresh_pressure_scores(conn)
+                try:
+                    # v2: returns list[dict] of newly opened domain gaps.
+                    gaps = await run_gap_detector_for_patient(conn, patient_id)
+                    if gaps:
+                        log.info("gap detector opened %d domain gap(s)", len(gaps))
+                except Exception as e:
+                    log.warning("gap detector failed: %s", type(e).__name__)
+    except Exception as e:
+        log.warning("atom post-processing failed: %s", type(e).__name__)
+    return total_inserted
 
 
 async def execute_pending_plans(
@@ -94,7 +167,9 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
             plan_id,
         )
 
+    from datetime import datetime, timezone
     start_ms = int(time.time() * 1000)
+    start_dt = datetime.now(timezone.utc)
 
     try:
         # Fetch raw text from cache
@@ -197,6 +272,32 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
         except Exception as e:
             log.warning("content router supplemental step failed: %s", e)
 
+        # Supplemental: extract behavioral signal atoms from any clinical_notes
+        # that were just written for this patient. Best-effort — never fails
+        # the ingestion plan.
+        atoms_written = 0
+        try:
+            if media_result.get("notes_written", 0) > 0:
+                atoms_written = await _post_process_notes_for_atoms(
+                    pool, patient_id, batch_start_ts=start_dt,
+                )
+        except Exception as e:
+            log.warning("behavioral atom extraction step failed: %s", type(e).__name__)
+
+        # Supplemental: route Observation + QuestionnaireResponse resources
+        # through the screening registry ingestor so formal screens land
+        # in behavioral_screenings / sdoh_screenings and open domain gaps
+        # get resolved on the same pass. Best-effort.
+        screening_summary: dict = {}
+        try:
+            if 'fhir_resources' in locals() and fhir_resources:
+                screening_summary = await _ingest_screening_resources(
+                    pool, fhir_resources, patient_id,
+                )
+        except Exception as e:
+            log.warning("screening-registry ingest step failed: %s",
+                        type(e).__name__)
+
         async with pool.acquire() as conn:
             await conn.execute(
                 """UPDATE ingestion_plans
@@ -219,6 +320,13 @@ async def _execute_one_plan(pool, plan: dict) -> dict:
             "strategy": tw_result.get("strategy", ""),
             "notes_written": media_result.get("notes_written", 0),
             "refs_written": media_result.get("refs_written", 0),
+            "behavioral_atoms_written": atoms_written,
+            "behavioral_screenings_written":
+                screening_summary.get("behavioral_screenings_written", 0),
+            "sdoh_screenings_written":
+                screening_summary.get("sdoh_screenings_written", 0),
+            "domains_resolved":
+                screening_summary.get("domains_resolved", []),
         }
 
     except Exception as e:
@@ -519,7 +627,85 @@ _WRITER_MAP = {
     "encounters": _write_encounter_rows,
 }
 
-_ROUTABLE_TYPES = {"Binary", "DocumentReference", "Observation", "Practitioner"}
+_ROUTABLE_TYPES = {"Binary", "DocumentReference", "Observation",
+                   "Practitioner", "QuestionnaireResponse"}
+
+
+async def _ingest_screening_resources(
+    pool, fhir_resources: list[dict], patient_id: str,
+) -> dict:
+    """Hook: feed Observation + QuestionnaireResponse resources through
+    the registry-driven screening ingestor (mcp-server/skills/
+    behavioral_screening_ingestor.py). For any row that writes to
+    behavioral_screenings, resolve the open gap in that domain. Also
+    dispatches SDoH instruments to sdoh_screenings.
+
+    Returns a summary dict. Best-effort — logs and swallows all errors.
+    """
+    summary = {
+        "behavioral_screenings_written": 0,
+        "sdoh_screenings_written": 0,
+        "domains_resolved": [],
+    }
+    if not fhir_resources:
+        return summary
+    try:
+        from skills.behavioral_screening_ingestor import ingest_fhir_resource
+        from skills.behavioral_gap_detector import (
+            resolve_gap_on_new_screening,
+            run_gap_detector_for_patient,
+        )
+    except Exception as e:
+        log.warning("screening ingestor libs unavailable: %s", type(e).__name__)
+        return summary
+
+    try:
+        async with pool.acquire() as conn:
+            for res in fhir_resources:
+                rtype = res.get("resourceType") if isinstance(res, dict) else None
+                if rtype not in ("Observation", "QuestionnaireResponse"):
+                    continue
+                try:
+                    r = await ingest_fhir_resource(conn, res, patient_id)
+                except Exception as e:
+                    log.warning("ingest_fhir_resource failed: %s", type(e).__name__)
+                    continue
+                if not r:
+                    continue
+                if r.get("behavioral_screening_id"):
+                    summary["behavioral_screenings_written"] += 1
+                    try:
+                        from datetime import date as _d
+                        obs_d = r.get("observation_date")
+                        try:
+                            obs_d = _d.fromisoformat(obs_d) if obs_d else _d.today()
+                        except Exception:
+                            obs_d = _d.today()
+                        await resolve_gap_on_new_screening(
+                            conn=conn,
+                            patient_id=patient_id,
+                            new_screening_id=r["behavioral_screening_id"],
+                            instrument_key=r.get("instrument_key"),
+                            domain=r.get("domain"),
+                            screening_date=obs_d,
+                        )
+                        summary["domains_resolved"].append(r.get("domain"))
+                    except Exception as e:
+                        log.warning("resolve_gap_on_new_screening failed: %s",
+                                    type(e).__name__)
+                if r.get("sdoh_screening_id"):
+                    summary["sdoh_screenings_written"] += 1
+
+            # Re-run the domain-driven detector so any domain now uncovered
+            # can get a fresh gap opened on the same pass.
+            try:
+                await run_gap_detector_for_patient(conn, patient_id)
+            except Exception as e:
+                log.warning("post-ingest gap detector failed: %s",
+                            type(e).__name__)
+    except Exception as e:
+        log.warning("screening-resource ingest failed: %s", type(e).__name__)
+    return summary
 
 
 def _extract_routable_resources(raw: str) -> list[dict]:
@@ -563,13 +749,34 @@ def _extract_routable_resources(raw: str) -> list[dict]:
             if isinstance(item, dict) and item.get("resourceType") in _ROUTABLE_TYPES:
                 resources.append(item)
 
-    # Only keep Observation resources that have valueString
-    # (numeric Observations are handled by the structured path)
+    # Only keep Observation resources that have valueString OR a LOINC
+    # code in the behavioral / SDoH registry (those carry total_score
+    # via valueQuantity / valueInteger and item scores via component[]).
+    # Numeric NON-behavioral Observations remain handled by the
+    # structured path.
+    try:
+        from skills.screening_registry import LOINC_TO_INSTRUMENT
+    except Exception:
+        LOINC_TO_INSTRUMENT = {}
+    try:
+        from skills.sdoh_registry import SDOH_LOINC_TO_INSTRUMENT
+    except Exception:
+        SDOH_LOINC_TO_INSTRUMENT = {}
+
+    def _is_screening_loinc(res: dict) -> bool:
+        for c in (res.get("code", {}) or {}).get("coding", []) or []:
+            code = c.get("code")
+            if not code:
+                continue
+            if code in LOINC_TO_INSTRUMENT or code in SDOH_LOINC_TO_INSTRUMENT:
+                return True
+        return False
+
     filtered = []
     for r in resources:
         rtype = r.get("resourceType", "")
         if rtype == "Observation":
-            if r.get("valueString"):
+            if r.get("valueString") or _is_screening_loinc(r):
                 filtered.append(r)
         else:
             filtered.append(r)

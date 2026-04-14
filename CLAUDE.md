@@ -680,3 +680,172 @@ The skill is auto-discovered by `load_skills(mcp)` on server startup — no regi
 ### Update DN tests
 
 After adding tools, update `tests/test_mcp_discovery.py` if tool counts are asserted anywhere.
+
+---
+
+## 15. Behavioral atom detection — dual-mode system (added 2026-04)
+
+### Architecture overview
+The behavioral health surface now has two output modes driven by
+`behavioral_phenotypes.evidence_mode`:
+
+- **primary_evidence (Mode B)** — ATOM signals exist, no formal PHQ-9 on
+  file. Atoms ARE the clinical evidence. A row is written to
+  `behavioral_screening_gaps` and the phenotype is upserted with
+  `evidence_mode = 'primary_evidence'`. MIRA / SYNTHESIS surface atoms
+  directly to the care team with a screening recommendation.
+- **contextual (Mode A)** — PHQ-9 exists. Atoms serve as historical
+  context that enriches score interpretation. Atoms never reach the
+  patient surface in this mode.
+
+### New tables (migration 010_behavioral_atoms.sql)
+- `behavioral_signal_atoms` — extracted behavioral signals from
+  clinical notes (pgvector embedding column for Phase 2 RAG)
+- `behavioral_screening_gaps` — tracks Mode B patients until a formal
+  screen arrives
+- `behavioral_phenotypes` — per-patient evidence_mode state
+- `phq9_observations` — structured PHQ-9 score history
+- `atom_pressure_scores` (materialized view) — time-decayed
+  (120-day half-life) signal density per patient
+
+### New MCP tools (ambient-skills-companion)
+- `get_behavioral_context(patient_id)` — returns mode-aware behavioral
+  context (`mode`, `atoms`, `recommended_instruments`, …)
+- `run_behavioral_gap_check(patient_id)` — idempotent gap-detector call;
+  safe to run on every note ingest
+
+### Deliberation engine integration
+- `server/deliberation/schemas.py::DeliberationResult.behavioral_section`
+  — new optional dict field populated post-synthesis.
+- `server/deliberation/behavioral_section_builder.py::augment_result_with_behavioral_section`
+  — called by `engine.py` between Phase 3.25 and Phase 3.5. Role is
+  derived from `context.deliberation_trigger`; defaults to `pcp`.
+
+### Ingestion pipeline hook
+- `ingestion/adapters/healthex/executor.py::_post_process_notes_for_atoms`
+  runs after `route_and_write_resources()`. Queries clinical_notes rows
+  newly written in this batch (by `ingested_at >= start_dt`), calls the
+  extractor, inserts atoms, refreshes the pressure-score view, and runs
+  the gap detector. Best-effort — never fails the ingest plan.
+
+### Key thresholds (configurable in `behavioral_gap_detector.py`)
+- `PRESSURE_THRESHOLD = 2.5` — minimum pressure score to trigger a gap
+- `MIN_ATOM_COUNT = 3` — minimum distinct present atoms required
+- `SCREENING_LOOKBACK_MONTHS = 12` — stale-screening window
+
+### Temporal confidence levels
+- `high` — latest atom < 1 year old
+- `moderate` — 1–3 years
+- `low` — 3–7 years
+- `very_low` — > 7 years (suppressed from patient surface; PCP opt-in required)
+
+### PHI rules for this module
+- `signal_value` (the raw extracted phrase) is stored in DB but NEVER logged
+- LLM extraction prompts contain NO patient identifiers — only the chunked
+  note text and a section-type hint. `patient_id` UUID is used for DB
+  linking only
+- Mode B outputs never reach the patient surface with clinical framing —
+  the patient builder emits a `behavioral_routing` message instead
+- `very_low` temporal-confidence atoms never reach the patient companion
+
+### PHQ-9 writer — not yet wired
+No PHQ-9 ingest code exists at time of introduction. `resolve_gap_on_new_screening`
+is implemented and ready; see the TODO marker in
+`mcp-server/skills/behavioral_gap_detector.py`. Until a PHQ-9 writer is added,
+`run_behavioral_gap_check` idempotency plus the nightly
+`run_batch_gap_detector` keep state consistent.
+
+## 16. Behavioral screening registry — v2 (added 2026-04)
+
+V2 of the ATOM-first module replaces every hardcoded instrument reference
+with calls against `mcp-server/skills/screening_registry.py` — a single
+data module (17 instruments, 11 domains). Gap detection is now
+**domain-based**: a gap fires only when atom pressure implicates a
+domain AND no instrument in that domain has been administered within the
+domain's lookback window. Multiple simultaneous domain gaps per patient
+are supported.
+
+### Domains and instruments (registry-driven)
+
+```
+domain                 instruments
+────────────────────────────────────────────────────────────────
+depression             phq9, phq2
+anxiety                gad7, gad2
+suicide_risk           cssrs, asq
+bipolar                mdq
+adhd                   asrs5
+trauma                 pcptsd5, pcl5
+alcohol_use            auditc (gender-aware cutoff), audit
+substance_use          dast10, cagetaid
+eating_disorder        scoff
+psychosis              prodromal_q
+cognitive              mini_cog
+```
+
+Adding a new instrument = one entry in `SCREENING_REGISTRY` + (optionally)
+a row in `DOMAIN_LOOKBACK_DAYS`. No downstream code changes required.
+
+### SDoH registry
+
+`mcp-server/skills/sdoh_registry.py` mirrors the screening registry for
+social-determinants instruments (PRAPARE, AHC-HRSN, Hunger Vital Sign,
+WHO-QoL-BREF subset, SEEK). Parsed by the same ingestor; written to
+`sdoh_screenings`. Item-level answers are preserved as JSONB.
+
+### Generic ingestion path
+
+`behavioral_screening_ingestor.py` accepts both **`Observation`** and
+**`QuestionnaireResponse`** resources, detects the instrument via LOINC
+panel, and extracts **item-level answers** (via `QuestionnaireResponse.item[]`
+linkIds or `Observation.component[]`). Both total scores and per-item
+answers are written — every agent downstream gets the individual answers,
+not just the total.
+
+### Migration 011 changes
+
+- New tables: `behavioral_screenings`, `sdoh_screenings`.
+- `behavioral_screening_gaps.triggered_domains TEXT[]` column added.
+- Legacy `phq9_observations` rows migrated → `behavioral_screenings` then
+  table dropped. Entire migration wrapped in one transaction.
+
+### Cards-based resurfacing
+
+`prepare_behavioral_cards(patient_id, role)` is the new MCP tool used by
+SYNTHESIS, MIRA, and any future UI agent. It returns a role-filtered
+`list[Card]` where every card is a flat dict (`card_id`, `card_type`,
+`title`, `subtitle`, `domain`, `priority`, `body_text`, `evidence`,
+`actions`, `critical_flags`, `temporal_confidence`, `show_to_roles`,
+`source`). Card types emitted: `screening_gap`, `positive_screen`,
+`critical_flag`, `sdoh_need`, `behavioral_routing` (patient-side companion
+to any Mode B gap).
+
+`DeliberationResult.behavioral_section` is now `list[dict]` (the card
+list); the old Mode-A/Mode-B nested dict shape is gone.
+
+### pgvector atom retrieval
+
+`behavioral_signal_atoms.embedding vector(768)` (from migration 010) is
+now populated at insert time via `atom_embedder.py`, which picks among
+MedCPT (if `MEDCPT_MODEL_PATH` is set), OpenAI `text-embedding-3-small`
+(projected to 768d, requires BAA for PHI), or a deterministic hash stub.
+
+New MCP tool: `search_similar_atoms(patient_id, query_text=..., top_k=...,
+scope='patient'|'cohort')`. Cohort scope redacts `signal_value` for
+cross-patient PHI safety.
+
+### Rules to remember
+
+- NEVER hardcode an instrument abbreviation outside `screening_registry.py`.
+  The `grep` guard in `tests/test_atom_detection.py` and the verification
+  step in the v2 plan enforce this.
+- `run_gap_detector_for_patient` now returns `list[dict]` — iterate.
+- `resolve_gap_on_new_screening(conn, patient_id, new_screening_id,
+  instrument_key, domain, screening_date)` takes **domain** and
+  **instrument_key**, not `total_score`/`item_9_score`.
+- Critical items (PHQ-9 item 9, C-SSRS item 3, ASQ item 4, etc.) are
+  defined in the registry and flagged automatically at ingest time into
+  `behavioral_screenings.triggered_critical` JSONB.
+- Card `show_to_roles` is the single source of truth for patient-surface
+  filtering. `very_low` temporal confidence + Mode B suppression happen
+  there — callers should not re-filter.
