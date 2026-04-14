@@ -1,206 +1,97 @@
-"""Post-synthesis behavioral section builder.
+"""Post-synthesis behavioral section builder — v2.
 
-Pure functions that shape a mode-aware behavioral section for a given role
-(pcp | care_manager | patient). Called by the synthesis stage after the
-monolithic synthesizer LLM call, so that Mode A / Mode B routing is
-deterministic rather than left to the LLM.
+Thin adapter that calls the card builder (`mcp-server/skills/
+behavioral_cards.py::build_cards_from_pool`) to assemble
+`result.behavioral_section` as a list of structured cards. Mode A /
+Mode B routing lives entirely inside the card builder; the deliberation
+engine only sees a card list.
 
-This module does NOT perform any LLM calls and does NOT touch the DB.
-The caller is expected to have already fetched the behavioral context
-(e.g. via the `get_behavioral_context` MCP tool on the skills server) and
-pass it in as a plain dict.
+Exposed functions:
+    build_behavioral_section(ctx, role)          — shape-compat shim
+    fetch_behavioral_context(db_pool, patient_id) — multi-domain context
+    augment_result_with_behavioral_section(...)  — called by engine
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Optional
+
+# Allow this module to import the skill-layer card builder. The skills
+# modules live under mcp-server/ which is not on sys.path by default when
+# the deliberation package is imported from the clinical server.
+_SKILLS_ROOT = Path(__file__).resolve().parents[2] / "mcp-server"
+if str(_SKILLS_ROOT) not in sys.path:
+    sys.path.append(str(_SKILLS_ROOT))
 
 
 def build_behavioral_section(
     behavioral_context: dict,
     role: str,
-) -> dict:
-    """Route to the appropriate mode-specific builder based on evidence_mode."""
-    mode = (behavioral_context or {}).get("mode", "contextual")
-    temporal_conf = behavioral_context.get("temporal_confidence") or "low"
+) -> list[dict]:
+    """Legacy shim — builds cards from an already-fetched context dict.
 
-    if mode == "primary_evidence":
-        return _build_mode_b_section(behavioral_context, role, temporal_conf)
-    return _build_mode_a_section(behavioral_context, role)
+    Retained for callers that prefer the pure-function entry point
+    (e.g. unit tests). Extracts the pre-built `cards` field from the
+    context if present, otherwise returns an empty list. The cards are
+    the single source of truth; role filtering is applied here.
+    """
+    if not behavioral_context:
+        return []
+    cards = behavioral_context.get("cards") or []
+    if not isinstance(cards, list):
+        return []
+    if not role:
+        return cards
+    return [c for c in cards
+            if role in (c.get("show_to_roles") or [])]
 
 
-def _build_mode_b_section(ctx: dict, role: str, temporal_conf: str) -> dict:
-    """Mode B: atoms are the primary clinical evidence (no formal screen)."""
-    if role == "patient":
-        return {
-            "type": "behavioral_routing",
-            "message": "Your care team has some questions to follow up on at your next visit.",
-            "action": "route_to_provider",
-            "show_atoms": False,
+async def fetch_behavioral_context(
+    db_pool, patient_id: str, role: str = "pcp",
+) -> Optional[dict]:
+    """Return a behavioral context dict with pre-built cards.
+
+    Shape:
+        {
+          "mode": "primary_evidence" | "contextual",
+          "cards": [ {card}, ... ],
         }
 
-    if temporal_conf == "very_low" and role != "pcp":
-        return {
-            "type": "behavioral_gap_suppressed",
-            "reason": "historical_signal_age",
-            "note": "Behavioral atoms >7 years old. PCP opt-in required to surface.",
-        }
-
-    atoms = ctx.get("atoms", []) or []
-    instruments = ctx.get("recommended_instruments", []) or []
-
-    base: dict = {
-        "type": "behavioral_screening_gap",
-        "headline": ctx.get("headline", "No formal behavioral health screening on file"),
-        "gap_type": ctx.get("gap_type"),
-        "temporal_confidence": temporal_conf,
-        "atoms": atoms,
-        "recommended_instruments": instruments,
-        "atom_count": ctx.get("atom_count", 0),
-        "atom_date_range": ctx.get("atom_date_range"),
-    }
-
-    if role == "pcp":
-        suggestion = ", ".join(instruments[:2]) if instruments else "PHQ-9"
-        base["pcp_note"] = (
-            "These behavioral observations were documented in clinical notes "
-            "but no formal behavioral health screening is on file. "
-            f"Consider administering {suggestion} at next visit."
-        )
-        base["show_at_top"] = True
-
-    elif role == "care_manager":
-        base["action_required"] = {
-            "type": "outreach_task",
-            "description": (
-                "Confirm whether behavioral screening has been administered "
-                "outside this system. Schedule if not."
-            ),
-            "priority": "high" if temporal_conf in ("high", "moderate") else "medium",
-        }
-
-    return base
-
-
-def _build_mode_a_section(ctx: dict, role: str) -> dict:
-    """Mode A: structured score exists; atoms enrich interpretation."""
-    phq = ctx.get("latest_phq9")
-    item9 = ctx.get("item_9_score") or 0
-    atoms = ctx.get("historical_atoms", []) or []
-
-    base: dict = {
-        "type": "behavioral_score_with_context",
-        "headline": ctx.get("headline"),
-        "phq9_total": phq["total_score"] if phq else None,
-        "item9_score": item9,
-        "item9_flag": item9 >= 1,
-        "trajectory": ctx.get("trajectory"),
-        "historical_atoms": atoms,
-        "atom_count": len(atoms),
-    }
-
-    if item9 >= 1 and role != "patient":
-        last_date = (phq or {}).get("observation_date", "unknown")
-        base["item9_alert"] = (
-            "PHQ-9 item 9 (passive SI) = 1 on most recent screen. "
-            f"Clinical assessment required. Last documented: {last_date}."
-        )
-
-    if atoms and role in ("pcp", "care_manager"):
-        base["context_note"] = (
-            f"{len(atoms)} historical behavioral signal(s) found in clinical notes. "
-            "Score should be interpreted in light of this longitudinal pattern."
-        )
-
-    if role == "patient":
-        base.pop("historical_atoms", None)
-        base.pop("context_note", None)
-
-    return base
-
-
-async def fetch_behavioral_context(db_pool, patient_id: str) -> Optional[dict]:
-    """Read behavioral_phenotypes → assemble a context dict equivalent to what
-    the `get_behavioral_context` MCP tool returns.
-
-    Separated from the skills server so the deliberation engine can call it
-    without a cross-process MCP round-trip. Returns None if no phenotype or
-    on any fetch error — always safe to pass to `build_behavioral_section`.
+    Returns None when no phenotype exists or on any fetch error — always
+    safe to pass to `build_behavioral_section`.
     """
     if db_pool is None or not patient_id:
         return None
     try:
+        from skills.behavioral_cards import build_cards_from_pool  # type: ignore
+    except Exception:
+        return None
+
+    try:
         async with db_pool.acquire() as conn:
             phenotype = await conn.fetchrow(
-                "SELECT * FROM behavioral_phenotypes WHERE patient_id = $1::uuid",
+                "SELECT evidence_mode FROM behavioral_phenotypes "
+                "WHERE patient_id = $1::uuid",
                 patient_id,
             )
-            if not phenotype:
-                return None
-            mode = phenotype["evidence_mode"] or "contextual"
+            any_screen = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM behavioral_screenings "
+                "WHERE patient_id = $1::uuid)",
+                patient_id,
+            )
 
-            if mode == "primary_evidence":
-                gap = await conn.fetchrow(
-                    "SELECT * FROM behavioral_screening_gaps "
-                    "WHERE patient_id = $1::uuid AND status = 'open' "
-                    "ORDER BY detected_at DESC LIMIT 1",
-                    patient_id,
-                )
-                if gap:
-                    atom_rows = await conn.fetch(
-                        "SELECT clinical_date, note_section, signal_type, "
-                        "signal_value, confidence "
-                        "FROM behavioral_signal_atoms "
-                        "WHERE id = ANY($1::uuid[]) AND assertion = 'present' "
-                        "ORDER BY clinical_date ASC",
-                        gap["atom_ids"],
-                    )
-                    drange = gap["atom_date_range"]
-                    return {
-                        "mode": "primary_evidence",
-                        "status": "screening_gap_open",
-                        "gap_type": gap["gap_type"],
-                        "gap_id": str(gap["id"]),
-                        "temporal_confidence": gap["temporal_confidence"],
-                        "atom_count": gap["atom_count"],
-                        "atom_date_range": {
-                            "earliest": drange.lower.isoformat() if drange and drange.lower else None,
-                            "latest": drange.upper.isoformat() if drange and drange.upper else None,
-                        },
-                        "atoms": [dict(a) for a in atom_rows],
-                        "recommended_instruments": list(
-                            gap["recommended_instruments"] or []
-                        ),
-                        "headline": "No formal behavioral health screening on file",
-                    }
-                mode = "contextual"
+        mode = (phenotype["evidence_mode"] if phenotype
+                else ("contextual" if any_screen else "contextual"))
 
-            latest_phq = await conn.fetchrow(
-                "SELECT * FROM phq9_observations "
-                "WHERE patient_id = $1::uuid "
-                "ORDER BY observation_date DESC LIMIT 1",
-                patient_id,
-            )
-            historical_atoms = await conn.fetch(
-                "SELECT clinical_date, note_section, signal_type, "
-                "signal_value, confidence "
-                "FROM behavioral_signal_atoms "
-                "WHERE patient_id = $1::uuid AND assertion = 'present' "
-                "ORDER BY clinical_date ASC",
-                patient_id,
-            )
-            return {
-                "mode": "contextual",
-                "status": "screening_exists" if latest_phq else "no_screening",
-                "latest_phq9": dict(latest_phq) if latest_phq else None,
-                "item_9_score": latest_phq["item_9_score"] if latest_phq else None,
-                "item_9_flag": ((latest_phq["item_9_score"] or 0) >= 1) if latest_phq else False,
-                "trajectory": phenotype["trajectory_status"],
-                "temporal_confidence": phenotype["temporal_confidence"],
-                "historical_atoms": [dict(a) for a in historical_atoms],
-                "atom_count": len(historical_atoms),
-                "headline": (f"PHQ-9 = {latest_phq['total_score']}"
-                             if latest_phq else "No PHQ-9 on file"),
-            }
+        cards = await build_cards_from_pool(db_pool, patient_id, role=role)
+        if not cards and not phenotype:
+            return None
+
+        return {
+            "mode": mode,
+            "cards": cards,
+        }
     except Exception:
         return None
 
@@ -213,13 +104,14 @@ async def augment_result_with_behavioral_section(
 ) -> None:
     """Populate `result.behavioral_section` in-place on a DeliberationResult.
 
+    `behavioral_section` is now a **list of cards** (may be empty).
     Safe no-op when no phenotype exists or on any fetch failure.
     """
     try:
-        ctx = await fetch_behavioral_context(db_pool, patient_id)
+        ctx = await fetch_behavioral_context(db_pool, patient_id, role=role)
         if not ctx:
             return
-        result.behavioral_section = build_behavioral_section(ctx, role)
+        result.behavioral_section = ctx.get("cards") or []
     except Exception:
         # Never let behavioral augmentation break deliberation.
         return
