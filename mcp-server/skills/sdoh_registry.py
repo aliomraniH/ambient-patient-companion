@@ -141,6 +141,13 @@ def get_screener_for_item_loinc(loinc_code: str) -> "SDoHScreener | None":
     return SDOH_REGISTRY.get(key) if key else None
 
 
+SDOH_LOINC_TO_INSTRUMENT: dict[str, str] = {
+    screener.panel_loinc: key
+    for key, screener in SDOH_REGISTRY.items()
+    if screener.panel_loinc
+}
+
+
 def register(mcp) -> None:
     """No-op: sdoh_registry is a pure data module."""
     pass

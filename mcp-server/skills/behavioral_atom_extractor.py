@@ -26,6 +26,7 @@ class ExtractedAtom:
     confidence: float           # 0.0 – 1.0
     source_type: str            # 'conversation'|'clinical_note'|'checkin'
     source_id: Optional[str]    # UUID of source row, if available
+    patient_id: Optional[str] = None  # UUID of patient — required for DB insert
 
 
 # ─── Signal patterns ──────────────────────────────────────────────────────────
@@ -248,46 +249,74 @@ async def extract_atoms_from_note(
 ) -> list[ExtractedAtom]:
     """Extract atoms from a clinical note.
 
-    Thin wrapper over extract_atoms_from_text. note_date and patient_id are
-    accepted for API compatibility (patient_id is not embedded in ExtractedAtom
-    to keep the extraction layer PHI-minimal).
+    Populates patient_id on each atom so insert_atoms can persist it.
+    note_date is accepted for API compatibility; not stored in the atom struct.
     """
-    return extract_atoms_from_text(
+    atoms = extract_atoms_from_text(
         text=note_text,
         source_type="clinical_note",
         source_id=source_note_id,
     )
+    if patient_id:
+        for atom in atoms:
+            atom.patient_id = patient_id
+    return atoms
 
 
 async def insert_atoms(conn, atoms: list[ExtractedAtom]) -> int:
     """Insert a list of ExtractedAtom into behavioral_signal_atoms.
 
-    Uses the asyncpg connection directly (not a pool). Skips rows whose
-    signal_value exceeds 2000 chars. Returns number of rows inserted.
+    Uses an asyncpg connection directly. Attempts to embed signal_value
+    before insert using atom_embedder; falls back to NULL embedding on
+    any failure (never raises). Returns number of rows inserted.
     """
     if not atoms:
         return 0
 
+    import logging as _log_mod
+    _log = _log_mod.getLogger(__name__)
+
+    try:
+        from skills.atom_embedder import embed_signal_value as _embed
+        _can_embed = True
+    except Exception:
+        _embed = None
+        _can_embed = False
+
     inserted = 0
     for atom in atoms:
         try:
+            embedding: Optional[list[float]] = None
+            if _can_embed and _embed is not None:
+                try:
+                    embedding = _embed(atom.signal_value[:500])
+                except Exception:
+                    pass
+
+            embed_str = (
+                "[" + ",".join(str(x) for x in embedding) + "]"
+                if embedding else None
+            )
+
             await conn.execute(
                 """
                 INSERT INTO behavioral_signal_atoms
-                    (signal_type, signal_value, confidence, source_type, source_id)
-                VALUES ($1, $2, $3, $4, $5::uuid)
+                    (patient_id, signal_type, signal_value, confidence,
+                     source_type, source_id, embedding)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7::vector)
                 ON CONFLICT DO NOTHING
                 """,
+                atom.patient_id,
                 atom.signal_type,
                 atom.signal_value[:2000],
                 atom.confidence,
                 atom.source_type,
                 atom.source_id,
+                embed_str,
             )
             inserted += 1
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(
+            _log.warning(
                 "insert_atoms: skipped atom (%s): %s", atom.signal_type, type(e).__name__
             )
     return inserted

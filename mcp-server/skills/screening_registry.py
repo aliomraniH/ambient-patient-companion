@@ -502,6 +502,13 @@ def get_triggered_critical_items(
     ]
 
 
+LOINC_TO_INSTRUMENT: dict[str, str] = {
+    inst.loinc_code: key
+    for key, inst in SCREENING_REGISTRY.items()
+    if inst.loinc_code
+}
+
+
 def register(mcp) -> None:
     """No-op: screening_registry is a pure data module. Skill loader ignores it."""
     pass

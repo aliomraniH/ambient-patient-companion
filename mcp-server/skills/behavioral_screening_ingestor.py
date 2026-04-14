@@ -162,12 +162,92 @@ async def ingest_fhir_observation(
 
     return {
         "id": row_id,
+        "behavioral_screening_id": row_id,
         "instrument_key": instrument.key,
         "domain": instrument.domain,
         "score": score,
         "band": band_label,
         "critical_count": len(triggered_critical),
         "triggered_critical": triggered_critical,
+        "observation_date": (
+            administered_at.date().isoformat()
+            if hasattr(administered_at, "date") else None
+        ),
+    }
+
+
+async def _ingest_sdoh_qr(
+    pool,
+    patient_id: str,
+    resource: dict,
+    loinc_code: str,
+    sdoh_screener,
+    source_type: str,
+    source_id: Optional[str],
+    data_source: str,
+) -> dict:
+    """Write a SDoH QuestionnaireResponse to sdoh_screenings.
+
+    Returns a summary dict with sdoh_screening_id.
+    """
+    import json as _json
+    import re
+
+    item_answers: dict[str, str] = {}
+    domains_flagged: list[str] = []
+    for item in resource.get("item", []):
+        link_id = item.get("linkId", "")
+        for ans in item.get("answer", []):
+            for val_key in ("valueString", "valueCoding", "valueBoolean", "valueInteger"):
+                v = ans.get(val_key)
+                if v is not None:
+                    item_answers[link_id] = str(v)
+                    break
+
+    for screener_item in (sdoh_screener.items or []):
+        ans_val = item_answers.get(screener_item.loinc_code, "")
+        flagged_text = (screener_item.flagged_if or "").lower()
+        if flagged_text and ans_val and (
+            flagged_text.startswith("answer =") and ans_val.lower() in flagged_text
+        ):
+            d = screener_item.domain
+            if d and d not in domains_flagged:
+                domains_flagged.append(d)
+
+    authored_at = _parse_datetime(resource.get("authored")) or datetime.now(timezone.utc)
+    row_id = str(uuid.uuid4())
+
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                """
+                INSERT INTO sdoh_screenings
+                    (id, patient_id, screener_key, panel_loinc, domains_flagged,
+                     item_answers, administered_at, source_type, source_id, data_source)
+                VALUES ($1::uuid, $2::uuid, $3, $4, $5::text[], $6::jsonb,
+                        $7, $8, $9::uuid, $10)
+                ON CONFLICT DO NOTHING
+                """,
+                row_id, patient_id, sdoh_screener.key, loinc_code,
+                domains_flagged,
+                _json.dumps(item_answers),
+                authored_at, source_type, source_id, data_source,
+            )
+        except Exception:
+            pass
+
+    log.info(
+        "_ingest_sdoh_qr: patient=%s screener=%s domains_flagged=%s",
+        patient_id, sdoh_screener.key, domains_flagged,
+    )
+
+    return {
+        "id": row_id,
+        "sdoh_screening_id": row_id,
+        "screener_key": sdoh_screener.key,
+        "panel_loinc": loinc_code,
+        "domains_flagged": domains_flagged,
+        "observation_date": authored_at.date().isoformat(),
     }
 
 
@@ -208,6 +288,16 @@ async def ingest_fhir_questionnaire_response(
 
     instrument = get_instrument_for_loinc(loinc_code)
     if not instrument:
+        try:
+            from skills.sdoh_registry import get_screener_for_panel_loinc
+            sdoh_screener = get_screener_for_panel_loinc(loinc_code)
+        except Exception:
+            sdoh_screener = None
+        if sdoh_screener:
+            return await _ingest_sdoh_qr(
+                pool, patient_id, resource, loinc_code, sdoh_screener,
+                source_type, source_id, data_source,
+            )
         return None
 
     # Parse item-level answers (QR uses nested items)
@@ -270,12 +360,17 @@ async def ingest_fhir_questionnaire_response(
 
     return {
         "id": row_id,
+        "behavioral_screening_id": row_id,
         "instrument_key": instrument.key,
         "domain": instrument.domain,
         "score": score,
         "band": band_label,
         "critical_count": len(triggered_critical),
         "triggered_critical": triggered_critical,
+        "observation_date": (
+            authored_at.date().isoformat()
+            if hasattr(authored_at, "date") else None
+        ),
     }
 
 

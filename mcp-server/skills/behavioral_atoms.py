@@ -311,3 +311,75 @@ def register(mcp) -> None:
         pool = await get_pool()
         ok = await refresh_atom_pressure_view(pool)
         return {"refreshed": ok}
+
+
+async def get_behavioral_context(
+    db_pool,
+    patient_id: str,
+    role: str = "pcp",
+) -> Optional[dict]:
+    """Return a behavioral context dict for use by the deliberation layer.
+
+    Fetches open gaps, screening summary, and phenotype label for the patient
+    and assembles them into a dict suitable for building behavioral cards.
+
+    Returns None when no behavioral data exists or on any fetch error.
+    """
+    try:
+        from skills.behavioral_gap_detector import (
+            get_open_gaps_for_patient,
+            run_gap_detector_for_patient,
+        )
+        from skills.behavioral_cards import build_cards_from_pool
+
+        gaps = await get_open_gaps_for_patient(db_pool, patient_id)
+        cards = await build_cards_from_pool(db_pool, patient_id, role=role)
+
+        async with db_pool.acquire() as conn:
+            phenotype = await conn.fetchrow(
+                "SELECT domain, phenotype_label, confidence "
+                "FROM behavioral_phenotypes WHERE patient_id = $1::uuid "
+                "ORDER BY confidence DESC LIMIT 1",
+                patient_id,
+            )
+            screening_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM behavioral_screenings "
+                "WHERE patient_id = $1::uuid",
+                patient_id,
+            ) or 0
+
+        mode = "primary_evidence" if gaps else "contextual"
+        return {
+            "mode": mode,
+            "open_gap_count": len(gaps),
+            "gaps": gaps,
+            "cards": cards,
+            "phenotype": dict(phenotype) if phenotype else None,
+            "screening_count": int(screening_count),
+        }
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "get_behavioral_context failed: %s", type(e).__name__
+        )
+        return None
+
+
+async def run_behavioral_gap_check(
+    db_pool,
+    patient_id: str,
+) -> list[dict]:
+    """Run gap detection for a patient. Returns list of detected domain gaps.
+
+    Convenience alias for the deliberation and executor layers.
+    Always returns a list (empty if no gaps or on failure).
+    """
+    try:
+        from skills.behavioral_gap_detector import run_gap_detector_for_patient
+        return await run_gap_detector_for_patient(db_pool, patient_id)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "run_behavioral_gap_check failed: %s", type(e).__name__
+        )
+        return []

@@ -168,3 +168,65 @@ async def refresh_atom_pressure_view(pool) -> bool:
         except Exception as e2:
             log.error("atom_pressure refresh failed entirely: %s", e2)
             return False
+
+
+_search_atoms_impl = search_similar_atoms
+
+
+def register(mcp) -> None:
+
+    @mcp.tool()
+    async def search_similar_atoms(
+        query_text: str,
+        patient_id: Optional[str] = None,
+        signal_type: Optional[str] = None,
+        top_k: int = 10,
+        min_similarity: float = 0.75,
+        days_lookback: int = 90,
+        scope: str = "cohort",
+    ) -> dict:
+        """Search behavioral signal atoms by semantic similarity to query_text.
+
+        Embeds query_text using the active embedding backend, then performs
+        vector cosine search over behavioral_signal_atoms.
+
+        Scope:
+          - 'patient'  (requires patient_id): returns per-atom metadata;
+            signal_value is NEVER included (PHI).
+          - 'cohort'   (patient_id ignored): returns aggregated stats per
+            (patient_id, signal_type); fully de-identified aggregate view.
+
+        Args:
+            query_text:     Clinical or lay-language description to embed.
+            patient_id:     Required for scope='patient'. Ignored for 'cohort'.
+            signal_type:    Narrow to one signal type (optional).
+            top_k:          Max rows to return (default 10).
+            min_similarity: Cosine similarity threshold 0.0–1.0 (default 0.75).
+            days_lookback:  Restrict to atoms extracted within this many days.
+            scope:          'patient' or 'cohort' (default 'cohort').
+
+        Returns:
+            {scope, result_count, results: [...]}
+        """
+        from db.connection import get_pool
+        from skills.atom_embedder import embed_signal_value
+
+        embedding = embed_signal_value(query_text[:500])
+        if embedding is None:
+            return {"scope": scope, "result_count": 0, "results": [],
+                    "error": "embedding_unavailable"}
+
+        pool = await get_pool()
+        pid = patient_id if scope == "patient" else None
+
+        results = await _search_atoms_impl(
+            pool=pool,
+            query_embedding=embedding,
+            patient_id=pid,
+            signal_type=signal_type,
+            top_k=top_k,
+            min_similarity=min_similarity,
+            days_lookback=days_lookback,
+        )
+
+        return {"scope": scope, "result_count": len(results), "results": results}

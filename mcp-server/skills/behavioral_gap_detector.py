@@ -22,6 +22,33 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
+
+class _ConnPool:
+    """Pool-like adapter wrapping a single asyncpg connection.
+
+    Lets functions that call pool.acquire() work when called with a bare
+    connection (e.g. from the executor's already-acquired conn).
+    """
+    def __init__(self, conn):
+        self._conn = conn
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self._conn
+
+    async def __aexit__(self, *_args):
+        pass
+
+
+def _to_pool(pool_or_conn):
+    """Return a pool-compatible object from either a pool or a bare connection."""
+    if hasattr(pool_or_conn, "acquire"):
+        return pool_or_conn
+    return _ConnPool(pool_or_conn)
+
+
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 # Atom pressure score that triggers gap detection
@@ -85,6 +112,7 @@ async def run_gap_detector_for_patient(
     from skills.screening_registry import SCREENING_REGISTRY, DOMAIN_LOOKBACK_DAYS
     from skills.screening_registry import suggest_instruments_from_atoms
 
+    pool = _to_pool(pool)
     now = datetime.now(timezone.utc)
 
     # ── 1. Load atom pressure ─────────────────────────────────────────────────
