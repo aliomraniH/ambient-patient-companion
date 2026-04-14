@@ -298,3 +298,46 @@ async def ingest_observation_or_qr(
             pool, patient_id, resource, source_type, source_id, data_source
         )
     return None
+
+
+class _ConnPool:
+    """Minimal asyncpg-pool-like adapter wrapping a single connection.
+
+    Lets functions that call `pool.acquire()` work with a bare connection.
+    """
+    def __init__(self, conn):
+        self._conn = conn
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self._conn
+
+    async def __aexit__(self, *_args):
+        pass
+
+
+async def ingest_fhir_resource(
+    conn,
+    resource: dict,
+    patient_id: str,
+    source_type: str = "fhir_observation",
+    source_id: Optional[str] = None,
+    data_source: str = "healthex",
+) -> Optional[dict]:
+    """Route a FHIR Observation or QuestionnaireResponse to the right ingestor.
+
+    Accepts a raw asyncpg connection (executor has already acquired one).
+    """
+    pool = _ConnPool(conn)
+    rt = resource.get("resourceType", "") if isinstance(resource, dict) else ""
+    if rt == "Observation":
+        return await ingest_fhir_observation(
+            pool, patient_id, resource, source_type, source_id, data_source
+        )
+    elif rt == "QuestionnaireResponse":
+        return await ingest_fhir_questionnaire_response(
+            pool, patient_id, resource, source_type, source_id, data_source
+        )
+    return None

@@ -66,6 +66,85 @@ def _determine_card_roles(
     return roles
 
 
+async def build_cards_from_pool(
+    pool,
+    patient_id: str,
+    role: Optional[str] = None,
+) -> list[dict]:
+    """Build behavioral insight cards from a pool (or pool-like adapter).
+
+    Returns a list of card dicts filtered to `role` if specified.
+    Safe to call from the deliberation layer — never raises.
+    """
+    try:
+        from skills.behavioral_gap_detector import get_open_gaps_for_patient
+
+        gaps = await get_open_gaps_for_patient(pool, patient_id)
+
+        async with pool.acquire() as conn:
+            si_rows = await conn.fetch(
+                """
+                SELECT id FROM behavioral_screenings
+                WHERE patient_id = $1::uuid
+                  AND (domain = 'suicidality'
+                       OR jsonb_array_length(triggered_critical) > 0)
+                  AND administered_at >= NOW() - INTERVAL '90 days'
+                LIMIT 1
+                """,
+                patient_id,
+            )
+        has_si_flag = len(si_rows) > 0
+
+        cards = []
+        for gap in gaps:
+            domain = gap["domain"]
+            temporal_confidence = gap.get("temporal_confidence", "low")
+            gap_type = gap.get("gap_type", "no_screening")
+            pressure = float(gap.get("pressure_score") or 0.0)
+            phenotype = gap.get("phenotype_label", "")
+
+            roles = _determine_card_roles(temporal_confidence, gap_type, domain, has_si_flag)
+            if role and role not in roles:
+                continue
+
+            if domain == "suicidality":
+                priority = 1
+            elif "high_burden" in phenotype:
+                priority = 2
+            elif "moderate_burden" in phenotype:
+                priority = 3
+            else:
+                priority = 4
+
+            severity_label = "high" if pressure >= 0.75 else ("moderate" if pressure >= 0.50 else "low")
+            card_title = (
+                _patient_facing_title(domain, severity_label)
+                if role == _ROLE_PATIENT
+                else f"{domain.replace('_', ' ').title()} — {gap_type.replace('_', ' ')}"
+            )
+
+            cards.append({
+                "domain": domain,
+                "card_title": card_title,
+                "gap_type": gap_type,
+                "phenotype_label": phenotype,
+                "pressure_score": pressure,
+                "temporal_confidence": temporal_confidence,
+                "suggested_instruments": gap.get("suggested_instruments", []),
+                "severity_label": severity_label,
+                "visible_to_roles": roles,
+                "show_to_roles": roles,
+                "priority": priority,
+            })
+
+        cards.sort(key=lambda c: (c["priority"], -c["pressure_score"]))
+        return cards
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("build_cards_from_pool failed: %s", type(e).__name__)
+        return []
+
+
 def register(mcp) -> None:
 
     # ── prepare_behavioral_cards ──────────────────────────────────────────────
@@ -164,6 +243,7 @@ def register(mcp) -> None:
                 "suggested_instruments": gap.get("suggested_instruments", []),
                 "severity_label": severity_label,
                 "visible_to_roles": roles,
+                "show_to_roles": roles,
                 "priority": priority,
             }
             for k, v in card.items():

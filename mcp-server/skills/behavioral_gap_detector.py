@@ -283,3 +283,34 @@ async def get_open_gaps_for_patient(pool, patient_id: str) -> list[dict]:
             patient_id,
         )
     return [dict(r) for r in rows]
+
+
+async def resolve_gap_on_new_screening(
+    conn,
+    patient_id: str,
+    new_screening_id: Optional[str] = None,
+    instrument_key: Optional[str] = None,
+    domain: Optional[str] = None,
+    screening_date=None,
+) -> bool:
+    """Resolve open gap(s) for a domain given a newly ingested screening.
+
+    Accepts a raw asyncpg connection (executor uses a single conn, not a pool).
+    `domain` is used to identify which gaps to close.
+    Returns True if any rows were updated.
+    """
+    if not domain:
+        return False
+    result = await conn.execute(
+        """
+        UPDATE behavioral_screening_gaps
+        SET status = 'resolved',
+            resolved_at = NOW(),
+            resolved_by = $1::uuid
+        WHERE patient_id = $2::uuid
+          AND domain = $3
+          AND status = 'open'
+        """,
+        new_screening_id, patient_id, domain,
+    )
+    return result != "UPDATE 0"

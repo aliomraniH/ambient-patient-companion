@@ -54,59 +54,61 @@ async def search_similar_atoms(
 
     async with pool.acquire() as conn:
         if patient_id:
-            # Single-patient search — return atom-level rows (no PHI)
-            signal_filter = "AND signal_type = $4" if signal_type else ""
-            params: list = [embedding_str, days_lookback, top_k]
+            # Single-patient search — return atom-level rows (no PHI).
+            # Fully parameterized: $1=embedding, $2=days_lookback, $3=top_k,
+            # $4=patient_id, $5=min_similarity, [$6=signal_type].
+            params: list = [embedding_str, days_lookback, top_k, patient_id, min_similarity]
             if signal_type:
                 params.append(signal_type)
+                signal_filter = "AND signal_type = $6"
+            else:
+                signal_filter = ""
 
-            sql = f"""
-                SELECT
-                    id::text,
-                    patient_id::text,
-                    signal_type,
-                    confidence,
-                    source_type,
-                    extracted_at,
-                    1 - (embedding <=> $1::vector) AS similarity
-                FROM behavioral_signal_atoms
-                WHERE patient_id = '{patient_id}'::uuid
-                  AND embedding IS NOT NULL
-                  AND extracted_at >= NOW() - ($2 || ' days')::INTERVAL
-                  {signal_filter}
-                  AND 1 - (embedding <=> $1::vector) >= {min_similarity}
-                ORDER BY embedding <=> $1::vector
-                LIMIT $3
-            """
+            sql = (
+                "SELECT id::text, patient_id::text, signal_type, confidence,"
+                "       source_type, extracted_at,"
+                "       1 - (embedding <=> $1::vector) AS similarity"
+                " FROM behavioral_signal_atoms"
+                " WHERE patient_id = $4::uuid"
+                "   AND embedding IS NOT NULL"
+                "   AND extracted_at >= NOW() - ($2 || ' days')::INTERVAL"
+                f"  {signal_filter}"
+                "   AND 1 - (embedding <=> $1::vector) >= $5"
+                " ORDER BY embedding <=> $1::vector"
+                " LIMIT $3"
+            )
             rows = await conn.fetch(sql, *params)
             return [dict(r) for r in rows]
 
         else:
-            # Cohort search — aggregated, no signal_value
-            signal_filter = "AND signal_type = $3" if signal_type else ""
-            params = [embedding_str, days_lookback]
+            # Cohort search — aggregated, no signal_value.
+            # $1=embedding, $2=days_lookback, $3=min_similarity,
+            # [$4=signal_type], $last=top_k.
+            params = [embedding_str, days_lookback, min_similarity]
             if signal_type:
                 params.append(signal_type)
-
-            sql = f"""
-                SELECT
-                    patient_id::text,
-                    signal_type,
-                    COUNT(*)                                           AS atom_count,
-                    AVG(confidence)                                    AS avg_confidence,
-                    AVG(1 - (embedding <=> $1::vector))                AS avg_similarity,
-                    MAX(1 - (embedding <=> $1::vector))                AS max_similarity,
-                    MAX(extracted_at)                                  AS last_seen_at
-                FROM behavioral_signal_atoms
-                WHERE embedding IS NOT NULL
-                  AND extracted_at >= NOW() - ($2 || ' days')::INTERVAL
-                  {signal_filter}
-                  AND 1 - (embedding <=> $1::vector) >= {min_similarity}
-                GROUP BY patient_id, signal_type
-                ORDER BY avg_similarity DESC
-                LIMIT ${ len(params) + 1 }
-            """
+                signal_filter = "AND signal_type = $4"
+            else:
+                signal_filter = ""
             params.append(top_k)
+            top_k_pos = len(params)
+
+            sql = (
+                "SELECT patient_id::text, signal_type,"
+                "       COUNT(*)                            AS atom_count,"
+                "       AVG(confidence)                     AS avg_confidence,"
+                "       AVG(1 - (embedding <=> $1::vector)) AS avg_similarity,"
+                "       MAX(1 - (embedding <=> $1::vector)) AS max_similarity,"
+                "       MAX(extracted_at)                   AS last_seen_at"
+                " FROM behavioral_signal_atoms"
+                " WHERE embedding IS NOT NULL"
+                "   AND extracted_at >= NOW() - ($2 || ' days')::INTERVAL"
+                f"  {signal_filter}"
+                "   AND 1 - (embedding <=> $1::vector) >= $3"
+                " GROUP BY patient_id, signal_type"
+                " ORDER BY avg_similarity DESC"
+                f" LIMIT ${top_k_pos}"
+            )
             rows = await conn.fetch(sql, *params)
             return [dict(r) for r in rows]
 

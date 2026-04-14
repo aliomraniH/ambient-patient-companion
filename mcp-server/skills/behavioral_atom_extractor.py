@@ -236,3 +236,58 @@ def extract_atoms_from_checkin(
         source_type="checkin",
         source_id=source_id,
     )
+
+
+# ─── Executor-facing aliases ───────────────────────────────────────────────────
+
+async def extract_atoms_from_note(
+    note_text: str,
+    note_date,
+    source_note_id: Optional[str] = None,
+    patient_id: Optional[str] = None,
+) -> list[ExtractedAtom]:
+    """Extract atoms from a clinical note.
+
+    Thin wrapper over extract_atoms_from_text. note_date and patient_id are
+    accepted for API compatibility (patient_id is not embedded in ExtractedAtom
+    to keep the extraction layer PHI-minimal).
+    """
+    return extract_atoms_from_text(
+        text=note_text,
+        source_type="clinical_note",
+        source_id=source_note_id,
+    )
+
+
+async def insert_atoms(conn, atoms: list[ExtractedAtom]) -> int:
+    """Insert a list of ExtractedAtom into behavioral_signal_atoms.
+
+    Uses the asyncpg connection directly (not a pool). Skips rows whose
+    signal_value exceeds 2000 chars. Returns number of rows inserted.
+    """
+    if not atoms:
+        return 0
+
+    inserted = 0
+    for atom in atoms:
+        try:
+            await conn.execute(
+                """
+                INSERT INTO behavioral_signal_atoms
+                    (signal_type, signal_value, confidence, source_type, source_id)
+                VALUES ($1, $2, $3, $4, $5::uuid)
+                ON CONFLICT DO NOTHING
+                """,
+                atom.signal_type,
+                atom.signal_value[:2000],
+                atom.confidence,
+                atom.source_type,
+                atom.source_id,
+            )
+            inserted += 1
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "insert_atoms: skipped atom (%s): %s", atom.signal_type, type(e).__name__
+            )
+    return inserted
