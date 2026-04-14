@@ -29,6 +29,7 @@ from .analyst import run_parallel_analysis, _analyze_with_claude, CLAUDE_MODEL a
 from .critic import run_critique_rounds
 from .synthesizer import synthesize
 from .behavioral_adapter import adapt_nudges
+from .behavioral_section_builder import augment_result_with_behavioral_section
 from .knowledge_store import commit_deliberation
 from .tiered_context_loader import TieredContextLoader, TOTAL_BUDGET
 from .data_request_parser import parse_data_requests
@@ -260,6 +261,27 @@ class DeliberationEngine:
                 )
             finally:
                 self._re_deliberation_done = False
+
+        # ── Phase 3.4: ATOM-first behavioral section ─────────────────────────
+        # Populates result.behavioral_section (Mode A / Mode B) based on
+        # behavioral_phenotypes.evidence_mode for this patient. No-op when
+        # no phenotype exists. Role defaults to 'pcp' unless the trigger
+        # encodes a different consumer.
+        try:
+            _role = "pcp"
+            trig = (context.deliberation_trigger or "").lower()
+            if "care_manager" in trig or "care-manager" in trig:
+                _role = "care_manager"
+            elif "patient" in trig:
+                _role = "patient"
+            await augment_result_with_behavioral_section(
+                result=result,
+                db_pool=self.db_pool,
+                patient_id=context.patient_id,
+                role=_role,
+            )
+        except Exception as e:
+            log.warning("behavioral section augmentation failed: %s", type(e).__name__)
 
         # ── Phase 3.5: Guardrail validation on patient-facing outputs ────────
         result.nudge_content = validate_nudge_batch(
