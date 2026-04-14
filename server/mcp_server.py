@@ -4120,12 +4120,12 @@ async def get_panel_risk_ranking(
     pool = await _get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT prs.patient_id, prs.score, prs.computed_at,
+            """SELECT prs.patient_id, prs.risk_score, prs.score_date,
                       p.first_name, p.last_name, p.mrn
                FROM provider_risk_scores prs
                JOIN patients p ON p.id = prs.patient_id
                WHERE prs.provider_id = $1
-               ORDER BY prs.score DESC
+               ORDER BY prs.risk_score DESC
                LIMIT $2""",
             provider_id, limit,
         )
@@ -4135,8 +4135,8 @@ async def get_panel_risk_ranking(
             "patient_id": str(r["patient_id"]),
             "mrn": r["mrn"],
             "name": f"{r['first_name']} {r['last_name']}".strip(),
-            "risk_score": float(r["score"]) if r["score"] is not None else None,
-            "computed_at": r["computed_at"].isoformat() if r["computed_at"] else None,
+            "risk_score": float(r["risk_score"]) if r["risk_score"] is not None else None,
+            "computed_at": r["score_date"].isoformat() if r["score_date"] else None,
         })
     return {
         "provider_id": provider_id,
