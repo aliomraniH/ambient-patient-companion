@@ -22,9 +22,16 @@ log = logging.getLogger(__name__)
 # The ingestion server runs from the repo root; the skills modules are shared
 # Python libraries (they take a `conn` parameter and do not import the
 # mcp-server-specific `db.connection` module).
+#
+# IMPORTANT: We must APPEND (not insert) so we don't shadow the repo-root
+# `server/` package with `mcp-server/server.py` (a standalone module that,
+# if imported, would re-instantiate a FastMCP server and re-run load_skills()
+# as a side effect of import). The ingestion process already has the repo
+# root on sys.path ahead of this — keeping it first ensures
+# `from server.deliberation...` resolves to the package, not the file.
 _MCP_SKILLS_ROOT = Path(__file__).resolve().parents[3] / "mcp-server"
 if str(_MCP_SKILLS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_MCP_SKILLS_ROOT))
+    sys.path.append(str(_MCP_SKILLS_ROOT))
 
 
 async def _post_process_notes_for_atoms(pool, patient_id: str, batch_start_ts) -> int:

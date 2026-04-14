@@ -43,6 +43,31 @@ PSYCH: Appropriate affect, speech, and thought. Denies anxiety or depression.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Regression: importing ingestion.adapters.healthex.executor must NOT shadow
+# the repo-root `server/` package with `mcp-server/server.py`. The executor
+# appends (not inserts) mcp-server/ to sys.path; if someone reverts it to
+# sys.path.insert(0, ...) this test catches the regression.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_executor_import_does_not_shadow_server_package():
+    import importlib
+    # Force-import executor (adds mcp-server to sys.path as a side effect)
+    importlib.import_module("ingestion.adapters.healthex.executor")
+    # `server` must still resolve to the repo-root PACKAGE, not the mcp-server
+    # standalone module file.
+    import server as server_module
+    server_path = Path(getattr(server_module, "__file__", "") or "")
+    # A package's __file__ points at __init__.py
+    assert server_path.name == "__init__.py", (
+        f"`import server` resolved to {server_path} — "
+        "mcp-server/server.py is shadowing the repo-root server/ package"
+    )
+    assert "mcp-server" not in server_path.parts, (
+        f"`import server` leaked into mcp-server/: {server_path}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Pure unit tests — no DB, no LLM
 # ─────────────────────────────────────────────────────────────────────────────
 
