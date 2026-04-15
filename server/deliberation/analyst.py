@@ -64,7 +64,16 @@ async def _analyze_with_claude(
         }]
     )
     raw = response.content[0].text
-    return IndependentAnalysis.model_validate_json(strip_markdown_fences(raw))
+    analysis = IndependentAnalysis.model_validate_json(strip_markdown_fences(raw))
+    # Capture real token usage so engine.py can accumulate totals
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        analysis._token_count = (
+            getattr(usage, "input_tokens", 0) + getattr(usage, "output_tokens", 0)
+        )
+    else:
+        analysis._token_count = 0
+    return analysis
 
 
 async def _analyze_with_gpt4(
@@ -90,7 +99,14 @@ async def _analyze_with_gpt4(
         response_format={"type": "json_object"}
     )
     raw = response.choices[0].message.content
-    return IndependentAnalysis.model_validate_json(strip_markdown_fences(raw))
+    analysis = IndependentAnalysis.model_validate_json(strip_markdown_fences(raw))
+    # Capture real token usage from OpenAI response
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        analysis._token_count = getattr(usage, "total_tokens", 0)
+    else:
+        analysis._token_count = 0
+    return analysis
 
 
 async def run_parallel_analysis(

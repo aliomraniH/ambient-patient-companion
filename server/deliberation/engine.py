@@ -466,6 +466,20 @@ class DeliberationEngine:
             "mode": "triage",
             "patient_id": result.patient_id,
             "convergence_score": result.convergence_score,
+            "total_tokens": result.total_tokens,
+            "total_latency_ms": result.total_latency_ms,
+            "models_used": {
+                "analyst": {
+                    "model": ANALYST_CLAUDE_MODEL,
+                    "role": "diagnostic_reasoning",
+                    "api_key_env": "ANTHROPIC_API_KEY",
+                },
+                "planner": {
+                    "model": "claude-haiku-4-5-20251001",
+                    "role": "agenda_planning",
+                    "api_key_env": "ANTHROPIC_API_KEY",
+                },
+            },
             "summary": {
                 "anticipatory_scenarios": 0,
                 "predicted_questions": 0,
@@ -484,7 +498,6 @@ class DeliberationEngine:
                 f.description for f in result.missing_data_flags
                 if f.priority in ("critical", "high")
             ],
-            "total_latency_ms": result.total_latency_ms,
         }
 
     # ── Progressive Context Loading Mode ──────────────────────────────────
@@ -865,10 +878,28 @@ class DeliberationEngine:
         return {
             "deliberation_id": deliberation_id,
             "status": commit_status,
+            "mode": "progressive",
             "patient_id": request.patient_id,
             "rounds_completed": rounds_completed,
             "outputs_written": outputs_written,
             "failed_writes": failed_writes,
+            "models_used": {
+                "analyst": {
+                    "model": "claude-haiku-4-5-20251001",
+                    "role": "progressive_reasoning",
+                    "api_key_env": "ANTHROPIC_API_KEY",
+                },
+                "synthesizer": {
+                    "model": "claude-sonnet-4-20250514",
+                    "role": "synthesis",
+                    "api_key_env": "ANTHROPIC_API_KEY",
+                },
+                "planner": {
+                    "model": "claude-haiku-4-5-20251001",
+                    "role": "agenda_planning",
+                    "api_key_env": "ANTHROPIC_API_KEY",
+                },
+            },
             "context_stats": loader.context_summary(),
             "summary": self._summarize_output(final_output),
             "gap_artifacts": _gap_artifacts,

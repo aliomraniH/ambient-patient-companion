@@ -2277,6 +2277,41 @@ async def run_deliberation(
         "mode": "full",
         "patient_id": result.patient_id,
         "convergence_score": result.convergence_score,
+        "rounds_completed": result.rounds_completed,
+        "total_tokens": result.total_tokens,
+        "total_latency_ms": result.total_latency_ms,
+        "models_used": {
+            "analyst_claude": {
+                "model": "claude-sonnet-4-20250514",
+                "role": "diagnostic_reasoning",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+            "analyst_gpt4": {
+                "model": "gpt-4o",
+                "role": "treatment_optimization",
+                "api_key_env": "OPENAI_API_KEY",
+            },
+            "critic_claude": {
+                "model": "claude-sonnet-4-20250514",
+                "role": "cross_critique",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+            "critic_gpt4": {
+                "model": "gpt-4o",
+                "role": "cross_critique",
+                "api_key_env": "OPENAI_API_KEY",
+            },
+            "synthesizer": {
+                "model": "claude-sonnet-4-20250514",
+                "role": "synthesis",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+            "planner": {
+                "model": "claude-haiku-4-5-20251001",
+                "role": "agenda_planning",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+        },
         "summary": {
             "anticipatory_scenarios": len(result.anticipatory_scenarios),
             "predicted_questions": len(result.predicted_patient_questions),
