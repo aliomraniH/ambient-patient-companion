@@ -20,6 +20,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from shared.datetime_utils import ensure_aware
+
 log = logging.getLogger(__name__)
 
 
@@ -185,7 +187,7 @@ async def run_gap_detector_for_patient(
         last_screen = domain_last_screening.get(domain)
 
         if last_screen is not None:
-            days_since = (now - last_screen.replace(tzinfo=timezone.utc)).days
+            days_since = (now - ensure_aware(last_screen)).days
             if days_since <= lookback_days:
                 # Not stale — no gap
                 continue
@@ -195,7 +197,7 @@ async def run_gap_detector_for_patient(
 
         # Temporal confidence
         last_atom_at = dp["last_atom_at"]
-        days_since_atom = (now - last_atom_at.replace(tzinfo=timezone.utc)).days if last_atom_at else 999
+        days_since_atom = (now - ensure_aware(last_atom_at)).days if last_atom_at else 999
 
         temporal_confidence = _classify_temporal_confidence(dp["atom_count"], days_since_atom)
 

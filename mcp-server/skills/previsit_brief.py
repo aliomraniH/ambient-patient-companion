@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastmcp import FastMCP
 
 from db.connection import get_pool
+from shared.datetime_utils import ensure_aware
 from skills.base import get_data_track, log_skill_execution
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
@@ -196,7 +197,7 @@ async def generate_previsit_brief(
             # Recent deliberation (cache-aware reader; NEVER triggers run_deliberation).
             # Pulls pcp-facing outputs from the most recent COMPLETE deliberation
             # within the last 24 hours. If none, brief renders 6-month data alone.
-            recent_cutoff = datetime.utcnow() - timedelta(hours=24)
+            recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
             delib_row = await conn.fetchrow(
                 """
                 SELECT id, triggered_at, convergence_score, rounds_completed
@@ -229,7 +230,10 @@ async def generate_previsit_brief(
                     "deliberation_id": str(delib_row["id"]),
                     "triggered_at": delib_row["triggered_at"].isoformat(),
                     "age_hours": round(
-                        (datetime.utcnow() - delib_row["triggered_at"]).total_seconds() / 3600, 1
+                        (
+                            datetime.now(timezone.utc)
+                            - ensure_aware(delib_row["triggered_at"])
+                        ).total_seconds() / 3600, 1
                     ),
                     "convergence_score": delib_row["convergence_score"],
                     "rounds_completed": delib_row["rounds_completed"],

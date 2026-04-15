@@ -65,6 +65,48 @@ class TestIsStale:
 
 
 # ---------------------------------------------------------------------------
+# Regression guard: register_healthex_patient must initialise
+# source_freshness.last_ingested_at as NULL, not NOW(). Writing NOW() on
+# registration makes a brand-new patient look "just ingested" so the very
+# first orchestrate_refresh silently skips the ingest phase (duration_ms: 0).
+# ---------------------------------------------------------------------------
+
+
+class TestRegistrationFreshnessInit:
+    @staticmethod
+    def _read(relpath: str) -> str:
+        import pathlib
+        return pathlib.Path(
+            os.path.join(os.path.dirname(__file__), "..", "..", relpath)
+        ).resolve().read_text()
+
+    def test_ingestion_tools_register_uses_null(self):
+        """The ingestion_tools.register_healthex_patient INSERT into
+        source_freshness must bind last_ingested_at to NULL."""
+        src = self._read("mcp-server/skills/ingestion_tools.py")
+        idx = src.find("INSERT INTO source_freshness")
+        assert idx != -1, "INSERT INTO source_freshness missing"
+        # Snip the first 400 chars of the insert block.
+        block = src[idx:idx + 400]
+        assert "VALUES ($1, $2, NULL" in block or "VALUES ($1, $2, NULL," in block, (
+            "register_healthex_patient must init last_ingested_at = NULL, "
+            "not NOW(). Found:\n" + block
+        )
+
+    def test_mcp_server_register_uses_null(self):
+        """The S1 server register_healthex_patient INSERT into
+        source_freshness must also bind last_ingested_at to NULL."""
+        src = self._read("server/mcp_server.py")
+        idx = src.find("INSERT INTO source_freshness")
+        assert idx != -1, "INSERT INTO source_freshness missing"
+        block = src[idx:idx + 400]
+        assert "VALUES ($1,$2,NULL" in block or "VALUES ($1, $2, NULL" in block, (
+            "server/mcp_server.py register path must init "
+            "last_ingested_at = NULL, not NOW(). Found:\n" + block
+        )
+
+
+# ---------------------------------------------------------------------------
 # Unit tests for freshness TTL constants
 # ---------------------------------------------------------------------------
 

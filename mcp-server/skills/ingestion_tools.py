@@ -13,12 +13,13 @@ import os
 import re
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastmcp import FastMCP
 
 from db.connection import get_pool
 from ingestion.pipeline import sanitize_for_jsonb
+from shared.datetime_utils import ensure_aware
 from skills.base import get_data_track, log_skill_execution
 from transforms.fhir_to_schema import _parse_date
 
@@ -73,11 +74,16 @@ async def _get_deliberation_freshness(
 
 
 def _is_stale(last_run: datetime | None, ttl_hours: int) -> bool:
-    """Return True if *last_run* is None or older than *ttl_hours*."""
+    """Return True if *last_run* is None or older than *ttl_hours*.
+
+    Compares aware datetimes in UTC. asyncpg returns TIMESTAMPTZ columns
+    aware and TIMESTAMP columns naive — ensure_aware() normalises both.
+    """
     if last_run is None:
         return True
-    naive = last_run.replace(tzinfo=None) if last_run.tzinfo else last_run
-    elapsed = (datetime.utcnow() - naive).total_seconds() / 3600
+    elapsed = (
+        datetime.now(timezone.utc) - ensure_aware(last_run)
+    ).total_seconds() / 3600
     return elapsed >= ttl_hours
 
 
@@ -392,12 +398,16 @@ async def register_healthex_patient(
                 "healthex",
             )
 
+            # last_ingested_at is NULL on registration — the patient has
+            # been *registered*, not *ingested*. Writing NOW() here would
+            # make orchestrate_refresh treat the brand-new row as "fresh"
+            # and skip the first HealthEx pull entirely.
             await conn.execute(
                 """
                 INSERT INTO source_freshness
                     (patient_id, source_name, last_ingested_at,
                      records_count, ttl_hours)
-                VALUES ($1, $2, NOW(), 0, 24)
+                VALUES ($1, $2, NULL, 0, 24)
                 ON CONFLICT (patient_id, source_name) DO NOTHING
                 """,
                 patient_id,
