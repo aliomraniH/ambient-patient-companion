@@ -1,0 +1,43 @@
+# Security Review Findings (2026-04-15)
+
+Scope reviewed: `replit-app` OAuth and API proxy/data routes.
+
+## High priority
+
+1. **OAuth access tokens are never enforced on the MCP proxy.**
+   - `oauthStore.validateToken()` exists, but no route calls it.
+   - The MCP proxy forwards requests directly to internal services without checking `Authorization`.
+   - Impact: any caller who can reach `/api/mcp/...` can invoke backend tools without a valid bearer token.
+
+2. **PKCE is not verified during token exchange.**
+   - `/token` explicitly states `code_verifier` is not cryptographically verified.
+   - Impact: authorization-code interception/replay resistance provided by PKCE is missing.
+
+3. **Sensitive clinical data endpoint appears unauthenticated (`/api/vitals/[id]`).**
+   - Endpoint accepts arbitrary `patient_id` from URL and returns measurements.
+   - No authn/authz check ties caller to patient/context.
+   - Impact: potential IDOR-style exposure of patient data.
+
+## Medium priority
+
+4. **Dynamic client registration accepts unvalidated redirect URIs.**
+   - `/register` only checks `redirect_uris` is a non-empty array.
+   - `/authorize` then redirects directly using `new URL(redirect_uri)` and appends code/state.
+   - Impact: weak client metadata validation may allow unsafe schemes/hosts in non-demo deployments.
+
+5. **CORS is fully open (`Access-Control-Allow-Origin: *`) on OAuth endpoints.**
+   - `/register`, `/token`, and `/authorize` OPTIONS/response headers allow any origin.
+   - Impact: broader cross-origin attack surface for browser-based abuse.
+
+6. **No rate limiting / abuse controls visible on auth and proxy endpoints.**
+   - `/register`, `/authorize`, `/token`, and `/api/mcp/...` have no obvious throttling or anti-automation checks.
+   - Impact: brute-force, endpoint abuse, and resource exhaustion risk.
+
+## Recommended next actions
+
+- Enforce bearer token validation in MCP proxy before forwarding.
+- Implement full PKCE (`S256`) verification in `/token`.
+- Require authentication and authorization checks on patient data routes.
+- Restrict redirect URIs to allowlisted `https` origins (except explicit localhost dev mode).
+- Replace wildcard CORS with explicit allowlist.
+- Add rate limiting and basic abuse telemetry on OAuth + proxy routes.
