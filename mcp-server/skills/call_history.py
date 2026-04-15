@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from db.connection import get_pool
-from shared.call_recorder import get_registry
+from shared.call_recorder import _DDL_STATEMENTS, get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,21 @@ def _row_to_dict(row) -> dict[str, Any]:
         if isinstance(v, datetime):
             d[k] = v.isoformat()
     return d
+
+
+async def _ensure_table(pool) -> None:
+    """Create mcp_call_log if it does not exist.
+
+    Called at the start of every query tool so the table is always present
+    even when no AuditMiddleware has fired yet (e.g. immediately after server
+    startup before any external tool call arrives).
+    """
+    async with pool.acquire() as conn:
+        for stmt in _DDL_STATEMENTS:
+            try:
+                await conn.execute(stmt)
+            except Exception as exc:
+                logger.debug("call_history._ensure_table: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +105,8 @@ def register(mcp: FastMCP) -> None:
           - error_count
         """
         pool = await get_pool()
+        await _ensure_table(pool)
+
         where = "WHERE server_name = $2" if server_name else ""
         args: list[Any] = [limit]
         if server_name:
@@ -168,6 +185,8 @@ def register(mcp: FastMCP) -> None:
         }
         """
         pool = await get_pool()
+        await _ensure_table(pool)
+
         async with pool.acquire() as conn:
             # Resolve session_id if not provided
             if not session_id:
@@ -186,7 +205,7 @@ def register(mcp: FastMCP) -> None:
                     *args,
                 )
                 if not row:
-                    return {"error": "No calls recorded yet."}
+                    return {"note": "No calls recorded yet — the audit log is empty."}
                 session_id = row["session_id"]
                 resolved_server = row["server_name"]
             else:
@@ -207,7 +226,7 @@ def register(mcp: FastMCP) -> None:
             )
 
         if not rows:
-            return {"error": f"No rows found for session {session_id}"}
+            return {"note": f"No rows found for session {session_id}"}
 
         calls = []
         for row in rows:
@@ -275,9 +294,14 @@ def register(mcp: FastMCP) -> None:
         """
         limit = min(limit, 500)
         pool = await get_pool()
+        await _ensure_table(pool)
 
-        conditions = ["called_at >= now() - ($1 * INTERVAL '1 minute')"]
-        args: list[Any] = [from_minutes_ago]
+        # Pre-compute cutoff in Python — never pass integer params into
+        # INTERVAL arithmetic with asyncpg (causes bind type errors).
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=from_minutes_ago)
+
+        conditions = ["called_at >= $1"]
+        args: list[Any] = [cutoff]
 
         if tool_name:
             args.append(f"%{tool_name.lower()}%")
