@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { validateBearerToken } from "@/lib/auth-middleware";
+import { requireBearerToken } from "@/lib/auth-middleware";
 import { checkRateLimit } from "@/lib/rate-limiter";
 
 const ALLOWED_PORTS = new Set(["8001", "8002", "8003"]);
@@ -25,7 +25,7 @@ async function proxy(request: NextRequest, context: RouteContext) {
     );
   }
 
-  const authError = validateBearerToken(request);
+  const authError = requireBearerToken(request);
   if (authError) return authError;
 
   const { port, segments = [] } = await context.params;

@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import { validateBearerToken } from "@/lib/auth-middleware";
+import { requireAuth } from "@/lib/auth-middleware";
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const authError = validateBearerToken(request);
+  const authError = await requireAuth(request);
   if (authError) return authError;
 
   const { id } = await params;
