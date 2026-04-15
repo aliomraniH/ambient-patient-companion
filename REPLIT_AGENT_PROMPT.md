@@ -1,258 +1,166 @@
-Read CLAUDE.md and replit.md before doing anything. They are the source of
-truth for this project.
+Read CLAUDE.md and replit.md before doing anything. They are the authoritative source
+of truth for this project.
 
-You are deploying and testing the Phase 1 clinical intelligence layer that
-was implemented on the branch `claude/ambient-patient-companion-phase1-TQwII`.
-This branch adds a new FastMCP server (`server/mcp_server.py`) with guardrails,
-clinical guidelines, system prompts, a JS client, HTML prototypes, and
-integration tests.
+---
 
-Your job is to:
+# Ambient Patient Companion — Current State Guide
 
-────────────────────────────────────────────────────────────────────────────
-1. ENVIRONMENT SETUP
-────────────────────────────────────────────────────────────────────────────
+This document describes the current state of the codebase (as of 2026-04-15, commit `94d0fe6`)
+for any agent or collaborator picking up the project.
 
-a. Install Python dependencies from the root requirements.txt:
-     pip install -r requirements.txt
-   This adds `anthropic` and `fastmcp` (plus existing deps).
+---
 
-b. Verify the ANTHROPIC_API_KEY is set in Replit Secrets
-   (Settings > Secrets). The clinical_query tool needs it to call
-   Claude API. If it is missing, warn the user but proceed with
-   testing the 4 tools that don't require an API key.
+## What Has Been Built
 
-c. Ensure the replit_dashboard KEY_META includes the new clinical
-   intelligence server URL. Add this entry to `replit_dashboard/server.py`
-   in the KEY_META dict:
+A production multi-agent AI health system:
 
-     "MCP_CLINICAL_INTELLIGENCE_URL": {
-         "category":    "AUTO",
-         "label":       "MCP · Clinical Intelligence",
-         "description": "FastMCP clinical decision support server (Phase 1).",
-         "secret":      False,
-         "default":     "http://localhost:8001/mcp",
-         "help_url":    None,
-     },
+- **S = f(R, C, P, T)** — Optimal clinical surface derived from Role × Context × Patient State × Time
+- **35-table PostgreSQL warehouse** — Synthea + HealthEx FHIR data
+- **3 FastMCP Python servers** with OAuth PKCE — Clinical (8001), Skills (8002), Ingestion (8003)
+- **Next.js 16 frontend** (port 5000) — proxies all 3 MCP servers, serves OAuth discovery
+- **Phase 2 Dual-LLM Deliberation Engine** — Claude Sonnet + GPT-4o (6-phase pipeline)
+- **3-Layer Clinical Guardrail Pipeline** — input validation → escalation rules → output safety
+- **5 Data Quality Validators (F1–F5)** — FHIR conformance, clinical plausibility, source anchoring
+- **MCP Audit Log System** — every Claude tool call recorded to `mcp_call_log` (35th table)
+- **Universal Provenance Gate** — `verify_output_provenance` on all 3 servers
 
-────────────────────────────────────────────────────────────────────────────
-2. RUN THE PHASE 1 INTEGRATION TESTS
-────────────────────────────────────────────────────────────────────────────
+---
 
-From the repository root, run:
+## Running Services
 
-    python -m pytest tests/phase1/ -v
+Start everything:
+```bash
+bash start.sh
+```
 
-All 100 tests must pass. These cover:
-  - Input validation (PHI detection, jailbreak blocking, scope checks)
-  - Output validation (citation enforcement, diagnostic language flagging)
-  - Clinical escalation rules (life-threatening, controlled substances,
-    pediatric, pregnancy — 5 scenario types)
-  - get_guideline (ADA + USPSTF lookups by recommendation ID)
-  - check_screening_due (age/sex/condition-based USPSTF eligibility)
-  - flag_drug_interaction (12 hardcoded interaction pairs)
-  - get_synthetic_patient (Maria Chen, MRN 4829341)
-  - clinical_query (mocked Claude API — jailbreak blocking, PHI blocking,
-    escalation, happy path generation, output validation)
+Or use the 5 Replit Workflows:
 
-If any test fails, diagnose the root cause and fix it. Do not skip tests.
+| Workflow | Command | Port |
+|---------|---------|------|
+| Start application | `cd replit-app && npm run dev` | 5000 |
+| Config Dashboard | `cd replit_dashboard && python server.py` | 8080 |
+| Clinical MCP Server | `MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m server.mcp_server` | 8001 |
+| Skills MCP Server | `cd mcp-server && MCP_TRANSPORT=streamable-http MCP_PORT=8002 python server.py` | 8002 |
+| Ingestion MCP Server | `MCP_TRANSPORT=streamable-http MCP_PORT=8003 python -m ingestion.server` | 8003 |
 
-────────────────────────────────────────────────────────────────────────────
-3. RUN THE EXISTING TEST SUITES (regression check)
-────────────────────────────────────────────────────────────────────────────
+Health checks (after startup):
+```bash
+curl http://localhost:8001/health  # {"ok":true,"server":"ambient-clinical-intelligence"}
+curl http://localhost:8002/health  # {"ok":true,"server":"ambient-skills-companion"}
+curl http://localhost:8003/health  # {"ok":true,"server":"ambient-ingestion"}
+```
 
-Verify that the existing tests still pass after Phase 1 additions:
+---
 
-  a. Backend (MCP server skills):
-       cd mcp-server && python -m pytest tests/ -v
+## Adding Claude as MCP Client
 
-  b. Frontend (Next.js components):
-       cd replit-app && npm test
+Settings → Integrations → Add custom integration → paste public HTTPS URL:
 
-  c. Config dashboard:
-       cd replit_dashboard && python -m pytest tests/ -v
+| Server | URL |
+|--------|-----|
+| `ambient-clinical-intelligence` | `https://[your-replit-domain]/mcp` |
+| `ambient-skills-companion` | `https://[your-replit-domain]/mcp-skills` |
+| `ambient-ingestion` | `https://[your-replit-domain]/mcp-ingestion` |
 
-Report pass/fail counts for each suite. If any existing test broke,
-investigate whether Phase 1 changes caused the regression.
+OAuth PKCE handshake completes automatically — no login screen (public server).
 
-────────────────────────────────────────────────────────────────────────────
-4. DEPLOY THE CLINICAL INTELLIGENCE SERVER
-────────────────────────────────────────────────────────────────────────────
+---
 
-The clinical intelligence server needs to run alongside the existing
-Next.js frontend. There are two deployment paths — choose the HTTP one:
+## Tool Counts (current)
 
-a. Add an HTTP entry point to server/mcp_server.py. The server currently
-   runs via stdio transport. Add a second mode:
+| Server | Tools | Key tools |
+|--------|-------|-----------|
+| `ambient-clinical-intelligence` | 23 | clinical_query, run_deliberation, verify_output_provenance + 20 more |
+| `ambient-skills-companion` | 22+ | compute_obt_score, get_current_session, search_similar_atoms + 19 more |
+| `ambient-ingestion` | 4 | trigger_ingestion, detect_context_staleness + 2 more |
 
-     if __name__ == "__main__":
-         import sys
-         transport = sys.argv[1] if len(sys.argv) > 1 else "streamable-http"
-         if transport == "stdio":
-             mcp.run(transport="stdio")
-         else:
-             mcp.run(transport="streamable-http", host="0.0.0.0", port=8001)
+---
 
-b. Update .replit to start both servers. Add a new workflow task that
-   runs the clinical server in parallel with the Next.js frontend:
+## MCP Audit Log
 
-     [[workflows.workflow]]
-     name = "Start clinical server"
-     author = "agent"
+Every tool call from Claude is automatically logged:
 
-     [[workflows.workflow.tasks]]
-     task = "shell.exec"
-     args = "cd /home/runner/ambient-patient-companion && python -m server.mcp_server streamable-http"
-     waitForPort = 8001
+```
+Table: mcp_call_log (35th table)
+Columns: id, session_id, server_name, tool_name, called_at, duration_ms,
+         input_params (JSONB), output_text, output_data (JSONB), outcome, error_message, seq
+```
 
-   Then add this task to the "Project" parallel workflow:
+Query the audit log from Claude using 4 tools on the Skills server:
+```
+get_current_session()                            → live sessions + call counts
+list_sessions(limit=10, server_name="clinical")  → recent sessions
+get_session_transcript(session_id=None)          → full chronological call log
+search_tool_calls(tool_name="run_deliberation")  → flexible filter
+```
 
-     [[workflows.workflow]]
-     name = "Project"
-     mode = "parallel"
-     author = "agent"
+---
 
-     [[workflows.workflow.tasks]]
-     task = "workflow.run"
-     args = "Start application"
+## Key Files Changed in Last Session
 
-     [[workflows.workflow.tasks]]
-     task = "workflow.run"
-     args = "Start clinical server"
+| File | Change |
+|------|--------|
+| `shared/coercion.py` | NEW — coerce_confidence(): normalises LLM confidence values |
+| `shared/datetime_utils.py` | NEW — ensure_aware(): UTC tzinfo for naive DB datetimes |
+| `shared/call_recorder.py` | NEW — CallRecorder + session tracking for audit log |
+| `shared/audit_middleware.py` | NEW — AuditMiddleware(Middleware) FastMCP hook |
+| `shared/tests/test_coerce_confidence.py` | NEW — 28 unit tests |
+| `shared/tests/test_datetime_utils.py` | NEW — 6 unit tests |
+| `mcp-server/skills/call_history.py` | NEW — 4 audit query MCP tools |
+| `mcp-server/server.py` | MODIFIED — sys.path fix + AuditMiddleware wired |
+| `server/mcp_server.py` | MODIFIED — AuditMiddleware("clinical") wired |
+| `ingestion/server.py` | MODIFIED — AuditMiddleware("ingestion") wired |
+| `replit.md` | UPDATED — reflects all current state |
+| `README.md` | UPDATED — reflects all current state |
+| `CLAUDE.md` | UPDATED — reflects all current state |
 
-c. Add port 8001 mapping (internal only — not exposed externally):
+---
 
-     [[ports]]
-     localPort = 8001
-     externalPort = 8001
+## Bug Fixes Applied
 
-d. Verify the server starts without errors:
-     python -m server.mcp_server streamable-http
-   It should listen on 0.0.0.0:8001. Kill it after verifying.
+1. **coerce_confidence**: `float > 1.0` now clamps to 1.0 (not ÷100); `int > 1` divides by 100
+2. **source_freshness**: `register_healthex_patient` writes `last_ingested_at = NULL` (never `NOW()`)
+3. **ensure_aware**: prevents `TypeError: can't subtract offset-naive and offset-aware datetimes`
 
-────────────────────────────────────────────────────────────────────────────
-5. WIRE THE PROTOTYPES TO THE RUNNING SERVER
-────────────────────────────────────────────────────────────────────────────
+---
 
-The shared/claude-client.js uses FASTMCP_BASE_URL defaulting to
-http://localhost:8000. Update this to match the deployed port:
+## Running Tests
 
-  const FASTMCP_BASE_URL = (typeof window !== 'undefined' && window.FASTMCP_BASE_URL)
-    || 'http://localhost:8001';
+```bash
+# All Python tests
+python -m pytest tests/phase1/ -v                    # 196 Phase 1
+python -m pytest tests/phase2/ -v                    # 95 Phase 2
+python -m pytest server/deliberation/tests/ -v       # 290+ deliberation unit
+python -m pytest ingestion/tests/ -v                 # 152 ingestion
+python -m pytest shared/tests/ -v                   # 34 shared utilities
+python -m pytest tests/e2e/ -v                       # 28 end-to-end
+python -m pytest tests/test_mcp_discovery.py -v      # 26 discovery + OAuth
+python -m pytest tests/test_mcp_smoke.py -v          # 24 smoke
+cd mcp-server && python -m pytest tests/ -v          # 110 skills backend
+cd replit_dashboard && python -m pytest tests/ -v    # 30 dashboard
 
-Verify each prototype loads without JS console errors by opening them
-in a browser or running a simple HTTP server:
-    python -m http.server 8080 --directory prototypes/
+# Frontend
+cd replit-app && npm test                            # 37 Jest tests
+```
 
-────────────────────────────────────────────────────────────────────────────
-6. LIVE TOOL VERIFICATION (smoke tests)
-────────────────────────────────────────────────────────────────────────────
+---
 
-With the clinical server running on port 8001, verify each tool
-responds correctly. Use curl or Python httpx:
+## Constraints — Do Not Violate
 
-a. get_synthetic_patient — should return Maria Chen's full record:
-     curl -X POST http://localhost:8001/mcp \
-       -H "Content-Type: application/json" \
-       -d '{"method": "tools/call", "params": {"name": "get_synthetic_patient", "arguments": {"mrn": "4829341"}}}'
+- `FastMCP("name")` — no `description=` kwarg — causes startup crash
+- Never use `print()` in `@mcp.tool` functions — log to `sys.stderr`
+- Always call `coerce_confidence()` before writing float columns from LLM output
+- Always call `ensure_aware()` before datetime arithmetic on DB-read TIMESTAMP columns
+- `last_ingested_at` must be written as `NULL` on patient registration (never `NOW()`)
+- `AuditMiddleware` must be added AFTER tool registration (`mcp.add_middleware(...)` at end of server module)
+- Model names: `claude-sonnet-4-20250514`, `gpt-4o`, `claude-haiku-4-5-20251001`
+- `pytest-asyncio==0.21.2` pinned — do NOT upgrade to 1.x
+- Import shared utilities as `from shared.coercion import ...` (repo root is on sys.path in all 3 servers)
+- Do NOT store real patient data — all data is synthetic (Maria Chen MRN 4829341 is the demo patient)
 
-b. get_guideline — should return metformin recommendation:
-     curl -X POST http://localhost:8001/mcp \
-       -H "Content-Type: application/json" \
-       -d '{"method": "tools/call", "params": {"name": "get_guideline", "arguments": {"recommendation_id": "9.1a"}}}'
+---
 
-c. check_screening_due — Maria Chen's profile (54F, T2DM, obesity):
-     curl -X POST http://localhost:8001/mcp \
-       -H "Content-Type: application/json" \
-       -d '{"method": "tools/call", "params": {"name": "check_screening_due", "arguments": {"patient_age": 54, "sex": "female", "conditions": ["type_2_diabetes", "obesity"]}}}'
+## GitHub
 
-d. flag_drug_interaction — test ACE + ARB dual blockade:
-     curl -X POST http://localhost:8001/mcp \
-       -H "Content-Type: application/json" \
-       -d '{"method": "tools/call", "params": {"name": "flag_drug_interaction", "arguments": {"medications": ["lisinopril", "losartan"]}}}'
-
-e. clinical_query (only if ANTHROPIC_API_KEY is set):
-     curl -X POST http://localhost:8001/mcp \
-       -H "Content-Type: application/json" \
-       -d '{"method": "tools/call", "params": {"name": "clinical_query", "arguments": {"query": "What are the ADA recommendations for SGLT2 inhibitors in a patient with type 2 diabetes and CKD?", "role": "pcp", "patient_context": {"conditions": ["type_2_diabetes", "ckd"], "medications": ["metformin", "lisinopril"]}}}}'
-
-   Verify the response includes: citations, evidence grades, and the
-   "Verify dosing with pharmacist" caveat. It must NOT contain
-   definitive diagnostic language.
-
-NOTE: The exact HTTP endpoint format depends on how FastMCP exposes
-tools over streamable-http transport. Check FastMCP docs if the /mcp
-JSON-RPC format doesn't work — it may use /tools/<name> REST-style
-endpoints or /sse for SSE transport instead. Adjust the curl commands
-accordingly. The key requirement is that all 5 tools are callable and
-return correct response shapes.
-
-────────────────────────────────────────────────────────────────────────────
-7. UPDATE replit.md
-────────────────────────────────────────────────────────────────────────────
-
-Add a new section to replit.md documenting the clinical intelligence layer:
-
-  ## Clinical Intelligence Layer (Phase 1)
-
-  The clinical intelligence server provides AI-assisted clinical decision
-  support through a three-layer guardrail pipeline.
-
-  ### Running
-  - Auto-started via Replit workflow on port 8001
-  - Manual: `python -m server.mcp_server streamable-http`
-
-  ### Tools (5)
-  | Tool | Purpose |
-  |------|---------|
-  | clinical_query | Guardrailed Claude API for clinical questions |
-  | get_guideline | Lookup ADA/USPSTF guidelines by ID |
-  | check_screening_due | USPSTF screening eligibility check |
-  | flag_drug_interaction | Drug interaction detection |
-  | get_synthetic_patient | Demo patient data (Maria Chen) |
-
-  ### Testing
-  ```bash
-  python -m pytest tests/phase1/ -v   # 100 integration tests
-  ```
-
-  ### Environment
-  - Requires `ANTHROPIC_API_KEY` in Replit Secrets for clinical_query tool
-  - Other 4 tools work without API key (guideline lookups, screenings, etc.)
-
-────────────────────────────────────────────────────────────────────────────
-8. FINAL VERIFICATION CHECKLIST
-────────────────────────────────────────────────────────────────────────────
-
-Report pass/fail for each item:
-
-  [ ] Phase 1 integration tests: 100/100 passing
-  [ ] Existing backend tests: passing (report count)
-  [ ] Existing frontend tests: passing (report count)
-  [ ] Existing dashboard tests: passing (report count)
-  [ ] Clinical server starts on port 8001 without errors
-  [ ] get_synthetic_patient returns Maria Chen data
-  [ ] get_guideline returns ADA recommendation 9.1a
-  [ ] check_screening_due returns ≥5 screenings for 54F with diabetes
-  [ ] flag_drug_interaction detects ACE+ARB interaction
-  [ ] clinical_query returns guardrailed response (if API key present)
-  [ ] HTML prototypes load shared/claude-client.js without errors
-  [ ] .replit workflow starts both servers in parallel
-  [ ] replit.md updated with clinical intelligence documentation
-
-────────────────────────────────────────────────────────────────────────────
-CONSTRAINTS — do not violate these
-────────────────────────────────────────────────────────────────────────────
-
-- Do NOT use HealthEx MCP — it is incompatible with this environment
-- Do NOT use claude-opus-* models — the clinical server uses
-  claude-sonnet-4-20250514 only
-- Do NOT modify existing prototype HTML UI or styles — only touch the
-  script import and FASTMCP_BASE_URL
-- Do NOT allow direct Claude API calls from HTML prototypes
-- Do NOT store real patient data — all data is synthetic
-  (Maria Chen MRN 4829341 is the canonical demo patient)
-- Do NOT skip the output validation layer — it is mandatory
-- If ANTHROPIC_API_KEY is not set, do NOT block deployment.
-  The 4 non-AI tools must still work. clinical_query will return
-  an error status, which is the expected behavior.
+Repository: https://github.com/aliomraniH/ambient-patient-companion  
+Last commit: `94d0fe6`

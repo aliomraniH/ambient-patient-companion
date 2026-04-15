@@ -10,7 +10,7 @@
 
 ## 1. What This System Does
 
-The Ambient Patient Companion gives Claude a real-time clinical intelligence layer for primary care. It connects to a live PostgreSQL warehouse (34 tables, Synthea + HealthEx FHIR data) through three FastMCP servers, all proxied through Next.js with a full OAuth 2.0 PKCE layer.
+The Ambient Patient Companion gives Claude a real-time clinical intelligence layer for primary care. It connects to a live PostgreSQL warehouse (**35 tables**, Synthea + HealthEx FHIR) through three FastMCP servers, all proxied through Next.js 16 with a full OAuth 2.0 PKCE layer. Every tool call from Claude is automatically recorded to the `mcp_call_log` audit table via `AuditMiddleware` on all three servers.
 
 The system surface (`S`) is derived from:
 
@@ -41,26 +41,30 @@ Next.js 16 (port 5000)
   └── REST proxy: /tools/*      → localhost:8001/tools/*
       │
       ├── MCP Server 1 — ambient-clinical-intelligence (port 8001)
-      │   19 tools · 3-layer guardrails · Dual-LLM Deliberation · Flag Lifecycle
+      │   23 tools · 3-layer guardrails · Dual-LLM Deliberation · Flag Lifecycle
+      │   AuditMiddleware("clinical", _get_db_pool) — all calls → mcp_call_log
       │   Model: claude-sonnet-4-20250514 (clinical), gpt-4o (critic),
       │          claude-haiku-4-5-20251001 (flag reviewer · planner · synthesis reviewer)
       │
       ├── MCP Server 2 — ambient-skills-companion (port 8002)
-      │   18 tools · 10 skill modules auto-discovered from mcp-server/skills/
+      │   22+ tools · 21 skill modules auto-discovered from mcp-server/skills/
+      │   AuditMiddleware("skills", get_pool) — all calls → mcp_call_log
+      │   Includes call_history.py: 4 audit query tools for inspecting mcp_call_log
       │
       └── MCP Server 3 — ambient-ingestion (port 8003)
-          1 tool · HealthEx ETL (5 format parsers: A/B/C/D/JSON-dict)
+          4 tools · HealthEx ETL (5 format parsers: A/B/C/D/JSON-dict)
+          AuditMiddleware("ingestion", _get_provenance_pool) — all calls → mcp_call_log
       │
-      └── PostgreSQL — 34 tables (DATABASE_URL env var, auto-set by Replit)
+      └── PostgreSQL — 35 tables (DATABASE_URL env var, auto-set by Replit)
 ```
 
 **Public base URL**: `https://[your-replit-domain]`
 
 | Server | Path | Tools |
 |--------|------|-------|
-| `ambient-clinical-intelligence` | `/mcp` | 19 |
-| `ambient-skills-companion` | `/mcp-skills` | 18 |
-| `ambient-ingestion` | `/mcp-ingestion` | 1 |
+| `ambient-clinical-intelligence` | `/mcp` | 23 |
+| `ambient-skills-companion` | `/mcp-skills` | 22+ |
+| `ambient-ingestion` | `/mcp-ingestion` | 4 |
 
 ---
 
@@ -116,8 +120,13 @@ ambient-patient-companion/
 │
 ├── mcp-server/                  ← Server 2: ambient-skills-companion (port 8002)
 │   ├── server.py                ← FastMCP("ambient-skills-companion")
+│   │                              sys.path insert for shared/ + AuditMiddleware("skills", get_pool)
 │   │                              GET /health → {"ok":true,"server":"ambient-skills-companion"}
-│   ├── skills/                  ← 10 skill modules (register(mcp) convention)
+│   ├── skills/                  ← 21 skill modules (register(mcp) convention)
+│   │   ├── call_history.py      ← 4 audit query tools (get_current_session, list_sessions,
+│   │   │                              get_session_transcript, search_tool_calls)
+│   │   ├── atom_vector_search.py← search_similar_atoms, search_behavioral_atoms_cohort
+│   │   ├── behavioral_atoms.py  ← behavioral atom tools (uses shared.coercion)
 │   │   ├── compute_obt_score.py
 │   │   ├── compute_provider_risk.py
 │   │   ├── crisis_escalation.py
@@ -125,13 +134,19 @@ ambient-patient-companion/
 │   │   ├── generate_checkins.py
 │   │   ├── generate_patient.py  ← FHIR bundle → PostgreSQL
 │   │   ├── generate_vitals.py
-│   │   ├── ingestion_tools.py   ← 8 tools: freshness · ingestion · conflicts · tracks
-│   │   ├── previsit_brief.py
-│   │   └── sdoh_assessment.py
+│   │   ├── ingestion_tools.py   ← 5+ tools: freshness · ingestion · conflicts · tracks
+│   │   │                              _is_stale() uses shared.datetime_utils.ensure_aware
+│   │   ├── previsit_brief.py    ← uses ensure_aware for deadline arithmetic
+│   │   ├── screening_registry.py
+│   │   ├── sdoh_assessment.py
+│   │   ├── sdoh_registry.py
+│   │   ├── clinical_knowledge.py← search_clinical_knowledge (OpenFDA/RxNorm/PubMed)
+│   │   ├── patient_state_readers.py
+│   │   └── verify_output_provenance.py ← shared adapter, source_server=skills
 │   ├── db/schema.sql            ← 22-table base schema (authoritative source of truth)
 │   ├── transforms/              ← FHIR-to-schema transformers (5 resource types)
 │   ├── seed.py                  ← python mcp-server/seed.py --patients 10 --months 6
-│   └── tests/                   ← 92 backend tests
+│   └── tests/                   ← 110 backend tests
 │
 ├── ingestion/                   ← Server 3: ambient-ingestion (port 8003)
 │   ├── server.py                ← FastMCP("ambient-ingestion"), trigger_ingestion tool
@@ -148,6 +163,27 @@ ambient-patient-companion/
 │       ├── transfer_planner.py  ← Size-aware TransferPlan
 │       ├── traced_writer.py     ← Per-record writer + transfer_log audit
 │       └── parsers/             ← format_a / format_b / format_c / format_d / json_dict
+│
+├── shared/                      ← Cross-server Python utilities (repo root on sys.path in all 3 servers)
+│   ├── coercion.py              ← coerce_confidence(): normalises LLM-produced confidence values
+│   │                              bool→None | float→clamp[0,1] | int≤1→float | int>1→÷100
+│   │                              str numeric(int-valued>1)→÷100 | categorical→_CONFIDENCE_MAP
+│   │                              ("high"→0.80,"moderate"→0.60,"critical"→0.95,"very high"→0.90,
+│   │                               "low"→0.35,"none"→0.05)
+│   ├── datetime_utils.py        ← ensure_aware(dt): attaches UTC tzinfo to naive DB datetimes
+│   │                              (asyncpg returns TIMESTAMPTZ as aware, TIMESTAMP as naive;
+│   │                               mixing aware+naive raises TypeError in timedelta arithmetic)
+│   ├── call_recorder.py         ← CallRecorder: session_id UUID, 30-min idle→new UUID,
+│   │                              asyncpg write to mcp_call_log, _REGISTRY for live queries
+│   ├── audit_middleware.py      ← AuditMiddleware(Middleware): FastMCP on_call_tool hook
+│   │                              captures tool_name, input_params, output_text, output_data,
+│   │                              duration_ms, outcome ("success"|"error")
+│   │                              Attached via mcp.add_middleware() after tool registration
+│   ├── claude-client.js         ← Shared JS MCP client (direct tool endpoint calls)
+│   ├── provenance/              ← Universal provenance gate (shared across all 3 servers)
+│   └── tests/                   ← 34 unit tests
+│       ├── test_coerce_confidence.py ← 28 tests for coerce_confidence
+│       └── test_datetime_utils.py    ← 6 tests for ensure_aware
 │
 ├── replit-app/                  ← Next.js 16 frontend (port 5000)
 │   ├── next.config.ts           ← Proxy rewrites to all 3 MCP servers
@@ -184,7 +220,6 @@ ambient-patient-companion/
 │                TestCrossServerConsistency · TestOAuthDiscovery
 │
 ├── config/system_prompts/       ← Role-based system prompts (pcp · care_manager · patient)
-├── shared/claude-client.js      ← Shared JS MCP client (direct tool endpoint calls)
 ├── prototypes/                  ← 4 HTML proof-of-concept prototypes
 └── submission/README.md         ← MCP marketplace submission
 ```
@@ -213,7 +248,7 @@ All secrets are Replit Secrets (never in `.env` files):
 
 ## 5. MCP Tool Registry
 
-> **Live counts** (post `bd4216f` dedup, 2026-04-13): S1 = 23, S2 = 15, S3 = 4.
+> **Live counts** (post audit-log system, 2026-04-15): S1 = 23, S2 = 22+, S3 = 4.
 > Re-derive anytime with `curl /tools` on each `/health`-responsive server.
 >
 > `verify_output_provenance` is **registered on all three servers by design**
@@ -265,18 +300,30 @@ GET  /health                   → {"ok":true,"server":"ambient-clinical-intelli
 POST /tools/<tool_name>        → same response as MCP tool call
 ```
 
-### Server 2 — ambient-skills-companion (15 tools)
+### Server 2 — ambient-skills-companion (22+ tools)
 
-Auto-discovered from `mcp-server/skills/` via `load_skills(mcp)`. Post-`bd4216f`
-the 6 cross-server duplicates (`use_healthex`, `use_demo_data`,
-`switch_data_track`, `get_data_source_status`, `register_healthex_patient`,
-`ingest_from_healthex`) have been removed — those live on S1 only.
+Auto-discovered from `mcp-server/skills/` via `load_skills(mcp)`. 21 modules loaded.
+The 6 cross-server duplicates were removed post-`bd4216f` — those live on S1 only.
+4 new audit query tools added via `call_history.py`.
 
 ```
+# Clinical skills
 compute_obt_score · compute_provider_risk · run_crisis_escalation · run_food_access_nudge
 generate_daily_checkins · generate_patient · generate_daily_vitals · generate_previsit_brief
-run_sdoh_assessment · check_data_freshness · run_ingestion · get_source_conflicts
-orchestrate_refresh · search_clinical_knowledge · verify_output_provenance
+run_sdoh_assessment · search_clinical_knowledge
+
+# Data + ingestion skills
+check_data_freshness · run_ingestion · get_source_conflicts · orchestrate_refresh
+
+# Behavioral + vector skills
+search_similar_atoms · search_behavioral_atoms_cohort · behavioral_pressure_tools
+behavioral_card_tools
+
+# Audit query tools (NEW — call_history.py)
+get_current_session · list_sessions · get_session_transcript · search_tool_calls
+
+# System
+verify_output_provenance
 
 GET /health → {"ok":true,"server":"ambient-skills-companion","version":"1.0.0"}
 ```
@@ -287,10 +334,15 @@ GET /health → {"ok":true,"server":"ambient-skills-companion","version":"1.0.0"
 - `generate_previsit_brief` — cache-aware reader. Includes
   `recent_deliberation` section when a complete deliberation exists within
   the last 24 hours. NEVER synchronously triggers `run_deliberation`.
+  Uses `shared.datetime_utils.ensure_aware()` for deadline arithmetic.
 - `check_data_freshness` — **orchestration-phase completeness**: checks that
   all pipeline stages (ingest, normalize, warehouse write) have run for a
   patient. Different from S3's `detect_context_staleness` (below).
 - `verify_output_provenance` — shared adapter, `source_server='ambient-skills-companion'`.
+- `get_current_session` — queries `mcp_call_log` via `shared.call_recorder._REGISTRY` for
+  live session IDs + call counts across all running servers.
+- `get_session_transcript` — full chronological tool call log for a session (latest if None).
+- `search_tool_calls` — filter by tool_name, server_name, outcome, from_minutes_ago.
 
 ### Server 3 — ambient-ingestion (4 tools)
 
@@ -443,6 +495,21 @@ lifecycle_state: flag_lifecycle_state  -- open | retracted | needs_review | conf
 flag_basis:      flag_basis            -- deliberation | rule | manual
 priority:        flag_priority         -- critical | high | medium | low
 correction_action: correction_action   -- retract | confirm | escalate
+
+-- mcp_call_log (audit log — 35th table)
+id           BIGSERIAL PRIMARY KEY
+session_id   TEXT            -- UUID, 30-min idle → new UUID per server
+server_name  TEXT            -- 'clinical' | 'skills' | 'ingestion'
+tool_name    TEXT
+called_at    TIMESTAMPTZ DEFAULT NOW()
+duration_ms  INT
+input_params JSONB
+output_text  TEXT            -- first 4000 chars of string output
+output_data  JSONB           -- structured output (if result is dict/list)
+outcome      TEXT            -- 'success' | 'error'
+error_message TEXT
+seq          INT             -- call number within session
+-- 4 indexes: called_at, session_id, tool_name, (server_name, tool_name)
 ```
 
 ### Migration Order
@@ -455,6 +522,7 @@ server/migrations/003_transfer_log.sql              ← transfer_log (28 cols)
 server/deliberation/migrations/004_flag_lifecycle.sql ← deliberation_flags, reviews, corrections
 server/migrations/004_content_router_tables.sql     ← clinical_notes, media_references
 server/migrations/005_text_columns.sql              ← TEXT not VARCHAR (UCUM unit codes)
+shared/call_recorder.py (runtime CREATE TABLE IF NOT EXISTS)  ← mcp_call_log (35th table)
 ```
 
 ### DB Access in Python
@@ -475,6 +543,18 @@ await pool.fetch("SELECT * FROM biometric_readings WHERE measured_at > $1", cuto
 # "... JOIN deliberation_outputs do ON ..."  ← crashes
 # CORRECT:
 # "... JOIN deliberation_outputs dout ON ..."
+
+# IMPORTANT: asyncpg returns TIMESTAMPTZ as aware, TIMESTAMP as naive.
+# Never compute timedelta with a DB-read datetime without ensure_aware():
+from shared.datetime_utils import ensure_aware
+row = await pool.fetchrow("SELECT last_ingested_at FROM source_freshness WHERE patient_id=$1", pid)
+last_ingested_at = ensure_aware(row["last_ingested_at"])  # safe even if NULL is handled upstream
+age = datetime.now(tz=timezone.utc) - last_ingested_at   # TypeError-safe
+
+# CONFIDENCE VALUES: Always normalise before writing to Postgres:
+from shared.coercion import coerce_confidence
+confidence = coerce_confidence(llm_value)  # float→clamp; int>1→÷100; "high"→0.80; bool→None
+await pool.execute("INSERT INTO deliberation_outputs (confidence) VALUES ($1)", confidence)
 ```
 
 ---
@@ -485,17 +565,18 @@ await pool.fetch("SELECT * FROM biometric_readings WHERE measured_at > $1", cuto
 # Run individual suites
 python -m pytest tests/phase1/ -v                    # 196 tests
 python -m pytest tests/phase2/ -v                    # 95 tests
-python -m pytest server/deliberation/tests/ -v       # 109 tests
+python -m pytest server/deliberation/tests/ -v       # 290+ deliberation unit tests
 python -m pytest ingestion/tests/ -v                 # 152 tests
+python -m pytest shared/tests/ -v                   # 34 tests (coercion + datetime)
 python -m pytest tests/e2e/ -v                       # 28 tests
 python -m pytest tests/test_mcp_discovery.py -v      # 26 tests (DN-1–DN-26)
 python -m pytest tests/test_mcp_smoke.py -v          # 24 tests
-cd mcp-server && python -m pytest tests/ -v          # 92 tests
+cd mcp-server && python -m pytest tests/ -v          # 110 tests
 cd replit-app && npm test                            # 37 Jest tests
 cd replit_dashboard && python -m pytest tests/ -v    # 30 tests
 
 # Run all Python tests at once
-python -m pytest tests/ server/deliberation/tests/ ingestion/tests/ -v
+python -m pytest tests/ server/deliberation/tests/ ingestion/tests/ shared/tests/ -v
 ```
 
 ### pytest configuration (pytest.ini)
@@ -554,8 +635,42 @@ TestOAuthDiscovery      DN-24 to DN-26  OAuth route files, oauth-store.ts, respo
 
 ### Skills Server
 - `load_skills(mcp)` in `mcp-server/server.py` auto-discovers all `.py` files in `mcp-server/skills/` with a `register(mcp)` function
-- Each skill module must export `register(mcp: FastMCP) -> None`
-- 18 tools total (not 17 — `ingestion_tools.py` contributes 8 tools)
+- Each skill module must export `register(mcp: FastMCP) -> None`; modules without `register()` log a WARNING and are skipped (expected for helpers)
+- 21 modules loaded; 22+ tools total (4 from call_history.py, multiple from ingestion_tools.py + behavioral stack)
+- `mcp-server/server.py` must insert repo root into `sys.path` at the top — `mcp-server/` is one level deeper than repo root, so `_REPO_ROOT = Path(__file__).resolve().parent.parent`
+
+### AuditMiddleware
+- `shared/audit_middleware.py` provides `AuditMiddleware(Middleware)` — a FastMCP middleware subclass
+- Attach to any FastMCP server: `mcp.add_middleware(AuditMiddleware(server_name, get_pool_fn))`
+  - `server_name`: `"clinical"` | `"skills"` | `"ingestion"`
+  - `get_pool_fn`: zero-argument async callable returning the asyncpg pool
+- Wired AFTER all `@mcp.tool` registrations and `load_skills()` calls (order matters)
+- Lazy init: pool is requested on first tool call, not at module load
+- Fire-and-forget: DB write does NOT block the tool response (asyncio.create_task)
+- Session tracking via `shared.call_recorder.CallRecorder`: 30-min idle → new session UUID
+
+### shared/ Utilities
+- **coerce_confidence(value) → Optional[float]**
+  - `bool` → `None` (do not pass True/False as confidence)
+  - `float` → clamp to `[0.0, 1.0]`
+  - `int` ≤ 1 → cast to float literal (0 → 0.0, 1 → 1.0)
+  - `int` > 1 → divide by 100 (interpret as percentage: 85 → 0.85)
+  - `str` numeric, integer-valued > 1 → divide by 100; float-valued → clamp
+  - `str` categorical → `_CONFIDENCE_MAP`: high→0.80, moderate→0.60, critical→0.95, very high→0.90, low→0.35, none→0.05
+  - **Import**: `from shared.coercion import coerce_confidence`
+  - **Use at all 5 DB bind sites** in `knowledge_store.py` before writing float columns
+
+- **ensure_aware(dt) → Optional[datetime]**
+  - If `dt` is `None` → returns `None`
+  - If `dt` is already timezone-aware → returns unchanged
+  - If `dt` is naive → attaches `timezone.utc` (assumes UTC, per asyncpg convention)
+  - **Import**: `from shared.datetime_utils import ensure_aware`
+  - **Use whenever** reading `last_ingested_at`, `measured_at`, or any TIMESTAMP column before timedelta arithmetic
+
+### source_freshness Init Rule
+- `register_healthex_patient` writes `last_ingested_at = NULL` (not `NOW()`)
+- `_is_stale(None, ttl)` returns `True` immediately → ensures first ingest always fires
+- Never write `NOW()` as `last_ingested_at` on registration — that would suppress the required first ingest
 
 ### Frontend
 - Patient date rendering uses UTC-aware formatting to avoid SSR/client hydration mismatch

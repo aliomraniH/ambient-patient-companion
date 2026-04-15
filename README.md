@@ -69,21 +69,21 @@ graph TB
         S1["ambient-clinical-intelligence<br/>FastMCP 3.2"]
         G1["3-Layer Guardrail Pipeline"]
         DE["Dual-LLM Deliberation Engine<br/>6 phases · Claude + GPT-4o"]
-        T1["19 Tools"]
+        T1["23 Tools · AuditMiddleware"]
     end
 
     subgraph "MCP Server 2 — Port 8002"
         S2["ambient-skills-companion<br/>FastMCP 3.2"]
-        SK["10 skill modules<br/>auto-discovered"]
-        T2["18 Tools"]
+        SK["21 skill modules<br/>auto-discovered"]
+        T2["22+ Tools · AuditMiddleware"]
     end
 
     subgraph "MCP Server 3 — Port 8003"
         S3["ambient-ingestion<br/>FastMCP 3.2"]
-        T3["1 Tool — trigger_ingestion<br/>5 format parsers"]
+        T3["4 Tools · AuditMiddleware<br/>5 format parsers"]
     end
 
-    subgraph "PostgreSQL — 34 Tables"
+    subgraph "PostgreSQL — 35 Tables"
         DB["patients · biometrics · conditions<br/>deliberations · flags · nudges<br/>ingestion_plans · transfer_log<br/>clinical_notes · system_config · …"]
     end
 
@@ -156,7 +156,7 @@ Guardrail Pipeline:
 
 ### Server 2 — `ambient-skills-companion` · `mcp-server/server.py`
 
-18 clinical skills auto-discovered from `mcp-server/skills/` via a `register(mcp)` convention.
+22+ tools auto-discovered from `mcp-server/skills/` via a `register(mcp)` convention. 21 skill modules loaded. Every tool call is logged to `mcp_call_log` via `AuditMiddleware`.
 
 ```
 Public URL: https://[your-replit-domain]/mcp-skills
@@ -164,7 +164,7 @@ Public URL: https://[your-replit-domain]/mcp-skills
 
 ```mermaid
 graph LR
-    subgraph "ambient-skills-companion — 18 tools"
+    subgraph "ambient-skills-companion — 22+ tools"
         A["compute_obt_score<br/>Optimal Being Trajectory"]
         B["compute_provider_risk<br/>Chase list score"]
         C["run_crisis_escalation<br/>Behavioral crisis detection"]
@@ -174,7 +174,9 @@ graph LR
         G["generate_daily_vitals<br/>Biometric reading seed"]
         H["generate_previsit_brief<br/>Pre-encounter synthesis"]
         I["run_sdoh_assessment<br/>Social determinants"]
-        J["Data track tools (8)<br/>freshness · ingestion · conflicts<br/>source status · healthex · demo data"]
+        J["Data track tools (5)<br/>freshness · ingestion · conflicts<br/>source status · orchestrate_refresh"]
+        K["Audit query tools (4)<br/>get_current_session · list_sessions<br/>get_session_transcript · search_tool_calls"]
+        L["Behavioral + vector stack<br/>search_similar_atoms · atom_cohort<br/>behavioral pressure + cards"]
     end
 
     style A fill:#6B5EA8,color:#fff
@@ -183,6 +185,8 @@ graph LR
     style D fill:#4A8C72,color:#fff
     style H fill:#C9864A,color:#fff
     style J fill:#2d4a6b,color:#fff
+    style K fill:#3E6B5C,color:#fff
+    style L fill:#4A8C72,color:#fff
 ```
 
 ### Server 3 — `ambient-ingestion` · `ingestion/server.py`
@@ -194,6 +198,16 @@ trigger_ingestion(patient_id, source, force_refresh)
   Full ETL pipeline: FHIR parse → conflict detection → upsert → freshness log
   Adapters: synthea (demo) | healthex (real records)
   Format parsers: A (plain text) · B (compressed table) · C (flat FHIR text) · D (FHIR JSON) · JSON-dict
+
+detect_context_staleness(patient_id, clinical_scenario)
+  LOINC-keyed clinical freshness per evidence-based thresholds.
+  Returns freshness_score + recommended_refreshes.
+
+search_patient_data_extended(patient_id, query, ...)
+  Extended data search across all patient records.
+
+verify_output_provenance(payload, ...)
+  Shared provenance gate (source_server=ingestion).
 ```
 
 ---
@@ -249,7 +263,26 @@ graph LR
 
 ---
 
-## Database Schema — 34 Tables
+## MCP Audit Log System
+
+Every tool call made by Claude (or any external MCP client) is automatically recorded — across all three servers — with no action required from callers.
+
+**How it works:** `AuditMiddleware` (a `fastmcp.Middleware` subclass in `shared/audit_middleware.py`) is wired to all three servers. It fires on every `on_call_tool` event, capturing inputs, output, timing, and outcome in a fire-and-forget async write to the `mcp_call_log` table.
+
+**Session tracking:** `shared/call_recorder.py` maintains a session UUID per server instance. 30 minutes of inactivity triggers a new session UUID automatically. The `seq` column is the call number within the session.
+
+**Query from Claude** using four tools on the Skills server:
+
+| Tool | Description |
+|------|-------------|
+| `get_current_session` | Live session IDs + call counts for every running server |
+| `list_sessions(limit, server_name)` | Recent sessions ordered by last activity |
+| `get_session_transcript(session_id)` | Full chronological call log for a session |
+| `search_tool_calls(tool_name, server_name, outcome, from_minutes_ago)` | Flexible filter |
+
+---
+
+## Database Schema — 35 Tables
 
 ```mermaid
 erDiagram
@@ -290,6 +323,7 @@ erDiagram
 - **Deliberation** (4 tables): `deliberations`, `deliberation_outputs`, `patient_knowledge`, `core_knowledge_updates`
 - **Flag lifecycle** (3 tables): `deliberation_flags`, `flag_review_runs`, `flag_corrections`
 - **Ingestion** (4 tables): `ingestion_plans`, `transfer_log`, `clinical_notes`, `media_references`
+- **Audit** (1 table): `mcp_call_log` — MCP tool call audit log: `id`, `session_id`, `server_name`, `tool_name`, `called_at`, `duration_ms`, `input_params` (JSONB), `output_text`, `output_data` (JSONB), `outcome`, `error_message`, `seq`
 - **System**: `system_config` (data track, model, dashboard state)
 
 ---
@@ -413,7 +447,7 @@ graph LR
 
 ---
 
-## Test Coverage — ~670 tests
+## Test Coverage — ~800 tests
 
 ```
 ┌────────────────────────────────────────┬────────┬───────────┐
@@ -421,9 +455,10 @@ graph LR
 ├────────────────────────────────────────┼────────┼───────────┤
 │ Phase 1 Clinical Intelligence          │  196   │ pytest    │
 │ Phase 2 Deliberation + Flags           │   95   │ pytest    │
-│ Deliberation Engine Unit               │  109   │ pytest    │
+│ Deliberation Engine Unit               │  290+  │ pytest    │
 │ Ingestion Pipeline                     │  152   │ pytest    │
-│ Skills MCP Backend                     │   92   │ pytest    │
+│ Skills MCP Backend                     │  110   │ pytest    │
+│ Shared Utilities (coercion+datetime)   │   34   │ pytest    │
 │ End-to-End MCP Use-Cases               │   28   │ pytest    │
 │ MCP Smoke Tests                        │   24   │ pytest    │
 │ MCP Discovery + OAuth (DN-1–DN-26)     │   26   │ pytest    │
@@ -437,6 +472,7 @@ python -m pytest tests/phase1/ -v
 python -m pytest tests/phase2/ -v
 python -m pytest server/deliberation/tests/ -v
 python -m pytest ingestion/tests/ -v
+python -m pytest shared/tests/ -v                  # coerce_confidence + ensure_aware
 python -m pytest tests/e2e/ -v
 python -m pytest tests/test_mcp_discovery.py -v   # DN-1 to DN-26
 cd mcp-server && python -m pytest tests/ -v
@@ -464,7 +500,8 @@ ambient-patient-companion/
 │       └── PatientManager.tsx   Patient CRUD (search · add · edit · delete)
 │
 ├── server/                      Server 1: ambient-clinical-intelligence (port 8001)
-│   ├── mcp_server.py            FastMCP: 19 tools + REST wrappers + /health
+│   ├── mcp_server.py            FastMCP: 23 tools + REST wrappers + /health
+│   │                            + AuditMiddleware("clinical", _get_db_pool)
 │   ├── guardrails/              input_validator · output_validator · clinical_rules
 │   └── deliberation/            Dual-LLM Deliberation Engine (6 phases)
 │       ├── engine.py            Phase orchestrator
@@ -476,20 +513,32 @@ ambient-patient-companion/
 │       ├── synthesis_reviewer.py Phase 3.25: domain review (Haiku)
 │       ├── output_safety.py     Phase 3.5: guardrail wrapper
 │       ├── behavioral_adapter.py Phase 4: nudge formatting
-│       ├── knowledge_store.py   Phase 5: DB commit
+│       ├── knowledge_store.py   Phase 5: DB commit (uses coerce_confidence)
 │       ├── flag_reviewer.py     LLM flag lifecycle review (Haiku)
 │       └── flag_writer.py       Flag registry writes
 │
 ├── mcp-server/                  Server 2: ambient-skills-companion (port 8002)
-│   ├── server.py                FastMCP: auto-discovers skills (18 tools)
-│   ├── skills/                  10 skill modules
+│   ├── server.py                FastMCP: auto-discovers skills (22+ tools)
+│   │                            + sys.path fix for shared/ + AuditMiddleware("skills", get_pool)
+│   ├── skills/                  21 skill modules (register(mcp) convention)
+│   │   ├── call_history.py      NEW: 4 audit query tools
+│   │   └── …                    compute_obt_score · crisis_escalation · behavioral stack · …
 │   ├── db/schema.sql            22-table base schema (source of truth)
 │   └── transforms/              FHIR-to-schema transformers
 │
 ├── ingestion/                   Server 3: ambient-ingestion (port 8003)
-│   ├── server.py                FastMCP: trigger_ingestion tool
-│   ├── pipeline.py              ETL orchestrator
+│   ├── server.py                FastMCP: 4 tools + AuditMiddleware("ingestion", pool)
+│   ├── pipeline.py              ETL orchestrator (uses ensure_aware)
 │   └── adapters/healthex/       5-format adaptive parser + audit trail
+│
+├── shared/                      Cross-server Python utilities (on sys.path in all servers)
+│   ├── coercion.py              coerce_confidence(): float→clamp; int>1→÷100; str→map
+│   ├── datetime_utils.py        ensure_aware(): naive→UTC-aware for DB datetime arithmetic
+│   ├── call_recorder.py         CallRecorder: session UUID tracking + asyncpg audit writes
+│   ├── audit_middleware.py      AuditMiddleware(Middleware): FastMCP on_call_tool hook
+│   ├── claude-client.js         Shared JS MCP client
+│   ├── provenance/              Universal provenance gate (all 3 MCP servers)
+│   └── tests/                   34 unit tests for coercion + datetime utils
 │
 ├── replit_dashboard/            Config Dashboard (port 8080)
 ├── scripts/
@@ -503,7 +552,6 @@ ambient-patient-companion/
 ├── .mcp.json                    MCP client discovery (auto-regenerated at startup)
 ├── start.sh                     Production startup script
 ├── config/system_prompts/       Role-based prompts (pcp · care_manager · patient)
-├── shared/claude-client.js      Shared JS MCP client
 ├── prototypes/                  4 HTML proof-of-concept prototypes
 └── submission/README.md         MCP marketplace submission
 ```
