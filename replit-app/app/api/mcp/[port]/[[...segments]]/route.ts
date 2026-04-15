@@ -38,7 +38,7 @@ async function proxy(request: NextRequest, context: RouteContext) {
     );
   }
 
-  const authError = requireBearerToken(request);
+  const authError = await requireBearerToken(request);
   if (authError) return authError;
 
   const { port, segments = [] } = await context.params;

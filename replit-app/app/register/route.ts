@@ -51,7 +51,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const client = oauthStore.registerClient({
+  const client = await oauthStore.registerClient({
     redirect_uris,
     client_name: (body.client_name as string) ?? "MCP Client",
   });

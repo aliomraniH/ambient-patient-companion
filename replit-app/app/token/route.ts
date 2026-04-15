@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const authCode = oauthStore.consumeAuthCode(code);
+  const authCode = await oauthStore.consumeAuthCode(code);
   if (!authCode) {
     return NextResponse.json(
       { error: "invalid_grant", error_description: "code invalid or expired" },
@@ -94,7 +94,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const accessToken = oauthStore.createAccessToken(authCode.client_id);
+  const accessToken = await oauthStore.createAccessToken(authCode.client_id);
 
   return NextResponse.json(
     {

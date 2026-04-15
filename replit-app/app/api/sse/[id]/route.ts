@@ -6,7 +6,7 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const authError = requireBearerToken(request);
+  const authError = await requireBearerToken(request);
   if (authError) return authError;
 
   const { id } = await params;

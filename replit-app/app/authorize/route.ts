@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "invalid_request", error_description: "redirect_uri required" }, { status: 400, headers: cors });
   }
 
-  const client = oauthStore.getClient(client_id);
+  const client = await oauthStore.getClient(client_id);
   if (!client) {
     return NextResponse.json({ error: "invalid_client" }, { status: 400, headers: cors });
   }
@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const code = oauthStore.createAuthCode({
+  const code = await oauthStore.createAuthCode({
     client_id,
     redirect_uri,
     code_challenge,

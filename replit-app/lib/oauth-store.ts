@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import pg from "pg";
 
 export interface OAuthClient {
   client_id: string;
@@ -24,10 +25,6 @@ export interface AccessToken {
   expires_at: number;
 }
 
-const clients = new Map<string, OAuthClient>();
-const authCodes = new Map<string, AuthCode>();
-const accessTokens = new Map<string, AccessToken>();
-
 function randomHex(bytes = 32): string {
   const arr = new Uint8Array(bytes);
   crypto.getRandomValues(arr);
@@ -51,11 +48,20 @@ export function verifyPkceS256(
   return computed === codeChallenge;
 }
 
+let _pool: pg.Pool | null = null;
+
+function getPool(): pg.Pool {
+  if (!_pool) {
+    _pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+  }
+  return _pool;
+}
+
 export const oauthStore = {
-  registerClient(data: {
+  async registerClient(data: {
     redirect_uris: string[];
     client_name?: string;
-  }): OAuthClient {
+  }): Promise<OAuthClient> {
     const client: OAuthClient = {
       client_id: `mcp-${randomHex(12)}`,
       client_secret: randomHex(32),
@@ -63,62 +69,101 @@ export const oauthStore = {
       client_name: data.client_name,
       created_at: Date.now(),
     };
-    clients.set(client.client_id, client);
+    await getPool().query(
+      `INSERT INTO oauth_clients (client_id, client_secret, redirect_uris, client_name, created_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (client_id) DO NOTHING`,
+      [
+        client.client_id,
+        client.client_secret,
+        JSON.stringify(client.redirect_uris),
+        client.client_name ?? null,
+        client.created_at,
+      ]
+    );
     return client;
   },
 
-  getClient(client_id: string): OAuthClient | undefined {
-    return clients.get(client_id);
+  async getClient(client_id: string): Promise<OAuthClient | undefined> {
+    const res = await getPool().query(
+      `SELECT client_id, client_secret, redirect_uris, client_name, created_at
+       FROM oauth_clients WHERE client_id = $1`,
+      [client_id]
+    );
+    if (res.rows.length === 0) return undefined;
+    const row = res.rows[0];
+    return {
+      client_id: row.client_id,
+      client_secret: row.client_secret,
+      redirect_uris:
+        typeof row.redirect_uris === "string"
+          ? JSON.parse(row.redirect_uris)
+          : row.redirect_uris,
+      client_name: row.client_name ?? undefined,
+      created_at: Number(row.created_at),
+    };
   },
 
-  createAuthCode(data: {
+  async createAuthCode(data: {
     client_id: string;
     redirect_uri: string;
     code_challenge?: string;
     code_challenge_method?: string;
-  }): string {
+  }): Promise<string> {
     const code = randomHex(24);
-    authCodes.set(code, {
-      code,
-      client_id: data.client_id,
-      redirect_uri: data.redirect_uri,
-      code_challenge: data.code_challenge,
-      code_challenge_method: data.code_challenge_method,
-      expires_at: Date.now() + 5 * 60 * 1000,
-      used: false,
-    });
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+    await getPool().query(
+      `INSERT INTO oauth_auth_codes (code, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, used)
+       VALUES ($1, $2, $3, $4, $5, $6, FALSE)`,
+      [
+        code,
+        data.client_id,
+        data.redirect_uri,
+        data.code_challenge ?? null,
+        data.code_challenge_method ?? null,
+        expiresAt,
+      ]
+    );
     return code;
   },
 
-  consumeAuthCode(code: string): AuthCode | null {
-    const entry = authCodes.get(code);
-    if (!entry) return null;
-    if (entry.used) return null;
-    if (Date.now() > entry.expires_at) {
-      authCodes.delete(code);
-      return null;
-    }
-    entry.used = true;
-    return entry;
+  async consumeAuthCode(code: string): Promise<AuthCode | null> {
+    const res = await getPool().query(
+      `UPDATE oauth_auth_codes
+       SET used = TRUE
+       WHERE code = $1 AND used = FALSE AND expires_at > $2
+       RETURNING code, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, used`,
+      [code, Date.now()]
+    );
+    if (res.rows.length === 0) return null;
+    const row = res.rows[0];
+    return {
+      code: row.code,
+      client_id: row.client_id,
+      redirect_uri: row.redirect_uri,
+      code_challenge: row.code_challenge ?? undefined,
+      code_challenge_method: row.code_challenge_method ?? undefined,
+      expires_at: Number(row.expires_at),
+      used: true,
+    };
   },
 
-  createAccessToken(client_id: string): string {
+  async createAccessToken(client_id: string): Promise<string> {
     const token = randomHex(40);
-    accessTokens.set(token, {
-      token,
-      client_id,
-      expires_at: Date.now() + 24 * 60 * 60 * 1000,
-    });
+    const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
+    await getPool().query(
+      `INSERT INTO oauth_access_tokens (token, client_id, expires_at)
+       VALUES ($1, $2, $3)`,
+      [token, client_id, expiresAt]
+    );
     return token;
   },
 
-  validateToken(token: string): boolean {
-    const entry = accessTokens.get(token);
-    if (!entry) return false;
-    if (Date.now() > entry.expires_at) {
-      accessTokens.delete(token);
-      return false;
-    }
-    return true;
+  async validateToken(token: string): Promise<boolean> {
+    const res = await getPool().query(
+      `SELECT 1 FROM oauth_access_tokens WHERE token = $1 AND expires_at > $2`,
+      [token, Date.now()]
+    );
+    return res.rows.length > 0;
   },
 };

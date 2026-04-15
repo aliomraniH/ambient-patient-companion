@@ -7,7 +7,7 @@ function getResourceMetadataUrl(): string {
   return `${base}/.well-known/oauth-protected-resource`;
 }
 
-export function requireBearerToken(request: NextRequest): NextResponse | null {
+export async function requireBearerToken(request: NextRequest): Promise<NextResponse | null> {
   const authHeader = request.headers.get("authorization");
   const wwwAuth = `Bearer resource_metadata="${getResourceMetadataUrl()}"`;
 
@@ -22,7 +22,8 @@ export function requireBearerToken(request: NextRequest): NextResponse | null {
   }
 
   const token = authHeader.slice(7);
-  if (!oauthStore.validateToken(token)) {
+  const valid = await oauthStore.validateToken(token);
+  if (!valid) {
     return NextResponse.json(
       { error: "invalid_token", error_description: "Token is invalid or expired" },
       {

@@ -7,7 +7,7 @@ interface RouteParams {
 }
 
 export async function GET(req: NextRequest, { params }: RouteParams) {
-  const authError = requireBearerToken(req);
+  const authError = await requireBearerToken(req);
   if (authError) return authError;
 
   const { id } = await params;
@@ -30,7 +30,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
 }
 
 export async function PUT(request: NextRequest, { params }: RouteParams) {
-  const authError = requireBearerToken(request);
+  const authError = await requireBearerToken(request);
   if (authError) return authError;
 
   const { id } = await params;
@@ -71,7 +71,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 }
 
 export async function DELETE(req: NextRequest, { params }: RouteParams) {
-  const authError = requireBearerToken(req);
+  const authError = await requireBearerToken(req);
   if (authError) return authError;
 
   const { id } = await params;

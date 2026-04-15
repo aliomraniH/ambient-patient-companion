@@ -3,7 +3,7 @@ import { query } from "@/lib/db";
 import { requireBearerToken } from "@/lib/auth-middleware";
 
 export async function POST(request: NextRequest) {
-  const authError = requireBearerToken(request);
+  const authError = await requireBearerToken(request);
   if (authError) return authError;
 
   try {
