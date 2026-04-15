@@ -20,7 +20,10 @@ from starlette.responses import JSONResponse
 from db.connection import get_pool
 from shared.audit_middleware import AuditMiddleware
 
-mcp = FastMCP("ambient-skills-companion")
+mcp = FastMCP(
+    "ambient-skills-companion",
+    instructions="Ambient Skills Companion — specialized clinical skills and knowledge tools including motivational interviewing, health literacy assessment, care gap analysis, OBT scoring, patient education, call history auditing, and multi-domain clinical reasoning. Use these tools to enhance patient engagement and apply evidence-based clinical skills.",
+)
 
 
 @mcp.custom_route("/health", methods=["GET"])

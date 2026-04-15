@@ -5,6 +5,18 @@ import { openCorsHeaders, openCorsPreflightHeaders } from "@/lib/cors";
 
 const ALLOWED_PORTS = new Set(["8001", "8002", "8003"]);
 
+const FORWARDED_REQUEST_HEADERS = [
+  "content-type",
+  "accept",
+  "mcp-session-id",
+  "last-event-id",
+];
+
+const FORWARDED_RESPONSE_HEADERS = [
+  "mcp-session-id",
+  "content-type",
+];
+
 type RouteContext = {
   params: Promise<{ port: string; segments?: string[] }>;
 };
@@ -40,10 +52,13 @@ async function proxy(request: NextRequest, context: RouteContext) {
   const upstream_url = `http://localhost:${port}${path ? `/${path}` : ""}${search}`;
 
   const fwdHeaders: Record<string, string> = {};
-  const ct = request.headers.get("content-type");
-  if (ct) fwdHeaders["Content-Type"] = ct;
-  const accept = request.headers.get("accept");
-  fwdHeaders["Accept"] = accept ?? "application/json, text/event-stream";
+  for (const h of FORWARDED_REQUEST_HEADERS) {
+    const val = request.headers.get(h);
+    if (val) fwdHeaders[h] = val;
+  }
+  if (!fwdHeaders["accept"]) {
+    fwdHeaders["accept"] = "application/json, text/event-stream";
+  }
 
   let body: string | undefined;
   if (request.method === "POST" || request.method === "PUT" || request.method === "PATCH") {
@@ -65,13 +80,17 @@ async function proxy(request: NextRequest, context: RouteContext) {
     const cors = openCorsHeaders(request.headers.get("origin"));
     const upstreamCt = upstream.headers.get("content-type") ?? "";
 
+    const responseHeaders: Record<string, string> = { ...cors };
+    for (const h of FORWARDED_RESPONSE_HEADERS) {
+      const val = upstream.headers.get(h);
+      if (val) responseHeaders[h] = val;
+    }
+
     if (upstreamCt.includes("text/event-stream") && upstream.body) {
-      const responseHeaders: Record<string, string> = {
-        ...cors,
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      };
+      responseHeaders["Content-Type"] = "text/event-stream";
+      responseHeaders["Cache-Control"] = "no-cache, no-transform";
+      responseHeaders["Connection"] = "keep-alive";
+      responseHeaders["X-Accel-Buffering"] = "no";
       return new Response(upstream.body as ReadableStream, {
         status: upstream.status,
         headers: responseHeaders,
@@ -87,7 +106,7 @@ async function proxy(request: NextRequest, context: RouteContext) {
       data = { raw: text };
     }
 
-    return NextResponse.json(data, { status: upstream.status, headers: cors });
+    return NextResponse.json(data, { status: upstream.status, headers: responseHeaders });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     const cors = openCorsHeaders(request.headers.get("origin"));
@@ -103,7 +122,7 @@ export async function OPTIONS(request: NextRequest) {
   const headers = openCorsPreflightHeaders(
     origin,
     "GET, POST, PUT, DELETE, OPTIONS",
-    "Authorization, Content-Type, Accept"
+    "Authorization, Content-Type, Accept, Mcp-Session-Id, Last-Event-Id"
   );
   return new NextResponse(null, { status: 204, headers });
 }

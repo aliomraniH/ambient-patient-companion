@@ -72,7 +72,10 @@ logger = logging.getLogger(__name__)
 # Server instance
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("ambient-clinical-intelligence")
+mcp = FastMCP(
+    "ambient-clinical-intelligence",
+    instructions="Ambient Clinical Intelligence — clinical decision support tools for patient management, vitals monitoring, medication interactions, screening guidelines, SOAP note generation, and evidence-based treatment recommendations. Use these tools to query patient records, analyze health trends, run the Dual-LLM Deliberation Engine, and support clinical workflows.",
+)
 
 # ---------------------------------------------------------------------------
 # Guidelines loader

@@ -20,7 +20,10 @@ from starlette.responses import JSONResponse
 
 from shared.audit_middleware import AuditMiddleware
 
-mcp = FastMCP("ambient-ingestion")
+mcp = FastMCP(
+    "ambient-ingestion",
+    instructions="Ambient Health Data Ingestion — tools for importing, validating, and managing patient health data from external sources including FHIR bundles, CSV uploads, lab results, and wearable device data. Use these tools to ingest new patient records, verify data provenance, and maintain data quality across the health data pipeline.",
+)
 
 
 # ---------------------------------------------------------------------------
