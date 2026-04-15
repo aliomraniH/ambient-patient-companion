@@ -42,6 +42,6 @@ if __name__ == "__main__":
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("MCP_PORT", "8002"))
     if transport == "streamable-http":
-        mcp.run(transport="streamable-http", host=host, port=port)
+        mcp.run(transport="streamable-http", host=host, port=port, json_response=True)
     else:
         mcp.run(transport="stdio")
