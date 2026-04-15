@@ -1,28 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import { oauthStore } from "@/lib/oauth-store";
-
-function checkAuth(request: NextRequest): NextResponse | null {
-  const authHeader = request.headers.get("authorization");
-  if (authHeader && authHeader.startsWith("Bearer ")) {
-    const token = authHeader.slice(7);
-    if (oauthStore.validateToken(token)) return null;
-  }
-
-  const queryToken = request.nextUrl.searchParams.get("token");
-  if (queryToken && oauthStore.validateToken(queryToken)) return null;
-
-  return NextResponse.json(
-    { error: "unauthorized", error_description: "Bearer token required" },
-    { status: 401 }
-  );
-}
+import { requireBearerToken } from "@/lib/auth-middleware";
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const authError = checkAuth(request);
+  const authError = requireBearerToken(request);
   if (authError) return authError;
 
   const { id } = await params;

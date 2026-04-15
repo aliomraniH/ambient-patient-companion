@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAuth } from "@/components/SessionProvider";
+import { fetchObtScore } from "@/lib/actions";
 
 interface OBTScore {
   score: number;
@@ -17,149 +17,111 @@ interface OBTScoreCardProps {
   initialData?: OBTScore | null;
 }
 
-function getColor(score: number): "green" | "amber" | "red" {
-  if (score >= 70) return "green";
-  if (score >= 40) return "amber";
-  return "red";
-}
-
-function getTrendDirection(
-  trend: string
-): "up" | "down" | "right" {
-  if (trend === "improving") return "up";
-  if (trend === "declining") return "down";
-  return "right";
-}
-
-const colorClasses = {
-  green: "text-emerald-600 border-emerald-200 bg-emerald-50",
-  amber: "text-amber-600 border-amber-200 bg-amber-50",
-  red: "text-red-600 border-red-200 bg-red-50",
-};
-
-const strokeColors = {
+const COLORS: Record<string, string> = {
   green: "#059669",
   amber: "#d97706",
   red: "#dc2626",
 };
 
+function getColor(score: number): string {
+  if (score >= 70) return COLORS.green;
+  if (score >= 40) return COLORS.amber;
+  return COLORS.red;
+}
+
+function getTrendIcon(direction: string): string {
+  switch (direction) {
+    case "improving":
+      return "\u2191";
+    case "declining":
+      return "\u2193";
+    default:
+      return "\u2192";
+  }
+}
+
 export default function OBTScoreCard({
   patientId,
   initialData = null,
 }: OBTScoreCardProps) {
-  const { token, authFetch } = useAuth();
   const [data, setData] = useState<OBTScore | null>(initialData);
 
   useEffect(() => {
     if (!initialData) {
-      authFetch(`/api/obt/${patientId}`)
-        .then((res) => (res.ok ? res.json() : null))
-        .then((json) => {
-          if (json && !json.error) setData(json);
+      fetchObtScore(patientId)
+        .then((result) => {
+          if (result) setData(result as OBTScore);
         })
         .catch(() => {});
     }
 
-    const sseUrl = token
-      ? `/api/sse/${patientId}?token=${encodeURIComponent(token)}`
-      : `/api/sse/${patientId}`;
-    const evtSource = new EventSource(sseUrl);
-    evtSource.addEventListener("obt-update", (event) => {
+    const interval = setInterval(async () => {
       try {
-        const updated = JSON.parse(event.data);
-        setData(updated);
+        const result = await fetchObtScore(patientId);
+        if (result) setData(result as OBTScore);
       } catch {
       }
-    });
+    }, 30000);
 
-    return () => evtSource.close();
-  }, [patientId, initialData, token, authFetch]);
+    return () => clearInterval(interval);
+  }, [patientId, initialData]);
 
   if (data === null) {
     return (
       <div
-        data-testid="score-skeleton"
-        className="animate-pulse rounded-xl border p-6 bg-gray-50"
+        className="rounded-xl border p-4"
+        style={{ borderLeft: "4px solid #9ca3af" }}
       >
-        <div className="h-24 w-24 rounded-full bg-gray-200 mx-auto" />
-        <div className="mt-4 h-4 bg-gray-200 rounded w-3/4 mx-auto" />
-        <div className="mt-2 h-3 bg-gray-200 rounded w-1/2 mx-auto" />
+        <h3 className="font-semibold text-sm text-gray-500">OBT Score</h3>
+        <p className="text-gray-400 text-xs mt-1">No score available</p>
       </div>
     );
   }
 
   const color = getColor(data.score);
-  const direction = getTrendDirection(data.trend_direction);
-
-  // SVG ring parameters
-  const radius = 45;
-  const circumference = 2 * Math.PI * radius;
-  const progress = (data.score / 100) * circumference;
+  const trend = getTrendIcon(data.trend_direction);
 
   return (
     <div
-      data-color={color}
-      className={`rounded-xl border-2 p-6 ${colorClasses[color]}`}
+      className="rounded-xl border p-4"
+      style={{ borderLeft: `4px solid ${color}` }}
     >
-      {/* Score Ring */}
-      <div className="flex justify-center">
-        <svg width="120" height="120" className="transform -rotate-90">
-          <circle
-            cx="60"
-            cy="60"
-            r={radius}
-            fill="none"
-            stroke="#e5e7eb"
-            strokeWidth="8"
-          />
-          <circle
-            cx="60"
-            cy="60"
-            r={radius}
-            fill="none"
-            stroke={strokeColors[color]}
-            strokeWidth="8"
-            strokeDasharray={`${progress} ${circumference}`}
-            strokeLinecap="round"
-            style={{
-              transition: "stroke-dasharray 0.5s ease",
-            }}
-          />
-        </svg>
-        <span className="absolute mt-10 text-3xl font-bold">
-          {Math.round(data.score)}
-        </span>
+      <div className="flex justify-between items-start">
+        <div>
+          <h3 className="font-semibold text-sm text-gray-500">OBT Score</h3>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-3xl font-bold" style={{ color }}>
+              {Math.round(data.score)}
+            </span>
+            <span className="text-lg" title={data.trend_direction}>
+              {trend}
+            </span>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-xs text-gray-400">
+            {new Date(data.score_date).toLocaleDateString()}
+          </p>
+          <p className="text-xs text-gray-500 mt-1 capitalize">
+            Driver: {data.primary_driver?.replace("_", " ")}
+          </p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            Confidence: {(data.confidence * 100).toFixed(0)}%
+          </p>
+        </div>
       </div>
 
-      {/* Primary Driver */}
-      <div className="mt-4 text-center">
-        <p className="text-sm font-medium">
-          Primary driver:{" "}
-          <span className="font-semibold capitalize">
-            {data.primary_driver?.replace("_", " ")}
-          </span>
-        </p>
-      </div>
-
-      {/* Trend Arrow */}
-      <div className="mt-2 flex justify-center items-center gap-1">
-        <span
-          data-testid="trend-arrow"
-          data-direction={direction}
-          className="text-lg"
-        >
-          {direction === "up" && "\u2191"}
-          {direction === "down" && "\u2193"}
-          {direction === "right" && "\u2192"}
-        </span>
-        <span className="text-sm capitalize">{data.trend_direction}</span>
-      </div>
-
-      {/* Confidence Warning */}
-      {data.confidence < 0.6 && (
-        <p className="mt-3 text-center text-xs text-gray-500 italic">
-          Limited data — score may vary
-        </p>
+      {data.domain_scores && (
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          {Object.entries(data.domain_scores).map(([domain, score]) => (
+            <div key={domain} className="text-center">
+              <p className="text-[10px] text-gray-400 capitalize">
+                {domain.replace("_", " ")}
+              </p>
+              <p className="text-sm font-semibold">{Math.round(Number(score))}</p>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

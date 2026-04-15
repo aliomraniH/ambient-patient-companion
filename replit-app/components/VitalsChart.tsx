@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAuth } from "@/components/SessionProvider";
+import { fetchVitals } from "@/lib/actions";
 import {
   LineChart,
   Line,
@@ -16,7 +16,7 @@ interface Reading {
   metric_type: string;
   value: number;
   unit: string;
-  measured_at: string;
+  recorded_at: string;
 }
 
 interface VitalsChartProps {
@@ -45,7 +45,6 @@ export default function VitalsChart({
   patientId,
   readings: initialReadings,
 }: VitalsChartProps) {
-  const { authFetch } = useAuth();
   const [activeTab, setActiveTab] = useState<MetricTab>("BP");
   const [timeRange, setTimeRange] = useState<TimeRange>("30d");
   const [readings, setReadings] = useState<Reading[]>(initialReadings || []);
@@ -54,10 +53,9 @@ export default function VitalsChart({
   useEffect(() => {
     setLoading(true);
     const days = rangeMap[timeRange];
-    authFetch(`/api/vitals/${patientId}?days=${days}`)
-      .then((res) => (res.ok ? res.json() : { readings: [] }))
-      .then((json) => {
-        setReadings(json.readings || []);
+    fetchVitals(patientId, days)
+      .then((result) => {
+        setReadings(result.readings || []);
         setLoading(false);
       })
       .catch(() => {
@@ -69,34 +67,46 @@ export default function VitalsChart({
   const metricTypes = metricMap[activeTab];
   const filtered = readings.filter((r) => metricTypes.includes(r.metric_type));
 
-  // Group by timestamp for chart
   const chartData = filtered.reduce<
     Record<string, Record<string, number | string>>
-  >((acc, r) => {
-    const key = new Date(r.measured_at).toLocaleDateString();
-    if (!acc[key]) acc[key] = { date: key };
-    acc[key][r.metric_type] = r.value;
+  >((acc, reading) => {
+    const date = new Date(reading.recorded_at).toLocaleDateString();
+    if (!acc[date]) acc[date] = { date };
+    acc[date][reading.metric_type] = Number(reading.value);
     return acc;
   }, {});
-
-  const sortedData = Object.values(chartData).sort(
-    (a, b) =>
-      new Date(a.date as string).getTime() -
-      new Date(b.date as string).getTime()
-  );
+  const chartArray = Object.values(chartData);
 
   return (
-    <div data-testid="vitals-chart-container" className="rounded-xl border p-4">
-      {/* Metric Tabs */}
-      <div className="flex gap-2 mb-4">
+    <div className="rounded-xl border p-4">
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="font-semibold">Vitals</h3>
+        <div className="flex gap-1">
+          {(["7d", "30d", "90d"] as TimeRange[]).map((range) => (
+            <button
+              key={range}
+              onClick={() => setTimeRange(range)}
+              className={`px-2 py-1 text-xs rounded ${
+                timeRange === range
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+              }`}
+            >
+              {range}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex gap-1 mb-4">
         {(["BP", "Glucose", "HRV"] as MetricTab[]).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
-            className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+            className={`px-3 py-1 text-sm rounded ${
               activeTab === tab
-                ? "bg-blue-600 text-white"
-                : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                ? "bg-gray-800 text-white"
+                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
             }`}
           >
             {tab}
@@ -104,52 +114,34 @@ export default function VitalsChart({
         ))}
       </div>
 
-      {/* Time Range */}
-      <div className="flex gap-2 mb-4">
-        {(["7d", "30d", "90d"] as TimeRange[]).map((range) => (
-          <button
-            key={range}
-            onClick={() => setTimeRange(range)}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-              timeRange === range
-                ? "bg-gray-800 text-white"
-                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-            }`}
-          >
-            {range}
-          </button>
-        ))}
-      </div>
-
-      {/* Chart */}
-      {filtered.length === 0 ? (
-        <p className="text-center text-gray-400 py-8">No data yet</p>
-      ) : (
-        <div data-count={sortedData.length}>
-          <ResponsiveContainer width="100%" height={280}>
-            <LineChart data={sortedData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis
-                dataKey="date"
-                tick={{ fontSize: 11 }}
-                interval="preserveStartEnd"
-              />
-              <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip />
-              {metricTypes.map((metric, i) => (
-                <Line
-                  key={metric}
-                  type="monotone"
-                  dataKey={metric}
-                  stroke={lineColors[i]}
-                  strokeWidth={2}
-                  dot={false}
-                  name={metric.replace("_", " ")}
-                />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
+      {loading ? (
+        <div className="h-48 flex items-center justify-center text-gray-400">
+          Loading...
         </div>
+      ) : chartArray.length === 0 ? (
+        <div className="h-48 flex items-center justify-center text-gray-400">
+          No data for this period
+        </div>
+      ) : (
+        <ResponsiveContainer width="100%" height={220}>
+          <LineChart data={chartArray}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+            <YAxis tick={{ fontSize: 10 }} />
+            <Tooltip />
+            {metricTypes.map((mt, i) => (
+              <Line
+                key={mt}
+                type="monotone"
+                dataKey={mt}
+                stroke={lineColors[i]}
+                strokeWidth={2}
+                dot={false}
+                name={mt.replace("_", " ")}
+              />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
       )}
     </div>
   );
