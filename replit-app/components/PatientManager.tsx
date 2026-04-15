@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@/components/SessionProvider";
 
 interface Patient {
   id: string;
@@ -26,6 +27,7 @@ const EMPTY_FORM = {
 
 export default function PatientManager({ patients: initialPatients }: PatientManagerProps) {
   const router = useRouter();
+  const { authFetch } = useAuth();
   const [mode, setMode] = useState<Mode>("list");
   const [patients, setPatients] = useState<Patient[]>(initialPatients);
   const [selected, setSelected] = useState<Patient | null>(null);
@@ -84,7 +86,7 @@ export default function PatientManager({ patients: initialPatients }: PatientMan
     if (!form.mrn.trim()) { setError("MRN is required"); return; }
     setSaving(true); setError(null);
     try {
-      const res = await fetch("/api/patients", {
+      const res = await authFetch("/api/patients", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -132,7 +134,7 @@ export default function PatientManager({ patients: initialPatients }: PatientMan
       if (form.zip_code) payload.zip_code = form.zip_code;
       if (form.insurance_type) payload.insurance_type = form.insurance_type;
 
-      const res = await fetch(`/api/patients/${selected.id}`, {
+      const res = await authFetch(`/api/patients/${selected.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -156,7 +158,7 @@ export default function PatientManager({ patients: initialPatients }: PatientMan
     if (!selected) return;
     setSaving(true); setError(null);
     try {
-      const res = await fetch(`/api/patients/${selected.id}`, { method: "DELETE" });
+      const res = await authFetch(`/api/patients/${selected.id}`, { method: "DELETE" });
       const data = await res.json();
       if (!res.ok) { setError(data.error || "Failed to delete patient"); return; }
       setPatients((prev) => prev.filter((p) => p.id !== selected.id));

@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import { requireAuth } from "@/lib/auth-middleware";
+import { requireBearerToken } from "@/lib/auth-middleware";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
 export async function GET(req: NextRequest, { params }: RouteParams) {
-  const authError = await requireAuth(req);
+  const authError = requireBearerToken(req);
   if (authError) return authError;
 
   const { id } = await params;
@@ -30,7 +30,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
 }
 
 export async function PUT(request: NextRequest, { params }: RouteParams) {
-  const authError = await requireAuth(request);
+  const authError = requireBearerToken(request);
   if (authError) return authError;
 
   const { id } = await params;
@@ -71,7 +71,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 }
 
 export async function DELETE(req: NextRequest, { params }: RouteParams) {
-  const authError = await requireAuth(req);
+  const authError = requireBearerToken(req);
   if (authError) return authError;
 
   const { id } = await params;

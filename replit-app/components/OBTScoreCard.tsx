@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useAuth } from "@/components/SessionProvider";
 
 interface OBTScore {
   score: number;
@@ -46,11 +47,12 @@ export default function OBTScoreCard({
   patientId,
   initialData = null,
 }: OBTScoreCardProps) {
+  const { token, authFetch } = useAuth();
   const [data, setData] = useState<OBTScore | null>(initialData);
 
   useEffect(() => {
     if (!initialData) {
-      fetch(`/api/obt/${patientId}`)
+      authFetch(`/api/obt/${patientId}`)
         .then((res) => (res.ok ? res.json() : null))
         .then((json) => {
           if (json && !json.error) setData(json);
@@ -58,19 +60,20 @@ export default function OBTScoreCard({
         .catch(() => {});
     }
 
-    // SSE for real-time updates
-    const evtSource = new EventSource(`/api/sse/${patientId}`);
+    const sseUrl = token
+      ? `/api/sse/${patientId}?token=${encodeURIComponent(token)}`
+      : `/api/sse/${patientId}`;
+    const evtSource = new EventSource(sseUrl);
     evtSource.addEventListener("obt-update", (event) => {
       try {
         const updated = JSON.parse(event.data);
         setData(updated);
       } catch {
-        // ignore parse errors
       }
     });
 
     return () => evtSource.close();
-  }, [patientId, initialData]);
+  }, [patientId, initialData, token, authFetch]);
 
   if (data === null) {
     return (

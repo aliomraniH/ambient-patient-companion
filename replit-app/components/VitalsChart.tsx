@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useAuth } from "@/components/SessionProvider";
 import {
   LineChart,
   Line,
@@ -44,6 +45,7 @@ export default function VitalsChart({
   patientId,
   readings: initialReadings,
 }: VitalsChartProps) {
+  const { authFetch } = useAuth();
   const [activeTab, setActiveTab] = useState<MetricTab>("BP");
   const [timeRange, setTimeRange] = useState<TimeRange>("30d");
   const [readings, setReadings] = useState<Reading[]>(initialReadings || []);
@@ -52,7 +54,7 @@ export default function VitalsChart({
   useEffect(() => {
     setLoading(true);
     const days = rangeMap[timeRange];
-    fetch(`/api/vitals/${patientId}?days=${days}`)
+    authFetch(`/api/vitals/${patientId}?days=${days}`)
       .then((res) => (res.ok ? res.json() : { readings: [] }))
       .then((json) => {
         setReadings(json.readings || []);

@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import { requireAuth } from "@/lib/auth-middleware";
+import { requireBearerToken } from "@/lib/auth-middleware";
 
 export async function POST(request: NextRequest) {
-  const authError = await requireAuth(request);
+  const authError = requireBearerToken(request);
   if (authError) return authError;
 
   try {

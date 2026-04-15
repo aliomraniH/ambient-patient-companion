@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useAuth } from "@/components/SessionProvider";
 
 interface CheckInFlowProps {
   patientId: string;
@@ -21,6 +22,7 @@ type Step = "mood" | "energy" | "stress" | "sleep" | "medications";
 const STEPS: Step[] = ["mood", "energy", "stress", "sleep", "medications"];
 
 export default function CheckInFlow({ patientId }: CheckInFlowProps) {
+  const { authFetch } = useAuth();
   const [stepIndex, setStepIndex] = useState(0);
   const [mood, setMood] = useState<string | null>(null);
   const [energy, setEnergy] = useState<string | null>(null);
@@ -63,7 +65,7 @@ export default function CheckInFlow({ patientId }: CheckInFlowProps) {
   const handleSubmit = async () => {
     setStatus("submitting");
     try {
-      const res = await fetch("/api/checkin", {
+      const res = await authFetch("/api/checkin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
