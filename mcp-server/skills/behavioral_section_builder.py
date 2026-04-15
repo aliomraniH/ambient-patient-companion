@@ -13,6 +13,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from shared.coercion import coerce_confidence
+
 log = logging.getLogger(__name__)
 
 
@@ -190,7 +192,7 @@ async def run_full_behavioral_pipeline(
                         patient_id,
                         atom.signal_type,
                         atom.signal_value,
-                        atom.confidence,
+                        coerce_confidence(atom.confidence),
                         atom.source_type,
                         atom.source_id,
                         embedding_str,

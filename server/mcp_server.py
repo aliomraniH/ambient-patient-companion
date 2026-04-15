@@ -979,11 +979,15 @@ async def register_healthex_patient(
                 str(_uuid_mod.uuid4()), patient_id, "healthex", True,
                 _dt.utcnow(), "healthex",
             )
+            # last_ingested_at is NULL until the first real HealthEx pull
+            # completes — writing NOW() here would make orchestrate_refresh
+            # treat a freshly-registered patient as already ingested and
+            # skip the first ingest cycle.
             await conn.execute(
                 """
                 INSERT INTO source_freshness
                     (patient_id, source_name, last_ingested_at, records_count, ttl_hours)
-                VALUES ($1,$2,NOW(),0,24)
+                VALUES ($1,$2,NULL,0,24)
                 ON CONFLICT (patient_id, source_name) DO NOTHING
                 """,
                 patient_id, "healthex",

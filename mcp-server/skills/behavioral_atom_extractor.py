@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from shared.coercion import coerce_confidence
+
 
 @dataclass
 class ExtractedAtom:
@@ -309,7 +311,7 @@ async def insert_atoms(conn, atoms: list[ExtractedAtom]) -> int:
                 atom.patient_id,
                 atom.signal_type,
                 atom.signal_value[:2000],
-                atom.confidence,
+                coerce_confidence(atom.confidence),
                 atom.source_type,
                 atom.source_id,
                 embed_str,

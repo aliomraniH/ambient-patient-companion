@@ -20,8 +20,15 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+
+# Allow importing shared helpers from repo root.
+_repo_root = os.path.join(os.path.dirname(__file__), "..")
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from shared.datetime_utils import ensure_aware  # noqa: E402
 
 # Allow importing transforms from mcp-server/
 _mcp_server_dir = os.path.join(os.path.dirname(__file__), "..", "mcp-server")
@@ -118,7 +125,9 @@ class IngestionPipeline:
         if last_ingested is None:
             return True
 
-        elapsed_hours = (datetime.utcnow() - last_ingested.replace(tzinfo=None)).total_seconds() / 3600
+        elapsed_hours = (
+            datetime.now(timezone.utc) - ensure_aware(last_ingested)
+        ).total_seconds() / 3600
         return elapsed_hours >= ttl_hours
 
     async def _cache_raw_bundle(

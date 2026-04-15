@@ -7,6 +7,9 @@ Also queues nudges for delivery.
 import json
 import logging
 from datetime import datetime
+
+from shared.coercion import coerce_confidence
+
 from .schemas import DeliberationResult
 
 log = logging.getLogger(__name__)
@@ -66,7 +69,7 @@ async def commit_deliberation(
                     result.deliberation_id,
                     json.dumps(scenario.model_dump()),
                     "high" if scenario.probability > 0.7 else "medium",
-                    scenario.confidence,
+                    coerce_confidence(scenario.confidence),
                     scenario.timeframe
                 )
             except Exception as e:
@@ -82,7 +85,7 @@ async def commit_deliberation(
                        VALUES ($1,'predicted_patient_question',$2,$3)""",
                     result.deliberation_id,
                     json.dumps(question.model_dump()),
-                    question.likelihood
+                    coerce_confidence(question.likelihood)
                 )
             except Exception as e:
                 log.error(
@@ -99,7 +102,7 @@ async def commit_deliberation(
                     result.deliberation_id,
                     json.dumps(flag.model_dump()),
                     flag.priority,
-                    flag.confidence
+                    coerce_confidence(flag.confidence)
                 )
             except Exception as e:
                 log.error(
@@ -142,7 +145,7 @@ async def commit_deliberation(
                         result.patient_id,
                         "clinical_inference",
                         update.entry_text,
-                        update.confidence,
+                        coerce_confidence(update.confidence),
                         update.valid_from,
                         update.valid_until,
                         result.deliberation_id,
@@ -158,7 +161,7 @@ async def commit_deliberation(
                            VALUES ($1,$2,$3,$4,$5)""",
                         update.entry_text,
                         update.update_type,
-                        update.confidence,
+                        coerce_confidence(update.confidence),
                         "deliberation_synthesis",
                         result.deliberation_id
                     )

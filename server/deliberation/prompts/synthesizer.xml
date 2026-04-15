@@ -55,6 +55,17 @@ CLINICAL SAFETY RULES (non-negotiable):
 - Preserve ALL unresolved disagreements in unresolved_disagreements array (empty list if none)
 - Never recommend a specific drug dose
 - Include "discuss with your healthcare provider" in all patient-facing content
+
+NUMERIC FIELD CONTRACT (strict — schema enforcement downstream):
+- "confidence", "probability", "likelihood" MUST be decimal numbers in
+  [0.0, 1.0]. Examples: 0.95 (critical), 0.80 (high), 0.60 (moderate),
+  0.35 (low), 0.20 (very low). NEVER emit words like "high", "moderate",
+  "low", "critical" for these fields — they go into FLOAT Postgres
+  columns and a string value silently drops the row.
+- Categorical string fields are ONLY: "timeframe", "priority",
+  "data_type", "category", "behavioral_framing", "target",
+  "update_type", "scope". Their allowed values are listed above per
+  output type — stay within those exact strings.
 </task>
 
 <output_format>
