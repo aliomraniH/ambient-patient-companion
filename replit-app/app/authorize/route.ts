@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { oauthStore } from "@/lib/oauth-store";
-import { corsPreflightHeaders } from "@/lib/cors";
+import { corsHeaders, corsPreflightHeaders } from "@/lib/cors";
 import { checkRateLimit } from "@/lib/rate-limiter";
 
 function getClientIp(request: NextRequest): string {
@@ -12,11 +12,13 @@ function getClientIp(request: NextRequest): string {
 }
 
 export async function GET(req: NextRequest) {
+  const origin = req.headers.get("origin");
+  const cors = corsHeaders(origin);
   const ip = getClientIp(req);
   if (checkRateLimit(ip, "authorize", 20)) {
     return NextResponse.json(
       { error: "too_many_requests", error_description: "Rate limit exceeded" },
-      { status: 429 }
+      { status: 429, headers: cors }
     );
   }
 
@@ -30,27 +32,27 @@ export async function GET(req: NextRequest) {
   const code_challenge_method = searchParams.get("code_challenge_method") ?? undefined;
 
   if (response_type !== "code") {
-    return NextResponse.json({ error: "unsupported_response_type" }, { status: 400 });
+    return NextResponse.json({ error: "unsupported_response_type" }, { status: 400, headers: cors });
   }
   if (!client_id) {
-    return NextResponse.json({ error: "invalid_request", error_description: "client_id required" }, { status: 400 });
+    return NextResponse.json({ error: "invalid_request", error_description: "client_id required" }, { status: 400, headers: cors });
   }
   if (!redirect_uri) {
-    return NextResponse.json({ error: "invalid_request", error_description: "redirect_uri required" }, { status: 400 });
+    return NextResponse.json({ error: "invalid_request", error_description: "redirect_uri required" }, { status: 400, headers: cors });
   }
 
   const client = oauthStore.getClient(client_id);
   if (!client) {
-    return NextResponse.json({ error: "invalid_client" }, { status: 400 });
+    return NextResponse.json({ error: "invalid_client" }, { status: 400, headers: cors });
   }
   if (!client.redirect_uris.includes(redirect_uri)) {
-    return NextResponse.json({ error: "invalid_request", error_description: "redirect_uri mismatch" }, { status: 400 });
+    return NextResponse.json({ error: "invalid_request", error_description: "redirect_uri mismatch" }, { status: 400, headers: cors });
   }
 
   if (code_challenge && code_challenge_method !== "S256") {
     return NextResponse.json(
       { error: "invalid_request", error_description: "code_challenge_method must be S256" },
-      { status: 400 }
+      { status: 400, headers: cors }
     );
   }
 

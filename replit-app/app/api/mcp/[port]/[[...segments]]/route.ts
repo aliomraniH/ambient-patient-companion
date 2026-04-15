@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireBearerToken } from "@/lib/auth-middleware";
 import { checkRateLimit } from "@/lib/rate-limiter";
+import { corsHeaders, corsPreflightHeaders } from "@/lib/cors";
 
 const ALLOWED_PORTS = new Set(["8001", "8002", "8003"]);
 
@@ -69,14 +70,26 @@ async function proxy(request: NextRequest, context: RouteContext) {
       data = { raw: text };
     }
 
-    return NextResponse.json(data, { status: upstream.status });
+    const cors = corsHeaders(request.headers.get("origin"));
+    return NextResponse.json(data, { status: upstream.status, headers: cors });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+    const cors = corsHeaders(request.headers.get("origin"));
     return NextResponse.json(
       { error: "Upstream connection failed", detail: message },
-      { status: 502 }
+      { status: 502, headers: cors }
     );
   }
+}
+
+export async function OPTIONS(request: NextRequest) {
+  const origin = request.headers.get("origin");
+  const headers = corsPreflightHeaders(
+    origin,
+    "GET, POST, PUT, DELETE, OPTIONS",
+    "Authorization, Content-Type"
+  );
+  return new NextResponse(null, { status: 204, headers });
 }
 
 export async function GET(request: NextRequest, context: RouteContext) {
