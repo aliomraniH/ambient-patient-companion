@@ -18,6 +18,8 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from shared.audit_middleware import AuditMiddleware
+
 mcp = FastMCP("ambient-ingestion")
 
 
@@ -355,6 +357,9 @@ register_provenance_tool(
     source_server="ambient-ingestion",
     get_pool=_get_provenance_pool,
 )
+
+# Audit every tool call — records inputs, outputs, timing and session to mcp_call_log
+mcp.add_middleware(AuditMiddleware("ingestion", _get_provenance_pool))
 
 
 # ---------------------------------------------------------------------------

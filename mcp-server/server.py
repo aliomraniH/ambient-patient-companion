@@ -17,6 +17,9 @@ from skills import load_skills
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from db.connection import get_pool
+from shared.audit_middleware import AuditMiddleware
+
 mcp = FastMCP("ambient-skills-companion")
 
 
@@ -26,6 +29,9 @@ async def rest_health(request: Request) -> JSONResponse:
 
 # Auto-discover and register all skill tools
 load_skills(mcp)
+
+# Audit every tool call — records inputs, outputs, timing and session to mcp_call_log
+mcp.add_middleware(AuditMiddleware("skills", get_pool))
 
 if __name__ == "__main__":
     import os

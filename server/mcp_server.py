@@ -4203,12 +4203,16 @@ async def triage_message(
 # ---------------------------------------------------------------------------
 
 from shared.provenance import register_provenance_tool  # noqa: E402
+from shared.audit_middleware import AuditMiddleware  # noqa: E402
 
 register_provenance_tool(
     mcp,
     source_server="ambient-clinical-intelligence",
     get_pool=get_gap_pool,
 )
+
+# Audit every tool call — records inputs, outputs, timing and session to mcp_call_log
+mcp.add_middleware(AuditMiddleware("clinical", _get_db_pool))
 
 
 # ---------------------------------------------------------------------------
