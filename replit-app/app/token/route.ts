@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { oauthStore, verifyPkceS256 } from "@/lib/oauth-store";
-import { corsHeaders, corsPreflightHeaders } from "@/lib/cors";
+import { openCorsHeaders, openCorsPreflightHeaders } from "@/lib/cors";
 import { checkRateLimit } from "@/lib/rate-limiter";
 
 function getClientIp(request: NextRequest): string {
@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
   if (checkRateLimit(ip, "token", 10)) {
     return NextResponse.json(
       { error: "too_many_requests", error_description: "Rate limit exceeded" },
-      { status: 429, headers: corsHeaders(origin) }
+      { status: 429, headers: openCorsHeaders(origin) }
     );
   }
 
@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
     } catch {
       return NextResponse.json(
         { error: "invalid_request" },
-        { status: 400, headers: corsHeaders(origin) }
+        { status: 400, headers: openCorsHeaders(origin) }
       );
     }
   }
@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
   if (grant_type !== "authorization_code") {
     return NextResponse.json(
       { error: "unsupported_grant_type" },
-      { status: 400, headers: corsHeaders(origin) }
+      { status: 400, headers: openCorsHeaders(origin) }
     );
   }
 
@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
   if (!code) {
     return NextResponse.json(
       { error: "invalid_request", error_description: "code required" },
-      { status: 400, headers: corsHeaders(origin) }
+      { status: 400, headers: openCorsHeaders(origin) }
     );
   }
 
@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
   if (!authCode) {
     return NextResponse.json(
       { error: "invalid_grant", error_description: "code invalid or expired" },
-      { status: 400, headers: corsHeaders(origin) }
+      { status: 400, headers: openCorsHeaders(origin) }
     );
   }
 
@@ -68,13 +68,13 @@ export async function POST(req: NextRequest) {
   if (!redirect_uri) {
     return NextResponse.json(
       { error: "invalid_request", error_description: "redirect_uri required" },
-      { status: 400, headers: corsHeaders(origin) }
+      { status: 400, headers: openCorsHeaders(origin) }
     );
   }
   if (redirect_uri !== authCode.redirect_uri) {
     return NextResponse.json(
       { error: "invalid_grant", error_description: "redirect_uri mismatch" },
-      { status: 400, headers: corsHeaders(origin) }
+      { status: 400, headers: openCorsHeaders(origin) }
     );
   }
 
@@ -83,13 +83,13 @@ export async function POST(req: NextRequest) {
     if (!code_verifier) {
       return NextResponse.json(
         { error: "invalid_request", error_description: "code_verifier required for PKCE" },
-        { status: 400, headers: corsHeaders(origin) }
+        { status: 400, headers: openCorsHeaders(origin) }
       );
     }
     if (!verifyPkceS256(code_verifier, authCode.code_challenge)) {
       return NextResponse.json(
         { error: "invalid_grant", error_description: "PKCE verification failed" },
-        { status: 400, headers: corsHeaders(origin) }
+        { status: 400, headers: openCorsHeaders(origin) }
       );
     }
   }
@@ -103,7 +103,7 @@ export async function POST(req: NextRequest) {
       expires_in: 86400,
       scope: "mcp",
     },
-    { status: 200, headers: corsHeaders(origin) }
+    { status: 200, headers: openCorsHeaders(origin) }
   );
 }
 
@@ -111,6 +111,6 @@ export async function OPTIONS(req: NextRequest) {
   const origin = req.headers.get("origin");
   return new NextResponse(null, {
     status: 204,
-    headers: corsPreflightHeaders(origin, "POST, OPTIONS", "Content-Type, Authorization"),
+    headers: openCorsPreflightHeaders(origin, "POST, OPTIONS", "Content-Type, Authorization"),
   });
 }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { oauthStore } from "@/lib/oauth-store";
-import { corsHeaders, corsPreflightHeaders } from "@/lib/cors";
+import { openCorsHeaders, openCorsPreflightHeaders } from "@/lib/cors";
 import { checkRateLimit } from "@/lib/rate-limiter";
 
 function getClientIp(request: NextRequest): string {
@@ -13,7 +13,7 @@ function getClientIp(request: NextRequest): string {
 
 export async function GET(req: NextRequest) {
   const origin = req.headers.get("origin");
-  const cors = corsHeaders(origin);
+  const cors = openCorsHeaders(origin);
   const ip = getClientIp(req);
   if (checkRateLimit(ip, "authorize", 20)) {
     return NextResponse.json(
@@ -74,6 +74,6 @@ export async function OPTIONS(req: NextRequest) {
   const origin = req.headers.get("origin");
   return new NextResponse(null, {
     status: 204,
-    headers: corsPreflightHeaders(origin, "GET, OPTIONS", "Content-Type"),
+    headers: openCorsPreflightHeaders(origin, "GET, OPTIONS", "Content-Type"),
   });
 }

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { oauthStore } from "@/lib/oauth-store";
 import { validateRedirectUri } from "@/lib/redirect-uri-validator";
-import { corsHeaders, corsPreflightHeaders } from "@/lib/cors";
+import { openCorsHeaders, openCorsPreflightHeaders } from "@/lib/cors";
 import { checkRateLimit } from "@/lib/rate-limiter";
 
 function getClientIp(request: NextRequest): string {
@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
   if (checkRateLimit(ip, "register", 5)) {
     return NextResponse.json(
       { error: "too_many_requests", error_description: "Rate limit exceeded" },
-      { status: 429, headers: corsHeaders(origin) }
+      { status: 429, headers: openCorsHeaders(origin) }
     );
   }
 
@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json(
       { error: "invalid_request" },
-      { status: 400, headers: corsHeaders(origin) }
+      { status: 400, headers: openCorsHeaders(origin) }
     );
   }
 
@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
   if (!Array.isArray(redirect_uris) || redirect_uris.length === 0) {
     return NextResponse.json(
       { error: "invalid_client_metadata", error_description: "redirect_uris required" },
-      { status: 400, headers: corsHeaders(origin) }
+      { status: 400, headers: openCorsHeaders(origin) }
     );
   }
 
@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
     if (!result.valid) {
       return NextResponse.json(
         { error: "invalid_client_metadata", error_description: result.reason },
-        { status: 400, headers: corsHeaders(origin) }
+        { status: 400, headers: openCorsHeaders(origin) }
       );
     }
   }
@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
     },
     {
       status: 201,
-      headers: corsHeaders(origin),
+      headers: openCorsHeaders(origin),
     }
   );
 }
@@ -77,6 +77,6 @@ export async function OPTIONS(req: NextRequest) {
   const origin = req.headers.get("origin");
   return new NextResponse(null, {
     status: 204,
-    headers: corsPreflightHeaders(origin, "POST, OPTIONS", "Content-Type"),
+    headers: openCorsPreflightHeaders(origin, "POST, OPTIONS", "Content-Type"),
   });
 }

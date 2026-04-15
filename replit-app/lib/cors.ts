@@ -59,3 +59,34 @@ export function corsPreflightHeaders(
   }
   return headers;
 }
+
+export function openCorsHeaders(requestOrigin: string | null): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Cache-Control": "no-store",
+    Pragma: "no-cache",
+  };
+  if (requestOrigin) {
+    headers["Access-Control-Allow-Origin"] = requestOrigin;
+    headers["Vary"] = "Origin";
+  } else {
+    headers["Access-Control-Allow-Origin"] = "*";
+  }
+  return headers;
+}
+
+export function openCorsPreflightHeaders(
+  requestOrigin: string | null,
+  methods: string,
+  allowHeaders: string
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (requestOrigin) {
+    headers["Access-Control-Allow-Origin"] = requestOrigin;
+    headers["Vary"] = "Origin";
+  } else {
+    headers["Access-Control-Allow-Origin"] = "*";
+  }
+  headers["Access-Control-Allow-Methods"] = methods;
+  headers["Access-Control-Allow-Headers"] = allowHeaders;
+  return headers;
+}

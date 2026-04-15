@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireBearerToken } from "@/lib/auth-middleware";
 import { checkRateLimit } from "@/lib/rate-limiter";
-import { corsHeaders, corsPreflightHeaders } from "@/lib/cors";
+import { openCorsHeaders, openCorsPreflightHeaders } from "@/lib/cors";
 
 const ALLOWED_PORTS = new Set(["8001", "8002", "8003"]);
 
@@ -39,13 +39,14 @@ async function proxy(request: NextRequest, context: RouteContext) {
   const search = request.nextUrl.search;
   const upstream_url = `http://localhost:${port}${path ? `/${path}` : ""}${search}`;
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  };
+  const fwdHeaders: Record<string, string> = {};
+  const ct = request.headers.get("content-type");
+  if (ct) fwdHeaders["Content-Type"] = ct;
+  const accept = request.headers.get("accept");
+  fwdHeaders["Accept"] = accept ?? "application/json, text/event-stream";
 
   let body: string | undefined;
-  if (request.method === "POST" || request.method === "PUT") {
+  if (request.method === "POST" || request.method === "PUT" || request.method === "PATCH") {
     try {
       const raw = await request.text();
       body = raw || undefined;
@@ -57,9 +58,25 @@ async function proxy(request: NextRequest, context: RouteContext) {
   try {
     const upstream = await fetch(upstream_url, {
       method: request.method,
-      headers,
+      headers: fwdHeaders,
       body,
     });
+
+    const cors = openCorsHeaders(request.headers.get("origin"));
+    const upstreamCt = upstream.headers.get("content-type") ?? "";
+
+    if (upstreamCt.includes("text/event-stream") && upstream.body) {
+      const responseHeaders: Record<string, string> = {
+        ...cors,
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      };
+      return new Response(upstream.body as ReadableStream, {
+        status: upstream.status,
+        headers: responseHeaders,
+      });
+    }
 
     const text = await upstream.text();
 
@@ -70,11 +87,10 @@ async function proxy(request: NextRequest, context: RouteContext) {
       data = { raw: text };
     }
 
-    const cors = corsHeaders(request.headers.get("origin"));
     return NextResponse.json(data, { status: upstream.status, headers: cors });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    const cors = corsHeaders(request.headers.get("origin"));
+    const cors = openCorsHeaders(request.headers.get("origin"));
     return NextResponse.json(
       { error: "Upstream connection failed", detail: message },
       { status: 502, headers: cors }
@@ -84,10 +100,10 @@ async function proxy(request: NextRequest, context: RouteContext) {
 
 export async function OPTIONS(request: NextRequest) {
   const origin = request.headers.get("origin");
-  const headers = corsPreflightHeaders(
+  const headers = openCorsPreflightHeaders(
     origin,
     "GET, POST, PUT, DELETE, OPTIONS",
-    "Authorization, Content-Type"
+    "Authorization, Content-Type, Accept"
   );
   return new NextResponse(null, { status: 204, headers });
 }
