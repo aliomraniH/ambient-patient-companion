@@ -1,0 +1,208 @@
+Context
+Three blockers surfaced in the 2026-04-14 live session and must be fixed before
+the HealthEx data merge:
+
+Silent DataError on anticipatory_scenario writes. LLM-produced
+confidence values are sometimes categorical strings ("high", "moderate")
+but the deliberation_outputs.confidence column is FLOAT. All anticipatory
+scenarios are silently dropped per run.
+New HealthEx patients see ingest.records_upserted: 0, duration_ms: 0.
+The ingest gate thinks the data is fresh right after registration and skips
+the HealthEx pull, leaving the warehouse empty and later deliberations
+starved (context pct_used ≈ 16%).
+generate_previsit_brief raises TypeError on aware/naive datetime math.
+Asyncpg returns TIMESTAMPTZ columns as aware datetimes; the brief generator
+subtracts them from datetime.utcnow() (naive).
+
+Exploration also surfaced several similar latent bugs of each class; those
+are fixed in the same pass so the same root cause does not re-appear from a
+different call site.
+Intended outcome: anticipatory scenarios land in DB, force=True refresh
+actually pulls from HealthEx, pre-visit brief renders, and the repo has shared
+utilities (coerce_confidence, ensure_aware) so the next author cannot
+reintroduce any of these bugs by accident.
+
+Bug 1 — confidence as string → DataError
+Root cause (verified)
+
+deliberation_outputs.confidence is FLOAT CHECK (0..1) —
+server/deliberation/migrations/001_deliberation_tables.sql:54.
+server/deliberation/knowledge_store.py binds the raw LLM-produced value
+directly into 5 INSERTs (lines 69, 85, 102, 145, 161). Pydantic
+Optional[float] typing does not rescue the value when the LLM emits a
+string literal inside the JSON.
+Each INSERT is wrapped in try/except, so the error is silently logged and
+that row is dropped — all other output types succeed, masking the bug.
+server/deliberation/prompts/synthesizer.xml shows a numeric example but
+does not forbid categoricals.
+
+Fix
+
+Add shared/coercion.py with coerce_confidence(raw) -> float | None
+(accepts float, int, numeric strings, categorical strings via a fixed map:
+critical=0.95, high=0.80, moderate/medium=0.60, low=0.35, none=0.05,
+clamps to [0, 1], returns None if unresolvable).
+In server/deliberation/knowledge_store.py, wrap every FLOAT-bound LLM
+value with coerce_confidence(...):
+
+line 69 — scenario.confidence
+line 85 — question.likelihood
+line 102 — flag.confidence
+line 145 — update.confidence (patient_knowledge)
+line 161 — update.confidence (core_knowledge_updates.confidence_delta)
+
+
+Tighten server/deliberation/prompts/synthesizer.xml: add an explicit
+"confidence MUST be a float 0.0–1.0; never a word" instruction in the
+output-contract section. Also list allowed priority/timeframe string
+values side-by-side so the contrast is clear.
+
+Similar-bug sweep (same pass)
+Behavioral atoms currently come from a rule-based extractor (deterministic
+floats), but the same INSERT pattern exists and will break if the extractor is
+ever swapped for an LLM. Apply coerce_confidence defensively in:
+
+mcp-server/skills/behavioral_atoms.py:96
+mcp-server/skills/behavioral_atom_extractor.py:312
+mcp-server/skills/behavioral_section_builder.py:193
+
+server/deliberation/flag_writer.py was audited — data_quality_score is
+computed in-process (not LLM-sourced); no change needed.
+Verification
+
+New server/deliberation/tests/test_coerce_confidence.py — unit coverage
+for float pass-through, int percentages, categoricals, numeric strings,
+None, clamping, unresolvable strings.
+Manual end-to-end: run_deliberation → get_deliberation_results; assert
+anticipatory_scenario rows > 0 and every stored confidence is a float.
+
+
+Bug 2 — ingest.records_upserted: 0, duration_ms: 0
+Root cause (verified — differs from the prompt's diagnosis)
+The prompt suspected is_stale(None) → False. That is not the bug:
+
+_is_stale in mcp-server/skills/ingestion_tools.py:75-81 already returns
+True for None.
+IngestionPipeline._check_freshness in ingestion/pipeline.py:102-122
+already returns True for None.
+
+The actual bug is at mcp-server/skills/ingestion_tools.py:395-405:
+register_healthex_patient initialises source_freshness.last_ingested_at
+with NOW() instead of NULL. That pins a freshly-registered patient in the
+"just ingested" state, so on the very next orchestrate_refresh call (even
+without force=True) the gate evaluates 0 hours elapsed vs. 24 h TTL →
+_is_stale → False → ingest phase is skipped → duration_ms: 0.
+force=True propagation is already correct (ingestion_tools.py:1200 passes
+force_refresh=force into the pipeline; the pipeline skips its own freshness
+check when force_refresh).
+Fix
+
+mcp-server/skills/ingestion_tools.py:400 — change
+VALUES ($1, $2, NOW(), 0, 24) to VALUES ($1, $2, NULL, 0, 24). The
+source_freshness.last_ingested_at column is already nullable
+(mcp-server/db/schema.sql).
+Audit the other registration-time initialisations and apply the same
+NULL-means-never-done rule if they initialise freshness for a fresh
+patient:
+
+mcp-server/orchestrator.py:315-327
+server/mcp_server.py:984
+(Leave the writes that run after a real ingest using NOW() alone — those
+correctly record "just ingested".)
+
+
+
+Similar-bug sweep (same pass)
+No other "None as sentinel treated as valid" freshness bugs were found:
+patient_state_readers.py:143 and behavioral_gap_detector.py:158 use
+is None correctly.
+Verification
+
+Add a regression test in mcp-server/tests/test_freshness_orchestration.py:
+after register_healthex_patient, assert the inserted row has
+last_ingested_at IS NULL and _is_stale(last_ingested_at, 24) is True.
+End-to-end: register_healthex_patient → orchestrate_refresh(force=False)
+on a fresh patient → assert ingest phase ran (duration_ms > 0, or
+status != "skipped") and get_ingestion_plans shows total_plans > 0.
+
+
+Bug 3 — Aware/naive datetime subtraction in pre-visit brief
+Root cause (verified)
+
+mcp-server/skills/previsit_brief.py:232:
+(datetime.utcnow() - delib_row["triggered_at"]).total_seconds().
+deliberations.triggered_at is TIMESTAMPTZ
+(server/deliberation/migrations/001_deliberation_tables.sql:19) — asyncpg
+returns an aware datetime. datetime.utcnow() is naive. Subtraction raises
+TypeError.
+The existing code at line 199 constructs a naive cutoff and compares it to a
+TIMESTAMPTZ parameter — asyncpg casts it implicitly so that comparison
+survives, but the subtraction at 232 does not.
+
+Fix
+
+Add shared/datetime_utils.py with ensure_aware(dt) -> datetime | None
+(UTC-attach for naive, pass-through for aware, None for None).
+mcp-server/skills/previsit_brief.py:
+
+Replace datetime.utcnow() with datetime.now(timezone.utc) in the
+function (lines 199, 232) so all locally-produced timestamps are aware.
+Wrap the DB-read value: ensure_aware(delib_row["triggered_at"]) on
+line 232 before subtraction. (Redundant once source is TIMESTAMPTZ, but
+cheap and defensive.)
+
+
+
+Similar-bug sweep (same pass)
+
+ingestion/pipeline.py:121 — manual .replace(tzinfo=None) hack.
+Replace with (datetime.now(timezone.utc) - ensure_aware(last_ingested)).
+mcp-server/skills/ingestion_tools.py:75-81 — same fragile hack inside
+_is_stale. Rewrite to aware-only arithmetic using ensure_aware.
+mcp-server/skills/behavioral_gap_detector.py:188, 198 — the
+.replace(tzinfo=timezone.utc) on an already-aware DB value is a no-op /
+misleading. Replace with ensure_aware(...) so intent matches behaviour.
+
+Verification
+
+New shared/tests/test_datetime_utils.py: naive→aware, aware pass-through,
+None pass-through, the exact aware-minus-naive scenario no longer raises.
+Manual end-to-end: generate_previsit_brief(patient_id=...) returns content
+with recent_deliberation.age_hours populated (no TypeError).
+
+
+Critical files to modify
+FileBugChangeshared/coercion.py (new)1coerce_confidence helper + category mapshared/datetime_utils.py (new)3ensure_aware helperserver/deliberation/knowledge_store.py1wrap lines 69, 85, 102, 145, 161server/deliberation/prompts/synthesizer.xml1tighten confidence contractmcp-server/skills/behavioral_atoms.py1 (defensive)wrap line 96mcp-server/skills/behavioral_atom_extractor.py1 (defensive)wrap line 312mcp-server/skills/behavioral_section_builder.py1 (defensive)wrap line 193mcp-server/skills/ingestion_tools.py2line 400 NOW() → NULL; rewrite _is_stale via ensure_awaremcp-server/orchestrator.py2NULL init at 315-327 if pre-ingestserver/mcp_server.py2NULL init at 984 if pre-ingestmcp-server/skills/previsit_brief.py3aware now() + ensure_aware on line 232ingestion/pipeline.py3replace tzinfo hack on line 121mcp-server/skills/behavioral_gap_detector.py3replace .replace(tzinfo=...) with ensure_aware on lines 188, 198server/deliberation/tests/test_coerce_confidence.py (new)1unit testsshared/tests/test_datetime_utils.py (new)3unit testsmcp-server/tests/test_freshness_orchestration.py2regression test for registration → NULL
+Reusable functions / patterns noted
+
+Existing strip_markdown_fences() / safe_json_loads() in
+server/deliberation/json_utils.py — model for where small shared utilities
+live; new helpers follow the same style.
+Existing test harness mcp-server/tests/test_freshness_orchestration.py
+(TestIsStale) already covers the None-is-stale invariant — extend rather
+than create a new file.
+shared/ is already imported across all three servers (via
+shared/provenance/) — correct location for new cross-server helpers.
+
+End-to-end verification (post-merge)
+Run against patient 90269e73-... (the failing session ID):
+1. register_healthex_patient({...})
+2. orchestrate_refresh(patient_id, force=True)
+   → assert ingest.status == "completed"
+   → assert ingest.records_upserted > 0
+   → assert ingest.duration_ms > 0
+3. get_ingestion_plans(patient_id)  → total_plans > 0, rows_written > 0
+4. get_transfer_audit(patient_id)   → total_records > 0
+5. run_deliberation(patient_id, mode="progressive")
+6. get_deliberation_results(patient_id)
+   → anticipatory_scenario outputs > 0
+   → every confidence is float or None
+   → context_stats.pct_used > 40 (was 16.2)
+7. generate_previsit_brief(patient_id)
+   → no error, recent_deliberation.age_hours present
+Plus unit suites:
+python -m pytest server/deliberation/tests/test_coerce_confidence.py -v
+python -m pytest shared/tests/test_datetime_utils.py -v
+python -m pytest mcp-server/tests/test_freshness_orchestration.py -v
+python -m pytest server/deliberation/tests/ -v   # regression
+python -m pytest mcp-server/tests/ -v            # regression
