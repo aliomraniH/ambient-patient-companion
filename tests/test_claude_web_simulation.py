@@ -510,6 +510,56 @@ def countdown(seconds: int, label: str) -> None:
     print(f"\r  {GREEN}✓ Delay complete — resuming{RESET}                          ")
 
 # ---------------------------------------------------------------------------
+# URL display
+# ---------------------------------------------------------------------------
+
+def print_urls(sessions: dict[str, ServerSession]) -> None:
+    domain   = os.environ.get("REPLIT_DEV_DOMAIN", "")
+    pub_base = f"https://{domain}" if domain else None
+    loc_base = PROXY_BASE
+
+    hdr("═══ MCP SERVER ENDPOINTS ═══")
+
+    print(f"\n  {BOLD}OAuth Discovery{RESET}")
+    for path in [
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+        "/register",
+        "/authorize",
+        "/token",
+    ]:
+        if pub_base:
+            print(f"    {CYAN}{pub_base}{path}{RESET}")
+        else:
+            print(f"    {CYAN}{loc_base}{path}{RESET}")
+
+    print(f"\n  {BOLD}MCP Proxy Endpoints  (pass to Claude Web as the MCP URL){RESET}")
+
+    server_labels = {
+        "clinical":  ("Clinical Intelligence", 8001, 44),
+        "skills":    ("Skills & Behavioral",   8002, 40),
+        "ingestion": ("Data Ingestion",         8003,  6),
+    }
+
+    for name, (label, port, _) in server_labels.items():
+        srv      = sessions.get(name)
+        n_tools  = len(srv.tools) if srv else "?"
+        local    = f"{loc_base}/api/mcp/{port}/mcp"
+        public   = f"{pub_base}/api/mcp/{port}/mcp" if pub_base else None
+
+        status_icon = f"{GREEN}●{RESET}" if (srv and srv.errors == 0) else f"{RED}●{RESET}"
+        print(f"\n    {status_icon} {BOLD}{label}{RESET}  ({n_tools} tools)")
+        print(f"      Local  : {DIM}{local}{RESET}")
+        if public:
+            print(f"      Public : {CYAN}{public}{RESET}")
+
+    print(f"\n  {BOLD}Claude Web — Add MCP Server{RESET}")
+    print(f"  Configure each URL above in claude.ai → Settings → Integrations → Add MCP Server.")
+    if pub_base:
+        print(f"  OAuth discovery is automatic via {CYAN}{pub_base}/.well-known/oauth-authorization-server{RESET}")
+    print()
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
@@ -604,7 +654,9 @@ def main() -> int:
         print(f"\n  {RED}Unexpected error: {exc}{RESET}")
         import traceback; traceback.print_exc()
 
-    print_summary(sessions if "sessions" in dir() else {})  # type: ignore[possibly-undefined]
+    _sess = sessions if "sessions" in dir() else {}  # type: ignore[possibly-undefined]
+    print_summary(_sess)
+    print_urls(_sess)
     return 1 if RESULTS["fail"] else 0
 
 
