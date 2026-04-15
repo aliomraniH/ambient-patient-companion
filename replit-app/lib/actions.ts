@@ -1,6 +1,16 @@
 "use server";
 
+import { cookies } from "next/headers";
 import { query } from "@/lib/db";
+import { validateSessionToken, COOKIE_NAME } from "@/lib/session";
+
+async function requireSession(): Promise<void> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(COOKIE_NAME)?.value;
+  if (!token || !validateSessionToken(token)) {
+    throw new Error("Unauthorized: valid session required");
+  }
+}
 
 export async function createPatient(data: {
   mrn: string;
@@ -16,6 +26,7 @@ export async function createPatient(data: {
   zip_code?: string | null;
   insurance_type?: string | null;
 }) {
+  await requireSession();
   const result = await query(
     `INSERT INTO patients (mrn, first_name, last_name, birth_date, gender, race, ethnicity, address_line, city, state, zip_code, insurance_type)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -42,6 +53,7 @@ export async function updatePatient(
   id: string,
   data: Record<string, string | null>
 ) {
+  await requireSession();
   const fields: string[] = [];
   const values: (string | null)[] = [];
   let idx = 1;
@@ -84,6 +96,7 @@ export async function updatePatient(
 }
 
 export async function deletePatient(id: string) {
+  await requireSession();
   const result = await query(
     `DELETE FROM patients WHERE id = $1 RETURNING id, mrn`,
     [id]
@@ -93,6 +106,7 @@ export async function deletePatient(id: string) {
 }
 
 export async function fetchVitals(patientId: string, days: number) {
+  await requireSession();
   const rows = await query(
     `SELECT metric_type, value, unit, recorded_at
      FROM vitals_readings
@@ -113,6 +127,7 @@ export async function submitCheckin(data: {
   sleep_hours: number | null;
   notes: string;
 }) {
+  await requireSession();
   const result = await query(
     `INSERT INTO daily_checkins (patient_id, mood, mood_numeric, energy, stress_level, sleep_hours, notes)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -131,6 +146,7 @@ export async function submitCheckin(data: {
 }
 
 export async function fetchObtScore(patientId: string) {
+  await requireSession();
   const rows = await query(
     `SELECT score, primary_driver, trend_direction, confidence, score_date, domain_scores
      FROM obt_scores WHERE patient_id = $1

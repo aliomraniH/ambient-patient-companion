@@ -302,13 +302,14 @@ State managed in `replit-app/lib/oauth-store.ts` (in-memory, ephemeral — clien
 ### Security Controls (added 2026-04-15)
 
 - **Bearer token enforcement**: All `/api/*` routes require valid OAuth bearer token. No cookies, no sessions, no alternate token endpoints. External callers must complete the full OAuth PKCE flow.
-- **Dashboard auth model**: Dashboard pages use server-side rendering (direct DB queries) and Next.js Server Actions for mutations. No client-side API calls, no token needed. API routes exist solely for external MCP/OAuth consumers.
+- **Dashboard auth model**: Dashboard pages use server-side rendering (direct DB queries) and Next.js Server Actions for mutations. Server Actions validate an HMAC-signed httpOnly session cookie (`apc_session`) before executing. Cookie is issued via `POST /api/session` (origin-validated, same-origin only). API routes exist solely for external MCP/OAuth consumers and do NOT accept session cookies.
 - **PKCE S256**: `/authorize` requires `code_challenge_method=S256` when `code_challenge` is present. `/token` always verifies `code_verifier` against stored challenge using SHA-256 + base64url.
 - **Redirect URI validation**: `/register` rejects non-https redirect URIs (http://localhost and http://127.0.0.1 allowed only when `NODE_ENV !== 'production'`). Wildcard hostnames, fragments (#), and userinfo (@) are rejected.
 - **CORS allowlist**: Wildcard `*` replaced with explicit origin allowlist built from `REPLIT_DEV_DOMAIN` + localhost. Configurable via `CORS_ALLOWED_ORIGINS` env var.
 - **Rate limiting**: In-memory sliding-window rate limiter by IP on `/register` (5/min), `/authorize` (20/min), `/token` (10/min), `/api/mcp/*` (60/min).
-- **Security lib files**: `lib/auth-middleware.ts`, `lib/cors.ts`, `lib/rate-limiter.ts`, `lib/redirect-uri-validator.ts`
-- **Server Actions**: `lib/actions.ts` — patient CRUD, vitals fetch, check-in submit, OBT score fetch. All run server-side via Next.js Server Actions (CSRF-protected, no API tokens needed).
+- **Security lib files**: `lib/auth-middleware.ts`, `lib/cors.ts`, `lib/rate-limiter.ts`, `lib/redirect-uri-validator.ts`, `lib/session.ts`
+- **Server Actions**: `lib/actions.ts` — patient CRUD, vitals fetch, check-in submit, OBT score fetch. All run server-side via Next.js Server Actions, each gated by `requireSession()` which validates the httpOnly HMAC-signed session cookie.
+- **Session endpoint**: `POST /api/session` — origin-validated (same-origin only, rejects cross-origin and no-origin requests), sets httpOnly strict-sameSite HMAC-SHA256 signed cookie. Not accessible to external callers.
 
 ---
 
