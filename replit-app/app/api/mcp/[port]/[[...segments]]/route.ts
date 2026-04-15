@@ -1,11 +1,6 @@
-/**
- * MCP Server proxy — forwards /api/mcp/<port>/[...path] to http://localhost:<port>/[...path]
- *
- * Allowed ports: 8001 (Clinical), 8002 (Skills), 8003 (Ingestion).
- * Only JSON payloads are forwarded; SSE streaming is not proxied here.
- */
-
 import { NextRequest, NextResponse } from "next/server";
+import { validateBearerToken } from "@/lib/auth-middleware";
+import { checkRateLimit } from "@/lib/rate-limiter";
 
 const ALLOWED_PORTS = new Set(["8001", "8002", "8003"]);
 
@@ -13,7 +8,26 @@ type RouteContext = {
   params: Promise<{ port: string; segments?: string[] }>;
 };
 
+function getClientIp(request: NextRequest): string {
+  return (
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    request.headers.get("x-real-ip") ??
+    "unknown"
+  );
+}
+
 async function proxy(request: NextRequest, context: RouteContext) {
+  const ip = getClientIp(request);
+  if (checkRateLimit(ip, "mcp-proxy", 60)) {
+    return NextResponse.json(
+      { error: "too_many_requests", error_description: "Rate limit exceeded" },
+      { status: 429 }
+    );
+  }
+
+  const authError = validateBearerToken(request);
+  if (authError) return authError;
+
   const { port, segments = [] } = await context.params;
 
   if (!ALLOWED_PORTS.has(port)) {

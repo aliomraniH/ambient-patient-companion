@@ -1,7 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
+import { validateBearerToken } from "@/lib/auth-middleware";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const authError = validateBearerToken(request);
+  if (authError) return authError;
+
   try {
     const rows = await query(
       `SELECT p.id, p.mrn, p.first_name, p.last_name, p.birth_date, p.gender,
@@ -31,7 +35,10 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  const authError = validateBearerToken(request);
+  if (authError) return authError;
+
   try {
     const body = await request.json();
     const { mrn, first_name, last_name, birth_date, gender, race, ethnicity,

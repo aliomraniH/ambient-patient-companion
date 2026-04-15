@@ -1,17 +1,25 @@
-/**
- * GET /authorize
- *
- * OAuth 2.0 Authorization Endpoint (RFC 6749 §3.1).
- *
- * This is a PUBLIC, no-user-auth server — there is no login page.
- * The endpoint immediately issues an authorization code and redirects back
- * to the client's redirect_uri. This satisfies the OAuth PKCE flow that
- * Claude runs when connecting to a remote MCP server.
- */
 import { NextRequest, NextResponse } from "next/server";
 import { oauthStore } from "@/lib/oauth-store";
+import { corsPreflightHeaders } from "@/lib/cors";
+import { checkRateLimit } from "@/lib/rate-limiter";
+
+function getClientIp(request: NextRequest): string {
+  return (
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    request.headers.get("x-real-ip") ??
+    "unknown"
+  );
+}
 
 export async function GET(req: NextRequest) {
+  const ip = getClientIp(req);
+  if (checkRateLimit(ip, "authorize", 20)) {
+    return NextResponse.json(
+      { error: "too_many_requests", error_description: "Rate limit exceeded" },
+      { status: 429 }
+    );
+  }
+
   const { searchParams } = req.nextUrl;
 
   const response_type = searchParams.get("response_type");
@@ -39,11 +47,18 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "invalid_request", error_description: "redirect_uri mismatch" }, { status: 400 });
   }
 
+  if (code_challenge && code_challenge_method !== "S256") {
+    return NextResponse.json(
+      { error: "invalid_request", error_description: "code_challenge_method must be S256" },
+      { status: 400 }
+    );
+  }
+
   const code = oauthStore.createAuthCode({
     client_id,
     redirect_uri,
     code_challenge,
-    code_challenge_method,
+    code_challenge_method: code_challenge ? "S256" : undefined,
   });
 
   const redirectUrl = new URL(redirect_uri);
@@ -53,9 +68,10 @@ export async function GET(req: NextRequest) {
   return NextResponse.redirect(redirectUrl.toString(), { status: 302 });
 }
 
-export async function OPTIONS() {
+export async function OPTIONS(req: NextRequest) {
+  const origin = req.headers.get("origin");
   return new NextResponse(null, {
     status: 204,
-    headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS" },
+    headers: corsPreflightHeaders(origin, "GET, OPTIONS", "Content-Type"),
   });
 }

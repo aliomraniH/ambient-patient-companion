@@ -1,10 +1,4 @@
-/**
- * In-memory store for the minimal OAuth 2.0 layer that satisfies MCP's
- * OAuth discovery requirements for a public (no-user-auth) server.
- *
- * State is intentionally ephemeral — clients simply re-authorize after a
- * server restart, which is fine for a dev/demo environment.
- */
+import { createHash } from "crypto";
 
 export interface OAuthClient {
   client_id: string;
@@ -38,6 +32,23 @@ function randomHex(bytes = 32): string {
   const arr = new Uint8Array(bytes);
   crypto.getRandomValues(arr);
   return Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function base64UrlEncode(buffer: Buffer): string {
+  return buffer
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+export function verifyPkceS256(
+  codeVerifier: string,
+  codeChallenge: string
+): boolean {
+  const hash = createHash("sha256").update(codeVerifier).digest();
+  const computed = base64UrlEncode(hash);
+  return computed === codeChallenge;
 }
 
 export const oauthStore = {

@@ -293,11 +293,21 @@ search_tool_calls(tool_name="run_deliberation") → filter by tool/server/time/o
 |---|---|---|
 | `GET /.well-known/oauth-protected-resource` | RFC 9728 | Declares auth server URL |
 | `GET /.well-known/oauth-authorization-server` | RFC 8414 | Lists OAuth endpoints |
-| `POST /register` | RFC 7591 | Dynamic client registration |
-| `GET /authorize` | RFC 6749 | Issues auth code immediately (no login — public server) |
-| `POST /token` | RFC 6749 | Exchanges code for Bearer token |
+| `POST /register` | RFC 7591 | Dynamic client registration (redirect URIs validated: https only, localhost in dev) |
+| `GET /authorize` | RFC 6749 | Issues auth code with PKCE S256 (auto-issues, no login — public server) |
+| `POST /token` | RFC 6749 | Exchanges code for Bearer token (PKCE S256 verified, redirect_uri required) |
+| `POST /api/auth/session` | — | Dashboard session cookie (httpOnly, strict sameSite) |
 
 State managed in `replit-app/lib/oauth-store.ts` (in-memory, ephemeral — clients re-authorize on restart).
+
+### Security Controls (added 2026-04-15)
+
+- **Bearer token enforcement**: All `/api/*` routes require valid bearer token OR httpOnly session cookie. External callers must use OAuth flow; dashboard gets auto-issued session cookie via `SessionProvider`.
+- **PKCE S256**: `/authorize` requires `code_challenge_method=S256` when `code_challenge` is present. `/token` always verifies `code_verifier` against stored challenge using SHA-256 + base64url.
+- **Redirect URI validation**: `/register` rejects non-https redirect URIs (http://localhost and http://127.0.0.1 allowed only when `NODE_ENV !== 'production'`).
+- **CORS allowlist**: Wildcard `*` replaced with explicit origin allowlist built from `REPLIT_DEV_DOMAIN` + localhost. Configurable via `CORS_ALLOWED_ORIGINS` env var.
+- **Rate limiting**: In-memory sliding-window rate limiter by IP on `/register` (5/min), `/authorize` (20/min), `/token` (10/min), `/api/mcp/*` (60/min).
+- **Security lib files**: `lib/auth-middleware.ts`, `lib/cors.ts`, `lib/rate-limiter.ts`, `lib/redirect-uri-validator.ts`, `lib/session.ts`
 
 ---
 

@@ -1,25 +1,27 @@
-/**
- * POST /token
- *
- * OAuth 2.0 Token Endpoint (RFC 6749 §3.2).
- * Exchanges an authorization code for an access token.
- *
- * PKCE (RFC 7636) code_verifier is accepted but not cryptographically
- * verified here since this is a public no-auth server — the code_challenge
- * was stored for reference only.
- */
 import { NextRequest, NextResponse } from "next/server";
-import { oauthStore } from "@/lib/oauth-store";
+import { oauthStore, verifyPkceS256 } from "@/lib/oauth-store";
+import { corsHeaders, corsPreflightHeaders } from "@/lib/cors";
+import { checkRateLimit } from "@/lib/rate-limiter";
 
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Cache-Control": "no-store",
-    Pragma: "no-cache",
-  };
+function getClientIp(request: NextRequest): string {
+  return (
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    request.headers.get("x-real-ip") ??
+    "unknown"
+  );
 }
 
 export async function POST(req: NextRequest) {
+  const origin = req.headers.get("origin");
+  const ip = getClientIp(req);
+
+  if (checkRateLimit(ip, "token", 10)) {
+    return NextResponse.json(
+      { error: "too_many_requests", error_description: "Rate limit exceeded" },
+      { status: 429, headers: corsHeaders(origin) }
+    );
+  }
+
   let params: URLSearchParams;
 
   const contentType = req.headers.get("content-type") ?? "";
@@ -33,7 +35,7 @@ export async function POST(req: NextRequest) {
     } catch {
       return NextResponse.json(
         { error: "invalid_request" },
-        { status: 400, headers: corsHeaders() }
+        { status: 400, headers: corsHeaders(origin) }
       );
     }
   }
@@ -42,7 +44,7 @@ export async function POST(req: NextRequest) {
   if (grant_type !== "authorization_code") {
     return NextResponse.json(
       { error: "unsupported_grant_type" },
-      { status: 400, headers: corsHeaders() }
+      { status: 400, headers: corsHeaders(origin) }
     );
   }
 
@@ -50,7 +52,7 @@ export async function POST(req: NextRequest) {
   if (!code) {
     return NextResponse.json(
       { error: "invalid_request", error_description: "code required" },
-      { status: 400, headers: corsHeaders() }
+      { status: 400, headers: corsHeaders(origin) }
     );
   }
 
@@ -58,16 +60,38 @@ export async function POST(req: NextRequest) {
   if (!authCode) {
     return NextResponse.json(
       { error: "invalid_grant", error_description: "code invalid or expired" },
-      { status: 400, headers: corsHeaders() }
+      { status: 400, headers: corsHeaders(origin) }
     );
   }
 
   const redirect_uri = params.get("redirect_uri");
-  if (redirect_uri && redirect_uri !== authCode.redirect_uri) {
+  if (!redirect_uri) {
+    return NextResponse.json(
+      { error: "invalid_request", error_description: "redirect_uri required" },
+      { status: 400, headers: corsHeaders(origin) }
+    );
+  }
+  if (redirect_uri !== authCode.redirect_uri) {
     return NextResponse.json(
       { error: "invalid_grant", error_description: "redirect_uri mismatch" },
-      { status: 400, headers: corsHeaders() }
+      { status: 400, headers: corsHeaders(origin) }
     );
+  }
+
+  if (authCode.code_challenge) {
+    const code_verifier = params.get("code_verifier");
+    if (!code_verifier) {
+      return NextResponse.json(
+        { error: "invalid_request", error_description: "code_verifier required for PKCE" },
+        { status: 400, headers: corsHeaders(origin) }
+      );
+    }
+    if (!verifyPkceS256(code_verifier, authCode.code_challenge)) {
+      return NextResponse.json(
+        { error: "invalid_grant", error_description: "PKCE verification failed" },
+        { status: 400, headers: corsHeaders(origin) }
+      );
+    }
   }
 
   const accessToken = oauthStore.createAccessToken(authCode.client_id);
@@ -79,17 +103,14 @@ export async function POST(req: NextRequest) {
       expires_in: 86400,
       scope: "mcp",
     },
-    { status: 200, headers: corsHeaders() }
+    { status: 200, headers: corsHeaders(origin) }
   );
 }
 
-export async function OPTIONS() {
+export async function OPTIONS(req: NextRequest) {
+  const origin = req.headers.get("origin");
   return new NextResponse(null, {
     status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    },
+    headers: corsPreflightHeaders(origin, "POST, OPTIONS", "Content-Type, Authorization"),
   });
 }

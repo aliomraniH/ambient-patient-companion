@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
+import { validateBearerToken } from "@/lib/auth-middleware";
 
 export async function POST(request: NextRequest) {
+  const authError = validateBearerToken(request);
+  if (authError) return authError;
+
   try {
     const body = await request.json();
     const {

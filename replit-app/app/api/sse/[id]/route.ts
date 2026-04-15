@@ -1,10 +1,14 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
+import { validateBearerToken } from "@/lib/auth-middleware";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const authError = validateBearerToken(request);
+  if (authError) return authError;
+
   const { id } = await params;
 
   const encoder = new TextEncoder();
@@ -17,7 +21,6 @@ export async function GET(
         );
       };
 
-      // Send initial data
       try {
         const rows = await query(
           `SELECT score, primary_driver, trend_direction, confidence, score_date
@@ -32,7 +35,6 @@ export async function GET(
         send("error", { message: "Failed to fetch initial data" });
       }
 
-      // Poll every 30 seconds
       const interval = setInterval(async () => {
         try {
           const rows = await query(
@@ -45,12 +47,10 @@ export async function GET(
             send("obt-update", rows[0]);
           }
         } catch {
-          // Silently continue on poll errors
         }
       }, 30000);
 
-      // Cleanup on close
-      _request.signal.addEventListener("abort", () => {
+      request.signal.addEventListener("abort", () => {
         clearInterval(interval);
         controller.close();
       });
