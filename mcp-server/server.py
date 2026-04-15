@@ -2,9 +2,15 @@
 
 import logging
 import sys
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
+
+# Make shared/ importable — mcp-server/ is one level below the repo root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from fastmcp import FastMCP
 from skills import load_skills
