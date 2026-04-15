@@ -11,6 +11,18 @@ export function validateRedirectUri(uri: string): {
     return { valid: false, reason: `Invalid URL: ${uri}` };
   }
 
+  if (parsed.hostname.includes("*")) {
+    return { valid: false, reason: `Wildcard hostnames are not allowed: ${uri}` };
+  }
+
+  if (parsed.hash) {
+    return { valid: false, reason: `Fragment (#) not allowed in redirect URI: ${uri}` };
+  }
+
+  if (parsed.username || parsed.password) {
+    return { valid: false, reason: `Userinfo not allowed in redirect URI: ${uri}` };
+  }
+
   if (parsed.protocol === "https:") {
     return { valid: true };
   }

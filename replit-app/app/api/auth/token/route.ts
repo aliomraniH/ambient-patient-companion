@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { oauthStore, verifyPkceS256 } from "@/lib/oauth-store";
 import { createHash } from "crypto";
+import { checkRateLimit } from "@/lib/rate-limiter";
 
 function base64UrlEncode(buffer: Buffer): string {
   return buffer
@@ -10,7 +11,61 @@ function base64UrlEncode(buffer: Buffer): string {
     .replace(/=+$/, "");
 }
 
-export async function POST() {
+function isSameOrigin(request: NextRequest): boolean {
+  const origin = request.headers.get("origin");
+  const referer = request.headers.get("referer");
+  const host = request.headers.get("host");
+  const devDomain = process.env.REPLIT_DEV_DOMAIN;
+
+  if (!origin && !referer) {
+    return false;
+  }
+
+  const allowedHosts: string[] = [];
+  if (host) allowedHosts.push(host);
+  if (devDomain) allowedHosts.push(devDomain);
+  allowedHosts.push("localhost:5000", "127.0.0.1:5000");
+
+  if (origin) {
+    try {
+      const originHost = new URL(origin).host;
+      return allowedHosts.some((h) => h === originHost);
+    } catch {
+      return false;
+    }
+  }
+
+  if (referer) {
+    try {
+      const refererHost = new URL(referer).host;
+      return allowedHosts.some((h) => h === refererHost);
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+export async function POST(request: NextRequest) {
+  if (!isSameOrigin(request)) {
+    return NextResponse.json(
+      { error: "forbidden", error_description: "Cross-origin requests not allowed" },
+      { status: 403 }
+    );
+  }
+
+  const ip =
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "unknown";
+  const limited = checkRateLimit(ip, "auth-token", 5, 60_000);
+  if (limited) {
+    return NextResponse.json(
+      { error: "rate_limited", retry_after: 60 },
+      { status: 429, headers: { "Retry-After": "60" } }
+    );
+  }
+
   const redirectUri = "urn:ietf:wg:oauth:2.0:oob";
 
   const client = oauthStore.registerClient({
