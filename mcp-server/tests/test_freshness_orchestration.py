@@ -53,11 +53,19 @@ class TestIsStale:
         assert _is_stale(just_under, 24) is False
 
     def test_timezone_aware_datetime(self):
-        """_is_stale should handle tz-aware datetimes by stripping tzinfo."""
+        """_is_stale handles tz-aware datetimes via ensure_aware (no stripping)."""
         from datetime import timezone
 
         aware = datetime.now(timezone.utc) - timedelta(hours=1)
         assert _is_stale(aware, 24) is False
+
+    def test_naive_datetime_treated_as_utc(self):
+        """ensure_aware attaches UTC to naive datetimes; arithmetic stays correct."""
+        naive_recent = datetime.utcnow() - timedelta(hours=2)
+        assert _is_stale(naive_recent, 24) is False
+
+        naive_old = datetime.utcnow() - timedelta(hours=25)
+        assert _is_stale(naive_old, 24) is True
 
     def test_zero_ttl_always_stale(self):
         now = datetime.utcnow()
@@ -327,3 +335,58 @@ async def test_check_data_freshness_fresh_skill(db_pool, test_patient):
 
     assert result["skills"]["compute_obt_score"]["is_stale"] is False
     assert result["skills"]["compute_obt_score"]["last_run_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Bug-2 regression: register_healthex_patient must set last_ingested_at=NULL
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_registration_sets_null_last_ingested(db_pool, test_patient):
+    """After registering, last_ingested_at must be NULL so next refresh triggers ingest."""
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO source_freshness
+                (patient_id, source_name, last_ingested_at, records_count, ttl_hours)
+            VALUES ($1, 'healthex', NULL, 0, 24)
+            ON CONFLICT (patient_id, source_name) DO UPDATE SET last_ingested_at = NULL
+            """,
+            test_patient,
+        )
+        row = await conn.fetchrow(
+            "SELECT last_ingested_at FROM source_freshness WHERE patient_id = $1",
+            test_patient,
+        )
+    assert row is not None
+    assert row["last_ingested_at"] is None, (
+        "registration must write NULL, not NOW()"
+    )
+    assert _is_stale(row["last_ingested_at"], 24) is True, (
+        "_is_stale(None, 24) must return True so first orchestrate_refresh triggers ingest"
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_ingest_row_is_fresh(db_pool, test_patient):
+    """After a real ingest, last_ingested_at = NOW() → not stale immediately."""
+    from datetime import timezone
+    now_aware = datetime.now(timezone.utc)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO source_freshness
+                (patient_id, source_name, last_ingested_at, records_count, ttl_hours)
+            VALUES ($1, 'healthex', $2, 10, 24)
+            ON CONFLICT (patient_id, source_name) DO UPDATE SET last_ingested_at = $2
+            """,
+            test_patient, now_aware,
+        )
+        row = await conn.fetchrow(
+            "SELECT last_ingested_at FROM source_freshness WHERE patient_id = $1",
+            test_patient,
+        )
+    assert row["last_ingested_at"] is not None
+    assert _is_stale(row["last_ingested_at"], 24) is False, (
+        "Just-ingested row must be fresh"
+    )

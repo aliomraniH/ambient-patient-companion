@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from shared.coercion import coerce_confidence
+from shared.datetime_utils import ensure_aware
 
 log = logging.getLogger(__name__)
 

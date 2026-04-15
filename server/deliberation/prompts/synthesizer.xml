@@ -49,6 +49,14 @@ Produce the five outputs as a single JSON object.
    "valid_from": ISO 8601 datetime string (use current date)
    "valid_until": ISO 8601 datetime string or null
 
+OUTPUT TYPE CONTRACT (non-negotiable):
+- "confidence" and "likelihood" MUST be a float between 0.0 and 1.0 — never a word.
+  WRONG: "confidence": "high"   RIGHT: "confidence": 0.80
+  WRONG: "likelihood": "moderate"   RIGHT: "likelihood": 0.60
+- "priority" is a string and MUST be one of: critical | high | medium | low
+- "timeframe" is a string and MUST be one of: next_30_days | next_90_days | next_6_months
+  (These are the only fields allowed to be strings like "high" or "medium".)
+
 CLINICAL SAFETY RULES (non-negotiable):
 - Every recommendation must cite its evidence_basis
 - Flag any item where confidence < 0.60 explicitly in the description

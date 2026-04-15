@@ -38,7 +38,8 @@ def coerce_confidence(raw: object) -> float | None:
         - ``float`` — clamped to ``[0, 1]``.
         - ``int`` — ``0``/``1`` literal, otherwise treated as a percentage
           (e.g. ``85`` → ``0.85``) and clamped.
-        - numeric ``str`` (``"0.85"``) — parsed and clamped.
+        - numeric ``str`` (``"0.85"``) — parsed; integer-valued strings > 1
+          treated as percentages (``"85"`` → ``0.85``); others clamped.
         - categorical ``str`` (``"high"``, ``"moderate"``, …) — looked up in
           ``_CONFIDENCE_MAP``. Case- and whitespace-insensitive.
         - ``None`` — returned as ``None`` (means "no value" in the DB).
@@ -63,7 +64,10 @@ def coerce_confidence(raw: object) -> float | None:
         if normalised in _CONFIDENCE_MAP:
             return _CONFIDENCE_MAP[normalised]
         try:
-            return max(0.0, min(1.0, float(normalised)))
+            val = float(normalised)
+            if val > 1.0 and val == int(val):
+                val = val / 100.0
+            return max(0.0, min(1.0, val))
         except ValueError:
             return None
     return None

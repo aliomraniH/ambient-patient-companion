@@ -18,6 +18,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
+from shared.datetime_utils import ensure_aware
 from typing import Optional
 
 from shared.datetime_utils import ensure_aware

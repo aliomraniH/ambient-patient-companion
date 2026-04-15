@@ -3,8 +3,14 @@ import pytest_asyncio
 import asyncio
 import asyncpg
 import os
+import sys
 import uuid
 from datetime import date, timedelta
+
+# Add repo root so tests can import from shared/ (coercion, datetime_utils, …)
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 pytest_plugins = ["pytest_asyncio"]
 

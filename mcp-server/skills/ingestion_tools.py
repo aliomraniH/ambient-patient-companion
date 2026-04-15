@@ -14,12 +14,12 @@ import re
 import sys
 import uuid
 from datetime import datetime, timezone
+from shared.datetime_utils import ensure_aware
 
 from fastmcp import FastMCP
 
 from db.connection import get_pool
 from ingestion.pipeline import sanitize_for_jsonb
-from shared.datetime_utils import ensure_aware
 from skills.base import get_data_track, log_skill_execution
 from transforms.fhir_to_schema import _parse_date
 
@@ -81,9 +81,7 @@ def _is_stale(last_run: datetime | None, ttl_hours: int) -> bool:
     """
     if last_run is None:
         return True
-    elapsed = (
-        datetime.now(timezone.utc) - ensure_aware(last_run)
-    ).total_seconds() / 3600
+    elapsed = (datetime.now(timezone.utc) - ensure_aware(last_run)).total_seconds() / 3600
     return elapsed >= ttl_hours
 
 

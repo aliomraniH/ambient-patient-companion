@@ -11,6 +11,7 @@ from datetime import datetime
 from shared.coercion import coerce_confidence
 
 from .schemas import DeliberationResult
+from shared.coercion import coerce_confidence
 
 log = logging.getLogger(__name__)
 
