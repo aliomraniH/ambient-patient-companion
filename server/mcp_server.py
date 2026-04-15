@@ -682,7 +682,9 @@ async def _get_db_pool() -> asyncpg.Pool:
         dsn = os.environ.get("DATABASE_URL")
         if not dsn:
             raise RuntimeError("DATABASE_URL not set")
-        _db_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+        _db_pool = await asyncpg.create_pool(
+            dsn, min_size=2, max_size=10, command_timeout=30
+        )
     return _db_pool
 
 
@@ -4262,6 +4264,42 @@ if __name__ == "__main__":
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("MCP_PORT", "8000"))
     if transport in ("streamable-http", "http"):
-        mcp.run(transport="streamable-http", host=host, port=port, json_response=True, stateless=True)
+        # Pre-create the mcp_call_log audit table BEFORE handing control to
+        # mcp.run(). Without this, the first tool call after a client connect
+        # has to run the DDL synchronously; on this 4000+ line server the
+        # cold-start latency can exceed the MCP client's handshake/call
+        # window and manifest as "session terminated" errors on Claude Web.
+        #
+        # We use a throwaway connection (not a pool) because asyncpg pools
+        # are bound to the event loop they're created in — the real pool
+        # must be lazily created inside mcp.run()'s loop on first tool call.
+        import asyncio as _asyncio
+        import asyncpg as _asyncpg
+        from shared.call_recorder import _DDL_STATEMENTS as _AUDIT_DDL
+
+        async def _prewarm_audit_table() -> None:
+            dsn = os.environ.get("DATABASE_URL")
+            if not dsn:
+                return
+            try:
+                conn = await _asyncpg.connect(dsn)
+                try:
+                    for stmt in _AUDIT_DDL:
+                        await conn.execute(stmt)
+                finally:
+                    await conn.close()
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "clinical prewarm: audit table init failed: %s", exc
+                )
+
+        _asyncio.run(_prewarm_audit_table())
+        mcp.run(
+            transport="streamable-http",
+            host=host,
+            port=port,
+            json_response=True,
+            stateless=True,
+        )
     else:
         mcp.run(transport="stdio")
