@@ -89,7 +89,7 @@ async def build_cards_from_pool(
                 WHERE patient_id = $1::uuid
                   AND (domain = 'suicidality'
                        OR jsonb_array_length(triggered_critical) > 0)
-                  AND administered_at >= NOW() - INTERVAL '90 days'
+                  AND administered_at >= NOW() - INTERVAL '24 months'
                 LIMIT 1
                 """,
                 patient_id,
@@ -192,7 +192,7 @@ def register(mcp) -> None:
                 WHERE patient_id = $1::uuid
                   AND (domain = 'suicidality'
                        OR jsonb_array_length(triggered_critical) > 0)
-                  AND administered_at >= NOW() - INTERVAL '90 days'
+                  AND administered_at >= NOW() - INTERVAL '24 months'
                 LIMIT 1
                 """,
                 patient_id,

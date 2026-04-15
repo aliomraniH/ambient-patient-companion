@@ -237,7 +237,17 @@ async def generate_previsit_brief(
                     ),
                     "convergence_score": delib_row["convergence_score"],
                     "rounds_completed": delib_row["rounds_completed"],
-                    "outputs": [dict(o) for o in outputs],
+                    "outputs": [
+                        {
+                            **dict(o),
+                            "output_data": (
+                                json.loads(o["output_data"])
+                                if isinstance(o["output_data"], str)
+                                else o["output_data"]
+                            ),
+                        }
+                        for o in outputs
+                    ],
                 }
             else:
                 brief["recent_deliberation"] = None

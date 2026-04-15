@@ -147,12 +147,37 @@ async def compute_obt_score(
             else:
                 glucose_score = 50.0
 
-            # Behavioral score (mood + energy proxy via mood)
+            # Behavioral score (mood + most recent PHQ-9 total, blended)
+            # Mood: 1-5 scale → 0-100
+            # PHQ-9: 0-27 scale → 100 (minimal) to 0 (severe)
+            # If both available: blend 60% mood, 40% PHQ-9 (mood is higher frequency)
+            mood_component = None
             if checkin_rows:
                 mood_values = [r["mood_numeric"] for r in checkin_rows]
                 mood_avg = sum(mood_values) / len(mood_values)
-                # Normalize: mood 1-5 -> 0-100
-                behavioral_score = max(0.0, min(100.0, (mood_avg - 1) / 4.0 * 100.0))
+                mood_component = max(0.0, min(100.0, (mood_avg - 1) / 4.0 * 100.0))
+
+            phq9_row = await conn.fetchrow(
+                """
+                SELECT score FROM behavioral_screenings
+                WHERE patient_id = $1
+                  AND instrument_key LIKE 'phq%'
+                  AND administered_at >= $2
+                ORDER BY administered_at DESC LIMIT 1
+                """,
+                patient_id, window_start,
+            )
+            phq9_component = None
+            if phq9_row and phq9_row["score"] is not None:
+                phq9_total = float(phq9_row["score"])
+                phq9_component = max(0.0, min(100.0, 100.0 - (phq9_total / 27.0 * 100.0)))
+
+            if mood_component is not None and phq9_component is not None:
+                behavioral_score = 0.60 * mood_component + 0.40 * phq9_component
+            elif mood_component is not None:
+                behavioral_score = mood_component
+            elif phq9_component is not None:
+                behavioral_score = phq9_component
             else:
                 behavioral_score = 50.0
 

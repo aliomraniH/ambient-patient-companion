@@ -16,6 +16,18 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 
+def _parse_jsonb(raw, default):
+    """Parse an asyncpg JSONB field that may be returned as a raw string."""
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return default
+    return raw
+
+
 async def run_crisis_escalation(
     patient_id: str,
     check_date: str = "",
@@ -28,6 +40,8 @@ async def run_crisis_escalation(
     - Stress >= 8 for 3+ consecutive days
     - Sleep < 5.0 for 3+ consecutive days
     - Mood 'bad' (1) for 3+ consecutive days
+    - PHQ-9 item 9 >= 2 (active suicidal ideation) within last 12 months,
+      deduplicated: no new escalation if one already created in last 14 days
 
     Args:
         patient_id: UUID of the patient
@@ -124,6 +138,57 @@ async def run_crisis_escalation(
                 # Mood bad (1) for 3 consecutive days
                 if all(r["mood_numeric"] == 1 for r in last3):
                     triggers.append("Mood 'bad' for 3+ consecutive days")
+
+            # --- PHQ-9 item 9 active SI screen ---
+            # Check the most recent PHQ-9 (or PHQ-* instrument) with item 9
+            # score >= 2 (active suicidal ideation) administered within 12 months.
+            # If found and no escalation has been created for SI in the last 14
+            # days, trigger one regardless of biometric state.
+            si_lookback = target - timedelta(days=365)
+            dedup_lookback = target - timedelta(days=14)
+            phq_si_row = await conn.fetchrow(
+                """
+                SELECT instrument_key, item_answers, triggered_critical,
+                       administered_at
+                FROM behavioral_screenings
+                WHERE patient_id = $1
+                  AND instrument_key LIKE 'phq%'
+                  AND administered_at >= $2
+                ORDER BY administered_at DESC
+                LIMIT 1
+                """,
+                patient_id, si_lookback,
+            )
+            if phq_si_row:
+                item_answers = _parse_jsonb(phq_si_row["item_answers"], {})
+                item9_score = None
+                for key in ("9", 9, "item_9"):
+                    v = item_answers.get(key) if isinstance(item_answers, dict) else None
+                    if v is not None:
+                        try:
+                            item9_score = int(v)
+                        except (TypeError, ValueError):
+                            pass
+                        break
+
+                if item9_score is not None and item9_score >= 2:
+                    # Only create if no SI escalation in the last 14 days
+                    recent_si = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) FROM agent_interventions
+                        WHERE patient_id = $1
+                          AND intervention_type = 'escalation'
+                          AND summary ILIKE '%suicid%'
+                          AND delivered_at >= $2
+                        """,
+                        patient_id, dedup_lookback,
+                    )
+                    if not recent_si:
+                        label = "active" if item9_score >= 2 else "passive"
+                        triggers.append(
+                            f"PHQ-9 item 9 = {item9_score} ({label} suicidal ideation), "
+                            f"screen administered {phq_si_row['administered_at'].date()}"
+                        )
 
             # --- Create interventions if triggered ---
             if triggers:

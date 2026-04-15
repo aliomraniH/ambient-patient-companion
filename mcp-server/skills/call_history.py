@@ -11,6 +11,7 @@ search_tool_calls       Filter by tool name, server, time window, outcome.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,18 @@ from db.connection import get_pool
 from shared.call_recorder import _DDL_STATEMENTS, get_registry
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_jsonb(raw):
+    """Return a parsed object from an asyncpg JSONB field (may be a raw string)."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +250,8 @@ def register(mcp: FastMCP) -> None:
                 "called_at": row["called_at"].isoformat() if row["called_at"] else None,
                 "duration_ms": row["duration_ms"],
                 "outcome": row["outcome"],
-                "input_params": row["input_params"],
-                "output_data": row["output_data"],
+                "input_params": _parse_jsonb(row["input_params"]),
+                "output_data": _parse_jsonb(row["output_data"]),
                 "error_message": row["error_message"],
             }
             raw_text = row["output_text"] or ""
