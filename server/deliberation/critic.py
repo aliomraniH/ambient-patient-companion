@@ -57,7 +57,7 @@ async def _critique_with_model(
     system_prompt = load_prompt_fn(prompt_file, {
         "ROUND_NUMBER": str(round_number),
         "PARTNER_ANALYSIS_JSON": partner_analysis.model_dump_json(indent=2),
-        "PATIENT_CONTEXT_JSON": context.model_dump_json(indent=2)
+        "PATIENT_CONTEXT_JSON": context.serialize_for_llm()
     })
     raw = await call_model_fn(model, system_prompt,
                               "Produce your critique now.")
@@ -86,7 +86,7 @@ Critique received from your peer:
 {critique.model_dump_json(indent=2)}
 
 Original patient context:
-{context.model_dump_json(indent=2)}
+{context.serialize_for_llm()}
 
 Instructions:
 - Address each critique item. If the critique is valid, revise your finding.

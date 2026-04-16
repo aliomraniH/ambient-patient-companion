@@ -64,6 +64,40 @@ class PatientContextPackage(BaseModel):
     # Media inventory — URL references to non-text assets (media_references table)
     available_media: list[dict] = []    # [{type, url, date}]
 
+    def serialize_for_llm(self) -> str:
+        """Serialize context with SDOH-first section ordering for primacy-bias
+        mitigation. The Pydantic field order is NOT changed — this is additive.
+
+        Research: Liu et al. TACL 2024 (attention sink on first tokens);
+        Sun et al. Health Affairs 2022 (stigmatizing language in EHR notes
+        at 2.54× the rate for Black patients). Placing SDOH flags ahead of
+        conditions/meds/labs/vitals frames structural context before clinical
+        data in the LLM's working memory.
+        """
+        import json
+        raw = self.model_dump()
+        ordered: dict = {}
+        # 1. Demographics
+        for k in ("patient_id", "patient_name", "age", "sex", "mrn",
+                  "primary_provider", "practice"):
+            if k in raw:
+                ordered[k] = raw[k]
+        # 2. SDOH first (structural frame before clinical data)
+        ordered["sdoh_flags"] = raw.get("sdoh_flags", [])
+        # 3. Clinical state
+        for k in ("active_conditions", "current_medications", "recent_labs",
+                  "vital_trends", "care_gaps"):
+            if k in raw:
+                ordered[k] = raw[k]
+        # 4. Knowledge, guidelines, temporal, inventory, notes last
+        for k in ("prior_patient_knowledge", "applicable_guidelines",
+                  "upcoming_appointments", "days_since_last_encounter",
+                  "deliberation_trigger", "data_inventory",
+                  "clinical_notes", "available_media"):
+            if k in raw:
+                ordered[k] = raw[k]
+        return json.dumps(ordered, indent=2, default=str)
+
 
 class DeliberationRequest(BaseModel):
     """Input to engine.run()"""

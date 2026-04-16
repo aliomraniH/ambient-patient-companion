@@ -49,7 +49,7 @@ async def _analyze_with_claude(
 ) -> IndependentAnalysis:
     """Run Claude as the Diagnostic Reasoning Analyst."""
     system_prompt = _load_prompt("analyst_claude.xml", {
-        "PATIENT_CONTEXT_JSON": context.model_dump_json(indent=2),
+        "PATIENT_CONTEXT_JSON": context.serialize_for_llm(),
         "GUIDELINES_JSON": guidelines_json,
         "PRIOR_KNOWLEDGE_JSON": prior_knowledge_json
     })
@@ -83,7 +83,7 @@ async def _analyze_with_gpt4(
 ) -> IndependentAnalysis:
     """Run GPT-4 as the Treatment Optimization Analyst."""
     system_prompt = _load_prompt("analyst_gpt4.xml", {
-        "PATIENT_CONTEXT_JSON": context.model_dump_json(indent=2),
+        "PATIENT_CONTEXT_JSON": context.serialize_for_llm(),
         "GUIDELINES_JSON": guidelines_json,
         "PRIOR_KNOWLEDGE_JSON": prior_knowledge_json
     })
