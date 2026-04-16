@@ -2335,6 +2335,17 @@ async def run_deliberation(
     }
 
 
+async def _get_staleness_threshold(conn) -> float:
+    """Read deliberation_staleness_hours from system_config (default 72 h)."""
+    try:
+        row = await conn.fetchval(
+            "SELECT value FROM system_config WHERE key = 'deliberation_staleness_hours'"
+        )
+        return float(row) if row is not None else 72.0
+    except Exception:
+        return 72.0
+
+
 @mcp.tool()
 async def get_deliberation_results(
     patient_id: str,
@@ -2352,10 +2363,16 @@ async def get_deliberation_results(
         limit: Number of most recent deliberations to return (default 1)
 
     Returns:
-        Structured outputs from deliberation(s), with metadata.
+        Structured outputs from deliberation(s), with metadata.  Each
+        deliberation entry includes ``age_hours`` (float) and
+        ``provenance_tier`` (str: "SYNTHESIZED" when fresh, "PRIOR_SESSION"
+        when older than deliberation_staleness_hours).
     """
+    from datetime import datetime, timezone as _tz
     pool = await _get_db_pool()
     async with pool.acquire() as conn:
+        staleness_hours = await _get_staleness_threshold(conn)
+
         deliberations = await conn.fetch(
             """SELECT id, triggered_at, convergence_score, rounds_completed
                FROM deliberations
@@ -2367,6 +2384,7 @@ async def get_deliberation_results(
         if not deliberations:
             return {"status": "no_deliberations_found", "patient_id": patient_id}
 
+        now_utc = datetime.now(_tz.utc)
         results = []
         for dlb in deliberations:
             query = """SELECT output_type, output_data, confidence, priority
@@ -2378,9 +2396,19 @@ async def get_deliberation_results(
                 params.append(output_type)
             outputs = await conn.fetch(query, *params)
 
+            triggered = dlb["triggered_at"]
+            if triggered.tzinfo is None:
+                triggered = triggered.replace(tzinfo=_tz.utc)
+            age_hours = (now_utc - triggered).total_seconds() / 3600
+            provenance_tier = (
+                "PRIOR_SESSION" if age_hours > staleness_hours else "SYNTHESIZED"
+            )
+
             results.append({
                 "deliberation_id": str(dlb["id"]),
                 "triggered_at": dlb["triggered_at"].isoformat(),
+                "age_hours": round(age_hours, 2),
+                "provenance_tier": provenance_tier,
                 "convergence_score": dlb["convergence_score"],
                 "rounds_completed": dlb["rounds_completed"],
                 "outputs": [dict(o) for o in outputs]
@@ -3828,6 +3856,73 @@ async def check_sycophancy_risk(
     }
 
 
+def _check_anchor_bias(draft_output: str) -> str:
+    """Heuristic anchor-bias check for constitutional critic Step 5.
+
+    Two signals:
+    1. Dominance — the first-mentioned clinical term accounts for >60 % of all
+       clinical-term mentions.  Indicates the output is over-anchored on the
+       first concept introduced.
+    2. Missing differential language — multiple distinct conditions are mentioned
+       but none of the hedge/alternative words are present, suggesting the model
+       is not offering differential framing.
+
+    Returns an empty string when no bias is detected, or a description string
+    that is appended as a "moderate" issue (advisory only; does not raise
+    escalation tier).
+    """
+    import re as _re
+    if not draft_output:
+        return ""
+
+    _CLINICAL_TERMS = [
+        "diabetes", "hypertension", "hyperlipidemia", "asthma", "depression",
+        "anxiety", "obesity", "ckd", "copd", "hypothyroidism", "afib",
+        "heart failure", "coronary", "stroke", "cancer", "pneumonia",
+        "infection", "sepsis", "anemia", "renal",
+    ]
+    _DIFFERENTIAL_WORDS = [
+        "alternatively", "could also", "consider", "differential",
+        "another possibility", "may also", "or possibly", "however",
+        "on the other hand", "alternatively,",
+    ]
+
+    lowered = draft_output.lower()
+
+    # Count mentions per term
+    counts: dict[str, int] = {}
+    for term in _CLINICAL_TERMS:
+        n = len(_re.findall(r"\b" + _re.escape(term) + r"\b", lowered))
+        if n > 0:
+            counts[term] = n
+
+    if not counts:
+        return ""
+
+    total = sum(counts.values())
+    sorted_terms = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+    top_term, top_count = sorted_terms[0]
+    top_ratio = top_count / total
+
+    signals: list[str] = []
+
+    # Signal 1 — single term dominates
+    if total >= 3 and top_ratio > 0.60:
+        signals.append(
+            f"'{top_term}' accounts for {top_ratio:.0%} of clinical term "
+            "mentions — possible anchor bias on first-mentioned concept"
+        )
+
+    # Signal 2 — multiple conditions but no differential language
+    if len(counts) >= 2 and not any(w in lowered for w in _DIFFERENTIAL_WORDS):
+        signals.append(
+            "multiple conditions mentioned without differential framing "
+            "(no 'alternatively', 'consider', 'could also', etc.)"
+        )
+
+    return "; ".join(signals)
+
+
 @mcp.tool()
 async def run_constitutional_critic(
     patient_id: str,
@@ -3878,6 +3973,12 @@ async def run_constitutional_critic(
     if contradictions:
         issues.append({"check": "internal_contradiction", "severity": "high",
                        "detail": f"contradictory verbs: {contradictions}"})
+
+    # Step 5 — anchor bias check (advisory; does not raise escalation tier).
+    anchor_detail = _check_anchor_bias(draft_output or "")
+    if anchor_detail:
+        issues.append({"check": "anchor_bias", "severity": "moderate",
+                       "detail": anchor_detail})
 
     # Step 4 — escalation routing.
     critical = [i for i in issues if i["severity"] == "critical"]

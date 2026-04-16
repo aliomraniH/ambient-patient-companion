@@ -13,7 +13,7 @@ from .domain_registry import (
     RULE_6_AGENTS,
 )
 
-VALID_TIERS = {"TOOL", "RETRIEVAL", "SYNTHESIZED", "PENDING"}
+VALID_TIERS = {"TOOL", "RETRIEVAL", "SYNTHESIZED", "PENDING", "PRIOR_SESSION"}
 
 
 def hash_mrn(mrn: str) -> str:
@@ -279,6 +279,36 @@ def validate_section(section: dict) -> list[dict]:
                 ),
             })
 
+    # Rule 11: PRIOR_SESSION_STALENESS (WARN)
+    # PRIOR_SESSION sections tag outputs from a previous deliberation that
+    # may no longer reflect the patient's current clinical state.  If the
+    # section carries a triggered_at / tool_called_at timestamp that is
+    # older than 72 hours, surface an advisory WARN so downstream consumers
+    # know the data may be stale.
+    if tier == "PRIOR_SESSION":
+        ts_raw = section.get("triggered_at") or section.get("tool_called_at")
+        if ts_raw:
+            try:
+                ts = datetime.fromisoformat(
+                    str(ts_raw).replace("Z", "+00:00")
+                )
+                age_hours = (
+                    datetime.now(timezone.utc) - ts
+                ).total_seconds() / 3600
+                if age_hours > 72:
+                    violations.append({
+                        "rule": "PRIOR_SESSION_STALENESS",
+                        "severity": "WARN",
+                        "message": (
+                            f"Section '{sid}' (PRIOR_SESSION): deliberation "
+                            f"is {age_hours:.1f}h old (>72h threshold). "
+                            "Clinical context may have changed; consider "
+                            "triggering a fresh deliberation."
+                        ),
+                    })
+            except (ValueError, TypeError):
+                pass
+
     return violations
 
 
@@ -301,6 +331,8 @@ def render_recommendation(section: dict, violations: list[dict]) -> str:
         )
     if tier == "TOOL":
         return "FULL_AUTHORITY"
+    if tier == "PRIOR_SESSION":
+        return "REDUCED_AUTHORITY"
     return "WITHHELD"
 
 

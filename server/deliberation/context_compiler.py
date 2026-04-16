@@ -292,10 +292,19 @@ async def compile_patient_context(
                    LIMIT 20""",
                 internal_id,
             )
+
+            def _annotate_stigma(text: str) -> str:
+                """Annotate stigmatizing language inline; safe to fail."""
+                try:
+                    from shared.stigmatizing_language import flag_stigmatizing_language
+                    return flag_stigmatizing_language(text)
+                except Exception:
+                    return text
+
             clinical_notes_rows = [
                 {
                     "type":   sanitize_for_context(r["note_type"] or ""),
-                    "text":   sanitize_for_context(r["note_text"] or ""),
+                    "text":   _annotate_stigma(sanitize_for_context(r["note_text"] or "")),
                     "date":   r["note_date"].isoformat() if r["note_date"] else "",
                     "author": sanitize_for_context(r["author"] or ""),
                     "source": r["source"] or "",

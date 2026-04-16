@@ -384,3 +384,7 @@ CREATE TABLE IF NOT EXISTS system_config (
 INSERT INTO system_config (key, value)
 VALUES ('DATA_TRACK', 'synthea')
 ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO system_config (key, value)
+VALUES ('deliberation_staleness_hours', '72')
+ON CONFLICT (key) DO NOTHING;

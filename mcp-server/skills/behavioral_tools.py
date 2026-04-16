@@ -92,6 +92,19 @@ async def classify_com_b_barrier(
         # safety net
         component, sub = "Motivation", "Reflective"
 
+    # Phase 7 — SDOH-empty warning.
+    # If no SDOH rows were retrieved and the result landed in the default
+    # Motivation/Reflective bucket, the classification may be incomplete
+    # because structural barriers were never surfaced.
+    sdoh_data_warning = ""
+    if not sdoh and component == "Motivation" and sub == "Reflective":
+        sdoh_data_warning = (
+            "No SDOH flags found for this patient. The default "
+            "Motivation (Reflective) classification may be incomplete; "
+            "consider collecting or reviewing social determinants of health "
+            "data before acting on this barrier assessment."
+        )
+
     # Persist.
     try:
         async with pool.acquire() as conn:
@@ -114,6 +127,7 @@ async def classify_com_b_barrier(
         "primary_barrier": primary,
         "confidence": 0.6,
         "supporting_evidence": evidence,
+        "sdoh_data_warning": sdoh_data_warning,
     })
 
 
