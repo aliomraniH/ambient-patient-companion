@@ -586,3 +586,101 @@ async def run_behavioral_gap_check(
             "run_behavioral_gap_check failed: %s", type(e).__name__
         )
         return []
+
+
+async def _scan_notes_internal(db_pool, patient_id: str, limit: int = 200) -> dict:
+    """Scan clinical_notes rows for PHQ-9 and other screening scores.
+
+    Standalone async helper importable by the Clinical MCP Server pipeline
+    (server/mcp_server.py _run_healthex_pipeline_background step 4).
+    Shares all pattern logic with the scan_notes_for_behavioral_screenings MCP
+    tool but operates directly on a pool rather than re-acquiring one.
+
+    Returns {notes_scanned, screenings_found, screenings_written}.
+    """
+    import re as _re
+    import uuid as _uuid_s
+    from datetime import timezone as _tz_s
+
+    _phq9_total = _re.compile(
+        r'PHQ[\s\-_]?9[\s\w]*?(?:score|total|result)?[\s:=\-]+(\d{1,2})',
+        _re.IGNORECASE,
+    )
+    _item9_numeric = _re.compile(
+        r'(?:item\s*[#\-]?\s*9|q(?:uestion)?\s*9)[\s\w]*?(?:scored?|answered?)?[\s:=\-]+([0-3])',
+        _re.IGNORECASE,
+    )
+    _item9_endorsed = _re.compile(
+        r'item\s*[#\-]?\s*9\s+(?:was\s+)?endorsed',
+        _re.IGNORECASE,
+    )
+
+    def _band(s: int) -> str:
+        if s <= 4: return "minimal"
+        if s <= 9: return "mild"
+        if s <= 14: return "moderate"
+        if s <= 19: return "moderately_severe"
+        return "severe"
+
+    screenings_found = 0
+    screenings_written = 0
+
+    async with db_pool.acquire() as conn:
+        notes = await conn.fetch(
+            """SELECT id, note_text, note_date FROM clinical_notes
+               WHERE patient_id = $1::uuid
+               ORDER BY note_date DESC NULLS LAST LIMIT $2""",
+            patient_id, limit,
+        )
+        for note in notes:
+            note_text = note["note_text"] or ""
+            m = _phq9_total.search(note_text)
+            if not m:
+                continue
+            screenings_found += 1
+            try:
+                score = int(m.group(1))
+            except ValueError:
+                continue
+            m9 = _item9_numeric.search(note_text)
+            item9 = 0
+            if m9:
+                try:
+                    item9 = int(m9.group(1))
+                except ValueError:
+                    item9 = 0
+            elif _item9_endorsed.search(note_text):
+                item9 = 1
+            item_answers = {"9": item9}
+            triggered = []
+            if item9 > 0:
+                triggered.append({
+                    "item": "9", "score": item9,
+                    "alert_text": "PHQ-9 item 9 endorsed — suicidal ideation screen positive. Safety review required.",
+                    "severity": "passive_si" if item9 == 1 else "active_si",
+                })
+            note_date = note["note_date"] or datetime.now(tz=_tz_s.utc)
+            try:
+                r = await conn.execute(
+                    """INSERT INTO behavioral_screenings
+                           (id, patient_id, instrument_key, domain, loinc_code,
+                            score, band, item_answers, triggered_critical,
+                            source_type, administered_at, entered_by, data_source)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13)
+                       ON CONFLICT DO NOTHING""",
+                    str(_uuid_s.uuid4()), patient_id, "PHQ-9", "depression", "44249-1",
+                    score, _band(score),
+                    json.dumps(item_answers), json.dumps(triggered),
+                    "clinical_note", note_date,
+                    "_scan_notes_internal", "healthex",
+                )
+                if r == "INSERT 0 1":
+                    screenings_written += 1
+            except Exception:
+                pass
+
+    return {
+        "notes_scanned": len(notes),
+        "screenings_found": screenings_found,
+        "screenings_written": screenings_written,
+    }

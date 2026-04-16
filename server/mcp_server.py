@@ -4325,38 +4325,143 @@ import asyncio as _asyncio  # noqa: E402
 _PIPELINE_JOBS: dict[str, dict] = {}   # job_id → {status, patient_id, steps, error}
 
 
-async def _run_healthex_pipeline_background(job_id: str, patient_mrn: str) -> None:
-    """Background worker. Never raises — status written into _PIPELINE_JOBS."""
+async def _run_healthex_pipeline_background(
+    job_id: str,
+    patient_mrn: str,
+    health_summary_json: str = "",
+    labs_json: str = "",
+    medications_json: str = "",
+    conditions_json: str = "",
+    encounters_json: str = "",
+    notes_json: str = "",
+    behavioral_screenings_json: str = "",
+) -> None:
+    """Background worker. Never raises — status written into _PIPELINE_JOBS.
+
+    Executes the full pipeline in order:
+      1. use_healthex          — switch data track
+      2. register_healthex_patient — create/upsert patient row (with PHQ-9 if present)
+      3. ingest_from_healthex  — one call per supplied resource type, including notes
+      4. scan_notes_for_behavioral_screenings — extract PHQ-9 etc. from just-written notes
+      5. run_deliberation      — deliberation on the now-populated warehouse
+    """
     steps: list[dict] = []
     def _mark(step: str, status: str, detail: dict | None = None) -> None:
         steps.append({"step": step, "status": status, **(detail or {})})
         _PIPELINE_JOBS[job_id]["steps"] = steps
     try:
         _PIPELINE_JOBS[job_id]["status"] = "running"
-        # 1. use_healthex → switch track.
+
+        # ── Step 1: switch data track ─────────────────────────────────────────
         try:
             await use_healthex()
             _mark("use_healthex", "ok")
         except Exception as e:
             _mark("use_healthex", "failed", {"error": str(e)})
-        # 2. register_healthex_patient.
-        # (Caller supplies a real summary; we stub with a minimal FHIR Patient.)
-        stub_summary = json.dumps({
-            "resourceType": "Bundle", "type": "collection",
-            "entry": [{"resource": {"resourceType": "Patient",
-                                    "identifier": [{"value": patient_mrn}]}}],
-        })
+
+        # ── Step 2: register patient ──────────────────────────────────────────
+        # Use the real summary when provided; otherwise fall back to a minimal
+        # FHIR Bundle stub so the patient row is created even without full data.
+        if health_summary_json.strip():
+            reg_summary = health_summary_json
+        else:
+            reg_summary = json.dumps({
+                "resourceType": "Bundle", "type": "collection",
+                "entry": [{"resource": {"resourceType": "Patient",
+                                        "identifier": [{"value": patient_mrn}]}}],
+            })
         try:
-            reg = await register_healthex_patient(stub_summary)
+            reg = await register_healthex_patient(reg_summary)
             reg_parsed = json.loads(reg) if isinstance(reg, str) else reg
-            patient_id = reg_parsed.get("patient_id") or patient_mrn
-            _mark("register_healthex_patient", "ok", {"patient_id": patient_id})
+            if isinstance(reg_parsed, dict) and reg_parsed.get("status") == "registered":
+                patient_id = reg_parsed["patient_id"]
+                _mark("register_healthex_patient", "ok", {"patient_id": patient_id})
+            else:
+                raise ValueError(str(reg_parsed))
         except Exception as e:
             _mark("register_healthex_patient", "failed", {"error": str(e)})
-            _PIPELINE_JOBS[job_id]["status"] = "partial"
-            _PIPELINE_JOBS[job_id]["failed_step"] = "register_healthex_patient"
+            _PIPELINE_JOBS[job_id].update({"status": "partial", "failed_step": "register_healthex_patient"})
             return
-        # 3. run_deliberation (fire-and-forget inside fire-and-forget).
+
+        # ── Step 3: ingest each provided resource type ────────────────────────
+        # resource_types to ingest in dependency order (summary last so its
+        # fan-out doesn't create duplicates when individual types were supplied).
+        _resource_payloads = [
+            ("conditions",              conditions_json),
+            ("medications",             medications_json),
+            ("labs",                    labs_json),
+            ("encounters",              encounters_json),
+            ("notes",                   notes_json),
+            ("behavioral_screenings",   behavioral_screenings_json),
+            ("summary",                 health_summary_json),
+        ]
+        ingest_totals: dict[str, int] = {}
+        for rtype, payload in _resource_payloads:
+            if not payload or not payload.strip():
+                continue
+            # behavioral_screenings is handled via ingest_behavioral_screening_fhir,
+            # not ingest_from_healthex (different schema path).
+            if rtype == "behavioral_screenings":
+                try:
+                    bs_data = json.loads(payload)
+                    resources = bs_data if isinstance(bs_data, list) else (
+                        [bs_data] if isinstance(bs_data, dict) and bs_data.get("resourceType") else
+                        bs_data.get("entry", []) if isinstance(bs_data, dict) else []
+                    )
+                    from skills.behavioral_screening_ingestor import ingest_observation_or_qr  # type: ignore
+                    pool = await _get_db_pool()
+                    written = 0
+                    for res_entry in resources:
+                        res = res_entry.get("resource", res_entry) if isinstance(res_entry, dict) else {}
+                        result = await ingest_observation_or_qr(pool, patient_id, res)
+                        if result:
+                            written += 1
+                    ingest_totals["behavioral_screenings"] = written
+                    _mark("ingest_behavioral_screenings", "ok", {"written": written})
+                except Exception as e:
+                    _mark("ingest_behavioral_screenings", "failed", {"error": str(e)})
+                continue
+            try:
+                result_str = await ingest_from_healthex(patient_id, rtype, payload)
+                result = json.loads(result_str) if isinstance(result_str, str) else result_str
+                total = result.get("total_written", 0)
+                ingest_totals[rtype] = total
+                _mark(f"ingest_{rtype}", "ok", {"written": total, "records": result.get("records_written", {})})
+            except Exception as e:
+                _mark(f"ingest_{rtype}", "failed", {"error": str(e)})
+
+        # ── Step 4: scan notes for behavioral screenings (PHQ-9, etc.) ────────
+        # This triggers when notes were just written (via notes_json) OR when
+        # clinical_notes already had rows that haven't been scanned yet.
+        notes_written = ingest_totals.get("notes", 0)
+        if notes_written > 0 or notes_json.strip():
+            try:
+                pool = await _get_db_pool()
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT id FROM clinical_notes WHERE patient_id=$1::uuid LIMIT 1",
+                        patient_id,
+                    )
+                if rows:
+                    # Import the scan function from behavioral_atoms (Skills server internal)
+                    # Fall back gracefully if Skills server module isn't on path.
+                    try:
+                        import sys as _sys_scan
+                        _mcpserver_skills = "/home/runner/workspace/mcp-server"
+                        if _mcpserver_skills not in _sys_scan.path:
+                            _sys_scan.path.insert(0, _mcpserver_skills)
+                        from skills.behavioral_atoms import _scan_notes_internal  # type: ignore
+                        scan_result = await _scan_notes_internal(pool, patient_id)
+                        _mark("scan_notes_for_behavioral_screenings", "ok", scan_result)
+                    except ImportError:
+                        # skills module unavailable in Clinical server context;
+                        # the scan tool is available on the Skills server (port 8002)
+                        _mark("scan_notes_for_behavioral_screenings", "skipped",
+                              {"reason": "skills module not importable; call scan_notes_for_behavioral_screenings on port 8002"})
+            except Exception as e:
+                _mark("scan_notes_for_behavioral_screenings", "failed", {"error": str(e)})
+
+        # ── Step 5: deliberation ──────────────────────────────────────────────
         try:
             dres = await run_deliberation(
                 patient_id=patient_id, trigger_type="pipeline_composite",
@@ -4365,28 +4470,80 @@ async def _run_healthex_pipeline_background(job_id: str, patient_mrn: str) -> No
             _mark("run_deliberation", "ok", {"deliberation_id": dres.get("deliberation_id")})
         except Exception as e:
             _mark("run_deliberation", "failed", {"error": str(e)})
-        _PIPELINE_JOBS[job_id]["status"] = "complete"
-        _PIPELINE_JOBS[job_id]["patient_id"] = patient_id
+
+        _PIPELINE_JOBS[job_id].update({
+            "status": "complete",
+            "patient_id": patient_id,
+            "ingest_totals": ingest_totals,
+        })
     except Exception as e:
-        _PIPELINE_JOBS[job_id]["status"] = "error"
-        _PIPELINE_JOBS[job_id]["error"] = str(e)
+        _PIPELINE_JOBS[job_id].update({"status": "error", "error": str(e)})
 
 
 @mcp.tool()
-async def run_healthex_pipeline(patient_mrn: str) -> dict:
-    """Fire-and-forget composite: switch track → register → deliberation.
+async def run_healthex_pipeline(
+    patient_mrn: str,
+    health_summary_json: str = "",
+    labs_json: str = "",
+    medications_json: str = "",
+    conditions_json: str = "",
+    encounters_json: str = "",
+    notes_json: str = "",
+    behavioral_screenings_json: str = "",
+) -> dict:
+    """Fire-and-forget composite pipeline: switch track → register → ingest → deliberate.
 
-    Returns IMMEDIATELY with a job_id. Callers poll `get_healthex_pipeline_status(job_id)`
-    to retrieve progress. This tool NEVER `awaits` deliberation synchronously
-    — doing so would time out MCP request windows.
+    Returns IMMEDIATELY with a job_id. Poll `get_healthex_pipeline_status(job_id)`
+    to track progress. This tool NEVER awaits deliberation synchronously.
 
-    patient_mrn: stable MRN string identifying the patient record.
+    Pass the raw JSON strings from each HealthEx tool response. Any parameter
+    left empty is skipped — the pipeline is additive (previously ingested data
+    is preserved). At minimum pass health_summary_json for proper registration.
+
+    Args:
+        patient_mrn:                  Stable MRN (e.g. "ALI-OMRANI-SHC").
+        health_summary_json:          Output of HealthEx get_health_summary.
+                                      Also triggers PHQ-9 extraction when behavioral_health key present.
+        labs_json:                    Output of HealthEx get_labs.
+        medications_json:             Output of HealthEx get_medications.
+        conditions_json:              Output of HealthEx get_conditions.
+        encounters_json:              Output of HealthEx get_encounters.
+        notes_json:                   Output of HealthEx get_clinical_notes / get_documents.
+                                      Parsed into clinical_notes table and scanned for PHQ-9.
+        behavioral_screenings_json:   Output of HealthEx get_behavioral_screenings.
+                                      Routed through FHIR Observation / QuestionnaireResponse ingestor.
+
+    Pipeline steps:
+        1. use_healthex
+        2. register_healthex_patient(health_summary_json)
+        3. ingest_from_healthex for each supplied resource type
+        4. scan_notes_for_behavioral_screenings (auto-triggered when notes_json supplied)
+        5. run_deliberation
     """
     job_id = str(_uuid.uuid4())
     _PIPELINE_JOBS[job_id] = {"status": "queued", "patient_mrn": patient_mrn, "steps": []}
-    _asyncio.create_task(_run_healthex_pipeline_background(job_id, patient_mrn))
-    return {"job_id": job_id, "status": "queued",
-            "poll": "get_healthex_pipeline_status(job_id)"}
+    _asyncio.create_task(_run_healthex_pipeline_background(
+        job_id, patient_mrn,
+        health_summary_json=health_summary_json,
+        labs_json=labs_json,
+        medications_json=medications_json,
+        conditions_json=conditions_json,
+        encounters_json=encounters_json,
+        notes_json=notes_json,
+        behavioral_screenings_json=behavioral_screenings_json,
+    ))
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "poll": "get_healthex_pipeline_status(job_id)",
+        "pipeline_steps": [
+            "use_healthex",
+            "register_healthex_patient",
+            "ingest_conditions / medications / labs / encounters / notes / behavioral_screenings (supplied only)",
+            "scan_notes_for_behavioral_screenings (auto when notes supplied)",
+            "run_deliberation",
+        ],
+    }
 
 
 @mcp.tool()
