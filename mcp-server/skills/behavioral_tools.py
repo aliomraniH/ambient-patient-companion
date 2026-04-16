@@ -92,6 +92,34 @@ async def classify_com_b_barrier(
         # safety net
         component, sub = "Motivation", "Reflective"
 
+    # SDOH-empty advisory (Phase 7 — sequencing-bias mitigation).
+    # When SDOH data is missing, the default-bucket classification may be
+    # under-representing structural (Opportunity) barriers — attributing
+    # them to Motivation instead. Surface this explicitly so downstream
+    # consumers can call run_sdoh_assessment first or reduce trust in the
+    # classification. DB fetch is unchanged — this is a pure output field.
+    sdoh_data_warning = ""
+    _sdoh_sensitive_behaviors = (
+        "medication_adherence", "appointment_attendance", "dietary_changes",
+        "physical_activity", "smoking_cessation",
+    )
+    if not sdoh:
+        if component == "Motivation" and sub == "Reflective":
+            sdoh_data_warning = (
+                "WARNING: No SDOH flags on file. Defaulted to Motivation "
+                "(Reflective). If structural barriers (transportation, food "
+                "access, housing) exist but are unrecorded, this classification "
+                "may under-represent Opportunity barriers. Consider calling "
+                "run_sdoh_assessment before acting on this classification."
+            )
+        elif target_behavior in _sdoh_sensitive_behaviors:
+            sdoh_data_warning = (
+                f"ADVISORY: Target behavior '{target_behavior}' is commonly "
+                "affected by social determinants, but no SDOH flags are on "
+                "file. Classification may be incomplete; consider calling "
+                "run_sdoh_assessment to improve accuracy."
+            )
+
     # Persist.
     try:
         async with pool.acquire() as conn:
@@ -114,6 +142,7 @@ async def classify_com_b_barrier(
         "primary_barrier": primary,
         "confidence": 0.6,
         "supporting_evidence": evidence,
+        "sdoh_data_warning": sdoh_data_warning,
     })
 
 
