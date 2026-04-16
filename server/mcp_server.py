@@ -3828,6 +3828,77 @@ async def check_sycophancy_risk(
     }
 
 
+def _check_anchor_bias(draft_output: str) -> str:
+    """Detect primacy/anchor bias signals in a draft agent output.
+
+    Heuristics:
+      1. Clinical-term dominance — the first-mentioned medical term accounts
+         for > 60% of all clinical-term mentions, suggesting the draft
+         anchored on the first token sequence it saw.
+      2. Absence of differential language — when 2+ distinct clinical terms
+         are present but no differential cue ("alternatively", "differential",
+         "could also", "on the other hand", "rule out") appears, the draft
+         may have locked in on a single interpretation.
+
+    Returns an empty string when no bias signal is detected; otherwise a
+    short human-readable description. Severity is always "moderate" —
+    advisory, not blocking.
+
+    Research basis: Liu et al. TACL 2024 (primacy / attention sink);
+    BiasMedQA npj 2024 (anchor bias in diagnostic reasoning).
+    """
+    text = (draft_output or "").lower()
+    if not text or len(text) < 80:
+        return ""
+
+    # Lightweight clinical-term inventory — common dx / domain keywords.
+    # Deliberately small to keep false-positive rate low.
+    _CLINICAL_TERMS = (
+        "diabetes", "hypertension", "hyperlipidemia", "copd", "asthma",
+        "ckd", "hepatitis", "depression", "anxiety", "insomnia",
+        "obesity", "thyroid", "atrial fibrillation", "heart failure",
+        "coronary", "stroke", "osteoporosis", "arthritis",
+    )
+    mentions: list[tuple[int, str]] = []
+    for term in _CLINICAL_TERMS:
+        idx = text.find(term)
+        if idx >= 0:
+            count = text.count(term)
+            mentions.append((idx, term))
+    # De-duplicate and count
+    seen: dict[str, int] = {}
+    for _, term in mentions:
+        seen[term] = text.count(term)
+    if not seen:
+        return ""
+
+    total = sum(seen.values())
+    first_term = min(mentions, key=lambda p: p[0])[1] if mentions else None
+    first_count = seen.get(first_term, 0)
+    dominance = first_count / total if total else 0.0
+
+    # Differential language cues
+    _DIFFERENTIAL_CUES = (
+        "alternatively", "differential", "could also", "on the other hand",
+        "rule out", "versus", "consider also", "or perhaps",
+    )
+    has_differential = any(cue in text for cue in _DIFFERENTIAL_CUES)
+
+    issues: list[str] = []
+    if len(seen) >= 2 and dominance > 0.60:
+        issues.append(
+            f"first-mentioned term '{first_term}' dominates "
+            f"({first_count}/{total} mentions); possible primacy anchor"
+        )
+    if len(seen) >= 2 and not has_differential:
+        issues.append(
+            "multiple clinical conditions present but no differential "
+            "language detected"
+        )
+
+    return "; ".join(issues)
+
+
 @mcp.tool()
 async def run_constitutional_critic(
     patient_id: str,
@@ -3835,13 +3906,14 @@ async def run_constitutional_critic(
     originating_agent: str,
     output_type: str,
 ) -> dict:
-    """4-check constitutional critic applied before any delivery.
+    """5-check constitutional critic applied before any delivery.
 
     Pipeline:
       1. Sycophancy (composes check_sycophancy_risk)
       2. Guideline factuality (heuristic; PHI scan also runs here)
       3. Internal contradiction detection (simple negation scan)
-      4. Escalation tier routing
+      4. Anchor / primacy bias heuristic (advisory only)
+      5. Escalation tier routing
 
     Returns escalation_tier 1–4:
       1: automated guardrail handled — return reframe_required=True
@@ -3879,15 +3951,26 @@ async def run_constitutional_critic(
         issues.append({"check": "internal_contradiction", "severity": "high",
                        "detail": f"contradictory verbs: {contradictions}"})
 
-    # Step 4 — escalation routing.
+    # Step 4 — anchor / primacy bias (advisory, severity=moderate).
+    anchor_detail = _check_anchor_bias(draft_output)
+    if anchor_detail:
+        issues.append({"check": "anchor_bias", "severity": "moderate",
+                       "detail": anchor_detail})
+
+    # Step 5 — escalation routing.
     critical = [i for i in issues if i["severity"] == "critical"]
     high = [i for i in issues if i["severity"] == "high"]
+    moderate = [i for i in issues if i["severity"] == "moderate"]
     if critical:
         tier, reframe = 4, True
     elif len(high) >= 2:
         tier, reframe = 3, True
     elif high:
         tier, reframe = 2, True
+    elif moderate:
+        # Moderate-only issues (e.g. anchor bias) are advisory — surface
+        # them via tier 2 but do not force a reframe.
+        tier, reframe = 2, False
     else:
         tier, reframe = 1, False
 
