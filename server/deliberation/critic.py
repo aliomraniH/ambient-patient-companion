@@ -92,6 +92,15 @@ Instructions:
 - Address each critique item. If the critique is valid, revise your finding.
 - If you disagree with a critique, explain why and maintain your position.
 - Do not change findings that were not critiqued unless new insight warrants it.
+- Before revising, categorize each of your findings into exactly one of these
+  buckets and note the category in raw_revision:
+    CONFIRMED   — evidence directly supports the finding
+    CHALLENGED  — critique raised a valid concern requiring revision
+    UNCERTAIN   — insufficient data to confirm or refute
+    NEW         — emerged from the critique itself
+  Address CHALLENGED items first in your revisions. This structured
+  categorization reduces anchoring on the prior round's framing and forces
+  an explicit reasoning reset between rounds.
 
 Respond ONLY with valid JSON matching EXACTLY this structure.
 No preamble. No markdown fences. Pure JSON.
