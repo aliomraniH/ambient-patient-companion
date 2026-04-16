@@ -322,6 +322,153 @@ def register(mcp) -> None:
         ok = await refresh_atom_pressure_view(pool)
         return {"refreshed": ok}
 
+    # ── scan_notes_for_behavioral_screenings ──────────────────────────────────
+
+    @mcp.tool()
+    async def scan_notes_for_behavioral_screenings(
+        patient_id: str,
+        limit: int = 200,
+    ) -> dict:
+        """Scan clinical_notes for structured screening scores (PHQ-9 etc.) and write to behavioral_screenings.
+
+        Bridges the gap between free-text clinical note corpus and the structured
+        behavioral_screenings table. Uses regex patterns to detect PHQ-9 total scores
+        and item-9 endorsements, then writes rows via ingest_behavioral_screening_fhir
+        logic. Idempotent — ON CONFLICT DO NOTHING skips already-persisted rows.
+
+        Args:
+            patient_id: UUID of the patient.
+            limit:       Maximum number of notes to scan (default 200).
+
+        Returns:
+            {patient_id, notes_scanned, screenings_found, screenings_written,
+             found: [{note_id, note_date, instrument, score, item9, inserted}]}
+        """
+        import re as _re
+        import uuid as _uuid_scan
+        from datetime import timezone as _tz_scan
+        from db.connection import get_pool
+
+        pool = await get_pool()
+
+        # PHQ-9 total score patterns
+        _phq9_total = _re.compile(
+            r'PHQ[\s\-_]?9[\s\w]*?(?:score|total|result)?[\s:=\-]+(\d{1,2})',
+            _re.IGNORECASE,
+        )
+        # Item 9 (suicidal ideation) patterns
+        _item9_numeric = _re.compile(
+            r'(?:item\s*[#\-]?\s*9|q(?:uestion)?\s*9)[\s\w]*?(?:scored?|answered?)?[\s:=\-]+([0-3])',
+            _re.IGNORECASE,
+        )
+        _item9_endorsed = _re.compile(
+            r'item\s*[#\-]?\s*9\s+(?:was\s+)?endorsed',
+            _re.IGNORECASE,
+        )
+
+        def _score_to_band(s: int) -> str:
+            if s <= 4: return "minimal"
+            if s <= 9: return "mild"
+            if s <= 14: return "moderate"
+            if s <= 19: return "moderately_severe"
+            return "severe"
+
+        async with pool.acquire() as conn:
+            notes = await conn.fetch(
+                """
+                SELECT id, note_text, note_type, note_date
+                FROM clinical_notes
+                WHERE patient_id = $1::uuid
+                ORDER BY note_date DESC NULLS LAST
+                LIMIT $2
+                """,
+                patient_id, limit,
+            )
+
+            found = []
+            screenings_written = 0
+
+            for note in notes:
+                note_text = note["note_text"] or ""
+                phq9_match = _phq9_total.search(note_text)
+                if not phq9_match:
+                    continue
+
+                try:
+                    phq9_score = int(phq9_match.group(1))
+                except ValueError:
+                    continue
+
+                item9_match = _item9_numeric.search(note_text)
+                item9 = 0
+                if item9_match:
+                    try:
+                        item9 = int(item9_match.group(1))
+                    except ValueError:
+                        item9 = 0
+                elif _item9_endorsed.search(note_text):
+                    item9 = 1
+
+                item_answers = {"9": item9}
+                triggered_critical = []
+                if item9 > 0:
+                    triggered_critical.append({
+                        "item": "9",
+                        "score": item9,
+                        "alert_text": (
+                            "PHQ-9 item 9 endorsed — suicidal ideation screen positive. "
+                            "Safety review required."
+                        ),
+                        "severity": "passive_si" if item9 == 1 else "active_si",
+                    })
+
+                note_date = note["note_date"] or datetime.now(tz=_tz_scan.utc)
+
+                inserted = False
+                try:
+                    result = await conn.execute(
+                        """
+                        INSERT INTO behavioral_screenings
+                            (id, patient_id, instrument_key, domain, loinc_code,
+                             score, band, item_answers, triggered_critical,
+                             source_type, administered_at, entered_by, data_source)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        str(_uuid_scan.uuid4()), patient_id,
+                        "PHQ-9", "depression", "44249-1",
+                        phq9_score, _score_to_band(phq9_score),
+                        json.dumps(item_answers), json.dumps(triggered_critical),
+                        "clinical_note", note_date,
+                        "scan_notes_for_behavioral_screenings", "healthex",
+                    )
+                    inserted = result == "INSERT 0 1"
+                    if inserted:
+                        screenings_written += 1
+                        log.info(
+                            "scan_notes: PHQ-9 score=%d item9=%d extracted for %s",
+                            phq9_score, item9, patient_id,
+                        )
+                except Exception as exc:
+                    log.warning("scan_notes: insert failed: %s", exc)
+
+                found.append({
+                    "note_id": str(note["id"]),
+                    "note_date": note_date.isoformat() if hasattr(note_date, "isoformat") else str(note_date),
+                    "instrument": "PHQ-9",
+                    "score": phq9_score,
+                    "item9": item9,
+                    "inserted": inserted,
+                })
+
+        return {
+            "patient_id": patient_id,
+            "notes_scanned": len(notes),
+            "screenings_found": len(found),
+            "screenings_written": screenings_written,
+            "found": found,
+        }
+
 
 async def get_behavioral_context(
     db_pool,

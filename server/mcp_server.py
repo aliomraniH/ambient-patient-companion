@@ -787,6 +787,143 @@ async def get_data_source_status() -> dict:
 # confirmed working endpoint in Claude Web sessions)
 # ---------------------------------------------------------------------------
 
+def _phq9_score_to_band_clin(score: int) -> str:
+    if score <= 4:
+        return "minimal"
+    if score <= 9:
+        return "mild"
+    if score <= 14:
+        return "moderate"
+    if score <= 19:
+        return "moderately_severe"
+    return "severe"
+
+
+async def _ingest_bh_from_summary(conn, patient_id: str, summary: dict) -> dict:
+    """Parse behavioral_health block from summary dict and write PHQ-9 to behavioral_screenings.
+
+    Idempotent — uses ON CONFLICT DO NOTHING. Handles the formats:
+      {"behavioral_health": {"phq9": {"score": N, "item_answers": {...}, "assessment_date": "YYYY-MM-DD"}}}
+      {"behavioral_health": {"PHQ-9": {"total_score": N, ...}}}
+      {"behavioral_health": {"phq9_score": N, "phq9_item_9": ..., "phq9_date": "YYYY-MM-DD"}}
+    """
+    import uuid as _uuid_bh
+    from datetime import timezone as _tz_bh
+
+    bh = summary.get("behavioral_health") if isinstance(summary, dict) else None
+    if not bh or not isinstance(bh, dict):
+        return {"inserted": 0, "skipped": 0}
+
+    phq9_block = (
+        bh.get("phq9") or bh.get("PHQ-9") or bh.get("PHQ9") or bh.get("phq_9")
+    )
+    if phq9_block is None and "phq9_score" in bh:
+        phq9_block = {
+            "score": bh["phq9_score"],
+            "item_answers": {"9": bh.get("phq9_item_9", bh.get("phq_9_item_9", 0))},
+            "assessment_date": bh.get("phq9_date", bh.get("assessment_date", "")),
+        }
+
+    if not phq9_block or not isinstance(phq9_block, dict):
+        return {"inserted": 0, "skipped": 1}
+
+    try:
+        score = int(phq9_block.get("score") or phq9_block.get("total_score") or 0)
+    except (TypeError, ValueError):
+        score = 0
+
+    raw_answers = phq9_block.get("item_answers") or {}
+    if isinstance(raw_answers, str):
+        try:
+            raw_answers = json.loads(raw_answers)
+        except Exception:
+            raw_answers = {}
+    item_answers = dict(raw_answers) if isinstance(raw_answers, dict) else {}
+
+    _item9_raw = None
+    for k in ("9", "item_9", "phq9_item9", "q9", "Q9", "Q09"):
+        if k in item_answers:
+            _item9_raw = item_answers[k]
+            break
+    if _item9_raw is None:
+        for k in ("phq9_item_9", "phq_9_item_9", "item_9", "si_screen"):
+            if k in bh:
+                _item9_raw = bh[k]
+                break
+
+    if isinstance(_item9_raw, bool):
+        item9 = int(_item9_raw)
+    elif isinstance(_item9_raw, int):
+        item9 = _item9_raw
+    elif isinstance(_item9_raw, str):
+        try:
+            item9 = int(_item9_raw)
+        except ValueError:
+            item9 = 1 if _item9_raw.strip() else 0
+    else:
+        item9 = 0
+    item_answers["9"] = item9
+
+    triggered_critical: list = []
+    if item9 > 0:
+        triggered_critical.append({
+            "item": "9",
+            "score": item9,
+            "alert_text": "PHQ-9 item 9 endorsed — suicidal ideation screen positive. Safety review required.",
+            "severity": "passive_si" if item9 == 1 else "active_si",
+        })
+
+    raw_date = (
+        phq9_block.get("assessment_date")
+        or phq9_block.get("administered_at")
+        or phq9_block.get("date")
+        or bh.get("assessment_date")
+        or ""
+    )
+    try:
+        assessed_at = (
+            json_datetime_parse(str(raw_date))
+            if raw_date else _dt.now(tz=_tz_bh.utc)
+        )
+    except Exception:
+        assessed_at = _dt.now(tz=_tz_bh.utc)
+
+    try:
+        await conn.execute(
+            """
+            INSERT INTO behavioral_screenings
+                (id, patient_id, instrument_key, domain, loinc_code,
+                 score, band, item_answers, triggered_critical,
+                 source_type, administered_at, entered_by, data_source)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13)
+            ON CONFLICT DO NOTHING
+            """,
+            str(_uuid_bh.uuid4()), patient_id,
+            "PHQ-9", "depression", "44249-1",
+            score, _phq9_score_to_band_clin(score),
+            json.dumps(item_answers), json.dumps(triggered_critical),
+            "health_summary", assessed_at,
+            "register_healthex_patient", "healthex",
+        )
+        logger.info("_ingest_bh_from_summary: PHQ-9 score=%d item9=%d written for %s", score, item9, patient_id)
+        return {"inserted": 1, "skipped": 0}
+    except Exception as exc:
+        logger.warning("_ingest_bh_from_summary: PHQ-9 insert failed: %s", exc)
+        return {"inserted": 0, "skipped": 0, "error": str(exc)}
+
+
+def json_datetime_parse(value: str):
+    """Best-effort ISO datetime parse returning an aware datetime."""
+    from datetime import timezone as _tzp
+    import re as _re
+    # Normalise Z suffix
+    value = _re.sub(r"Z$", "+00:00", value.strip())
+    # Try date-only
+    if _re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return _dt.strptime(value, "%Y-%m-%d").replace(tzinfo=_tzp.utc)
+    return _dt.fromisoformat(value)
+
+
 @mcp.tool()
 async def register_healthex_patient(
     health_summary_json: str,
@@ -818,6 +955,11 @@ async def register_healthex_patient(
     try:
         start = _time.time()
         summary = json.loads(health_summary_json)
+        if not isinstance(summary, dict):
+            return (
+                f"Error: health_summary_json must be a JSON object (got {type(summary).__name__}). "
+                "Pass the raw get_health_summary response, not a doubly-encoded string."
+            )
         patient_resource: dict = {}
 
         if summary.get("resourceType") == "Patient":
@@ -1005,6 +1147,8 @@ async def register_healthex_patient(
                 """,
                 "DATA_TRACK", "healthex",
             )
+            # Extract and persist PHQ-9 if behavioral_health is present in summary
+            await _ingest_bh_from_summary(conn, patient_id, summary)
 
         duration_ms = int((_time.time() - start) * 1000)
         return json.dumps({
@@ -1017,7 +1161,7 @@ async def register_healthex_patient(
             "duration_ms": duration_ms,
             "next_step": (
                 f"Call ingest_from_healthex(patient_id='{patient_id}', "
-                "resource_type='labs'|'medications'|'conditions'|'encounters', "
+                "resource_type='labs'|'medications'|'conditions'|'encounters'|'notes', "
                 "fhir_json=<HealthEx response>) for each resource type, "
                 f"then run_deliberation(patient_id='{patient_id}')."
             ),
@@ -1439,7 +1583,7 @@ async def ingest_from_healthex(
 
     Args:
         patient_id:    UUID from register_healthex_patient
-        resource_type: "labs" | "medications" | "conditions" | "encounters" | "summary"
+        resource_type: "labs" | "medications" | "conditions" | "encounters" | "summary" | "notes"
         fhir_json:     raw string from the HealthEx tool response (any format)
 
     Returns:
@@ -1451,7 +1595,7 @@ async def ingest_from_healthex(
     pool = await _get_db_pool()
     try:
         start = _time.time()
-        valid_types = {"labs", "medications", "conditions", "encounters", "summary"}
+        valid_types = {"labs", "medications", "conditions", "encounters", "summary", "notes"}
         if resource_type not in valid_types:
             return json.dumps({
                 "status": "error",
@@ -1613,7 +1757,170 @@ async def ingest_from_healthex(
             except (json.JSONDecodeError, ValueError):
                 fhir_data = None
 
-            if resource_type == "summary":
+            if resource_type == "notes":
+                # ── Clinical notes ingestion ──────────────────────────────────────
+                # Accepts: FHIR DocumentReference, plain text, or a list/bundle of notes.
+                # Writes each note to clinical_notes and scans for PHQ-9 via regex.
+                import re as _re_notes
+                import uuid as _uuid_notes
+
+                def _extract_note_rows(payload) -> list:
+                    """Return list of (binary_id, note_text, note_type, note_date) tuples."""
+                    rows = []
+                    resources = []
+                    if isinstance(payload, list):
+                        resources = payload
+                    elif isinstance(payload, dict):
+                        if payload.get("resourceType") == "Bundle":
+                            resources = [
+                                e.get("resource", {})
+                                for e in payload.get("entry", [])
+                                if e.get("resource", {}).get("resourceType") == "DocumentReference"
+                            ]
+                        elif payload.get("resourceType") == "DocumentReference":
+                            resources = [payload]
+                        else:
+                            # Flat dict or summary — try to find a notes array
+                            for key in ("notes", "clinical_notes", "documents"):
+                                if isinstance(payload.get(key), list):
+                                    resources = payload[key]
+                                    break
+                    for r in resources:
+                        if isinstance(r, str):
+                            rows.append((None, r, "note", None))
+                            continue
+                        if not isinstance(r, dict):
+                            continue
+                        note_text = ""
+                        for content_block in r.get("content", []):
+                            attachment = content_block.get("attachment", {})
+                            if isinstance(attachment, dict):
+                                note_text = attachment.get("data", attachment.get("url", ""))
+                        if not note_text:
+                            note_text = r.get("text", {}).get("div", "") if isinstance(r.get("text"), dict) else ""
+                        if not note_text:
+                            note_text = str(r)
+                        note_type = None
+                        for coding in r.get("type", {}).get("coding", []):
+                            note_type = coding.get("display") or coding.get("code")
+                            break
+                        note_date_str = r.get("date") or r.get("indexed") or ""
+                        note_date = None
+                        if note_date_str:
+                            try:
+                                note_date = json_datetime_parse(note_date_str)
+                            except Exception:
+                                pass
+                        resource_id = r.get("id") or str(_uuid_notes.uuid4())
+                        rows.append((resource_id, note_text, note_type, note_date))
+                    return rows
+
+                # If fhir_data parsed correctly, use it; else treat raw text as a single note
+                if fhir_data is not None:
+                    note_rows = _extract_note_rows(fhir_data)
+                else:
+                    # raw text is the note content
+                    note_rows = [(None, fhir_json, "note", None)]
+
+                notes_written = 0
+                phq9_from_notes = 0
+                for (binary_id, note_text, note_type, note_date) in note_rows:
+                    if not note_text:
+                        continue
+                    note_id = str(_uuid_notes.uuid4())
+                    stable_bin_id = binary_id or note_id
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO clinical_notes
+                                (id, patient_id, binary_id, note_text, note_type,
+                                 note_date, source, ingested_at)
+                            VALUES ($1,$2,$3,$4,$5,$6,'healthex',NOW())
+                            ON CONFLICT (patient_id, binary_id) DO UPDATE
+                                SET note_text = EXCLUDED.note_text,
+                                    note_type = EXCLUDED.note_type,
+                                    note_date = COALESCE(EXCLUDED.note_date, clinical_notes.note_date)
+                            """,
+                            note_id, patient_id, stable_bin_id,
+                            note_text[:100000], note_type, note_date,
+                        )
+                        notes_written += 1
+                    except Exception as _ne:
+                        logger.warning("clinical_notes insert failed: %s", _ne)
+                        continue
+
+                    # ── Scan this note for PHQ-9 score via regex ──────────────────
+                    _phq9_pat = _re_notes.compile(
+                        r'PHQ[\s\-_]?9[\s\w]*?(?:score|total)?[\s:=\-]+(\d{1,2})',
+                        _re_notes.IGNORECASE,
+                    )
+                    _item9_pat = _re_notes.compile(
+                        r'(?:item\s*[#\-]?\s*9|question\s*9|SI\s+screen)[\s\w]*?(?:scored?|endorsed|answered?)?[\s:=\-]+(\d)',
+                        _re_notes.IGNORECASE,
+                    )
+                    _item9_endorsed = _re_notes.compile(
+                        r'item\s*[#\-]?\s*9\s+endorsed',
+                        _re_notes.IGNORECASE,
+                    )
+                    phq9_match = _phq9_pat.search(note_text)
+                    if phq9_match:
+                        try:
+                            phq9_score = int(phq9_match.group(1))
+                        except ValueError:
+                            phq9_score = 0
+                        item9_match = _item9_pat.search(note_text)
+                        item9 = 0
+                        if item9_match:
+                            try:
+                                item9 = int(item9_match.group(1))
+                            except ValueError:
+                                item9 = 0
+                        elif _item9_endorsed.search(note_text):
+                            item9 = 1
+                        item_answers = {"9": item9}
+                        triggered_critical = []
+                        if item9 > 0:
+                            triggered_critical.append({
+                                "item": "9",
+                                "score": item9,
+                                "alert_text": "PHQ-9 item 9 endorsed — suicidal ideation screen positive. Safety review required.",
+                                "severity": "passive_si" if item9 == 1 else "active_si",
+                            })
+                        try:
+                            await conn.execute(
+                                """
+                                INSERT INTO behavioral_screenings
+                                    (id, patient_id, instrument_key, domain, loinc_code,
+                                     score, band, item_answers, triggered_critical,
+                                     source_type, administered_at, entered_by, data_source)
+                                VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13)
+                                ON CONFLICT DO NOTHING
+                                """,
+                                str(_uuid_notes.uuid4()), patient_id,
+                                "PHQ-9", "depression", "44249-1",
+                                phq9_score, _phq9_score_to_band_clin(phq9_score),
+                                json.dumps(item_answers), json.dumps(triggered_critical),
+                                "clinical_note",
+                                note_date or _dt.utcnow(),
+                                "scan_notes_for_behavioral_screenings",
+                                "healthex",
+                            )
+                            phq9_from_notes += 1
+                            logger.info(
+                                "ingest_from_healthex[notes]: PHQ-9 score=%d item9=%d extracted from note for %s",
+                                phq9_score, item9, patient_id,
+                            )
+                        except Exception as _bse:
+                            logger.warning("behavioral_screenings insert from note failed: %s", _bse)
+
+                if notes_written > 0:
+                    written_by_table["notes"] = notes_written
+                if phq9_from_notes > 0:
+                    written_by_table["behavioral_screenings_from_notes"] = phq9_from_notes
+                format_detected = "clinical_notes"
+                parser_used = "notes_extractor"
+
+            elif resource_type == "summary":
                 # Fan-out: extract every clinical array from the summary
                 summary = fhir_data if isinstance(fhir_data, dict) else {}
                 sub_types = ["conditions", "medications", "labs", "encounters"]
@@ -1692,6 +1999,7 @@ async def ingest_from_healthex(
                 "medications": "patient_medications",
                 "labs": "biometric_readings",
                 "encounters": "clinical_events",
+                "notes": "clinical_notes",
             }
             for sub_type, count in written_by_table.items():
                 tbl = table_map.get(sub_type)
