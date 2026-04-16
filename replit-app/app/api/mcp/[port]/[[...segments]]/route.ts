@@ -8,12 +8,19 @@ const ALLOWED_PORTS = new Set(["8001", "8002", "8003"]);
 const FORWARDED_REQUEST_HEADERS = [
   "content-type",
   "accept",
-  "mcp-session-id",
+  // NOTE: mcp-session-id is intentionally NOT forwarded to the upstream.
+  // FastMCP 3.x in stateless mode generates a new session UUID per request
+  // and immediately terminates it.  Forwarding it to Claude Web causes the
+  // client to include Mcp-Session-Id on every subsequent call; the server
+  // then returns "session not found" (or 202-terminated) → the "session-
+  // terminated" error the user sees.  Keeping the upstream call session-
+  // free is the correct posture for stateless servers.
   "last-event-id",
 ];
 
+// mcp-session-id is deliberately absent from forwarded *response* headers
+// for the same reason: Claude Web must not cache a stateless session ID.
 const FORWARDED_RESPONSE_HEADERS = [
-  "mcp-session-id",
   "content-type",
 ];
 
@@ -27,6 +34,50 @@ function getClientIp(request: NextRequest): string {
     request.headers.get("x-real-ip") ??
     "unknown"
   );
+}
+
+// ---------------------------------------------------------------------------
+// Upstream fetch with retry-on-connect-refused
+// ---------------------------------------------------------------------------
+// When Replit wakes from idle sleep, the Python MCP servers need ~2-5 s to
+// restart.  The first proxy request arrives before they are ready →
+// ECONNREFUSED → 502 → Claude Web reports "servers unavailable".
+// We retry up to MAX_RETRIES times with exponential backoff before giving up.
+// ---------------------------------------------------------------------------
+
+const MAX_RETRIES = 4;
+const RETRY_BASE_MS = 500; // 500 ms, 1 000 ms, 2 000 ms, 4 000 ms
+
+function isConnectError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes("econnrefused") ||
+    msg.includes("failed to fetch") ||
+    msg.includes("fetch failed") ||
+    msg.includes("connect") ||
+    msg.includes("network")
+  );
+}
+
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, RETRY_BASE_MS * Math.pow(2, attempt - 1)));
+    }
+    try {
+      const resp = await fetch(url, init);
+      return resp;
+    } catch (err) {
+      lastErr = err;
+      if (!isConnectError(err)) throw err; // not a connectivity issue — don't retry
+    }
+  }
+  throw lastErr;
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +112,7 @@ async function handleToolsSearch(
 
   let tools: McpTool[] = [];
   try {
-    const upstream = await fetch(`http://localhost:${port}/mcp`, {
+    const upstream = await fetchWithRetry(`http://localhost:${port}/mcp`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -153,7 +204,7 @@ async function proxy(request: NextRequest, context: RouteContext) {
   }
 
   try {
-    const upstream = await fetch(upstream_url, {
+    const upstream = await fetchWithRetry(upstream_url, {
       method: request.method,
       headers: fwdHeaders,
       body,
@@ -193,8 +244,21 @@ async function proxy(request: NextRequest, context: RouteContext) {
     const message = err instanceof Error ? err.message : String(err);
     const cors = openCorsHeaders(request.headers.get("origin"));
     return NextResponse.json(
-      { error: "Upstream connection failed", detail: message },
-      { status: 502, headers: cors }
+      {
+        jsonrpc: "2.0",
+        error: {
+          code: -32603,
+          message: "MCP server temporarily unavailable — retrying",
+          data: { detail: message },
+        },
+      },
+      {
+        status: 503,
+        headers: {
+          ...cors,
+          "Retry-After": "5",
+        },
+      }
     );
   }
 }
