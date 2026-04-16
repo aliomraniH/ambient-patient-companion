@@ -436,6 +436,28 @@ _LOINC_TO_KEY: dict[str, str] = {
     inst.loinc_code: key for key, inst in SCREENING_REGISTRY.items()
 }
 
+# ── Keyword → instrument key map ──────────────────────────────────────────────
+# Used by the QR parser to resolve instrument when no LOINC is embedded in the
+# questionnaire URL.  Keys are lowercase; values are SCREENING_REGISTRY keys.
+INSTRUMENT_KEYWORD_MAP: dict[str, str] = {
+    "phq9":     "phq9",  "phq-9":    "phq9",  "phq_9":    "phq9",
+    "phq2":     "phq2",  "phq-2":    "phq2",  "phq_2":    "phq2",
+    "epds":     "epds",
+    "gad7":     "gad7",  "gad-7":    "gad7",  "gad_7":    "gad7",
+    "gad2":     "gad2",  "gad-2":    "gad2",
+    "audit":    "audit", "audit-c":  "audit_c", "auditc":  "audit_c",
+    "dast":     "dast10", "dast10":  "dast10", "dast-10": "dast10",
+    "pcptsd":   "pc_ptsd5", "pc-ptsd": "pc_ptsd5", "pc_ptsd5": "pc_ptsd5",
+    "pcl5":     "pcl5",  "pcl-5":   "pcl5",
+    "asrs":     "asrs5", "asrs5":   "asrs5",
+    "cssrs":    "cssrs", "columbia": "cssrs",
+    "mdq":      "mdq",
+    "scoff":    "scoff",
+    "isi":      "isi",
+    "moca":     "moca",
+    "phq15":    "phq15", "phq-15":  "phq15",
+}
+
 # ─── Public helpers ───────────────────────────────────────────────────────────
 
 def get_domain_for_loinc(loinc_code: str) -> Optional[str]:
@@ -450,6 +472,40 @@ def get_instrument_for_loinc(loinc_code: str) -> Optional[ScreeningInstrument]:
     """Return the ScreeningInstrument for a LOINC code, or None."""
     key = _LOINC_TO_KEY.get(loinc_code)
     return SCREENING_REGISTRY.get(key)
+
+
+def get_instrument_for_key(instrument_key: str) -> Optional[ScreeningInstrument]:
+    """Return the ScreeningInstrument for its short key (e.g. 'phq9'), or None."""
+    return SCREENING_REGISTRY.get(instrument_key)
+
+
+def get_instrument_by_keyword(text: str) -> Optional[ScreeningInstrument]:
+    """Case-insensitive keyword lookup for QR parser LOINC resolution fallback.
+
+    Splits on all non-alphanumeric characters (hyphens, underscores, slashes, dots)
+    and checks each individual token AND each pair of adjacent tokens (joined) against
+    INSTRUMENT_KEYWORD_MAP.  This handles:
+      - "phq9" (direct match)
+      - "phq9-v1" → tokens ["phq9", "v1"] → "phq9" matches
+      - "phq-9-survey" → tokens ["phq", "9", "survey"] → pair "phq9" matches
+      - "GAD-7" → tokens ["gad", "7"] → pair "gad7" matches
+
+    Returns the first matching ScreeningInstrument or None.
+    """
+    import re as _re
+    tokens = _re.findall(r"[a-z0-9]+", text.lower())
+    # Check consecutive token pairs first — longer matches win (e.g. "auditc" > "audit")
+    for i in range(len(tokens) - 1):
+        pair = tokens[i] + tokens[i + 1]
+        key = INSTRUMENT_KEYWORD_MAP.get(pair)
+        if key:
+            return SCREENING_REGISTRY.get(key)
+    # Then fall back to individual token matches
+    for token in tokens:
+        key = INSTRUMENT_KEYWORD_MAP.get(token)
+        if key:
+            return SCREENING_REGISTRY.get(key)
+    return None
 
 
 def get_instruments_for_domain(domain: str) -> list[ScreeningInstrument]:

@@ -251,6 +251,75 @@ async def _ingest_sdoh_qr(
     }
 
 
+def _resolve_qr_instrument(resource: dict):
+    """Resolve the ScreeningInstrument for a QuestionnaireResponse.
+
+    Tries four strategies in order, returning (instrument, loinc_code) or (None, None):
+
+    1. Embedded LOINC in questionnaire field  — e.g. "Questionnaire/44249-1"
+    2. Keyword match in questionnaire field   — e.g. "Questionnaire/phq9-survey"
+    3. meta.tag coding with LOINC system
+    4. Extension coding with LOINC system
+    """
+    import re
+    from skills.screening_registry import (
+        get_instrument_for_loinc,
+        get_instrument_by_keyword,
+        INSTRUMENT_KEYWORD_MAP,
+    )
+
+    questionnaire_ref = resource.get("questionnaire", "")
+
+    # Strategy 1: LOINC numeric pattern embedded in the questionnaire URL/ref
+    m = re.search(r"(\d{4,5}-\d)", questionnaire_ref)
+    if m:
+        loinc_code = m.group(1)
+        instrument = get_instrument_for_loinc(loinc_code)
+        if instrument:
+            return instrument, loinc_code
+
+    # Strategy 2: Keyword match in questionnaire URL/title/name
+    instrument = get_instrument_by_keyword(questionnaire_ref)
+    if instrument:
+        return instrument, instrument.loinc_code
+
+    # Also check the resource title/name extension fields
+    title = resource.get("title", "") or resource.get("name", "")
+    if title:
+        instrument = get_instrument_by_keyword(title)
+        if instrument:
+            return instrument, instrument.loinc_code
+
+    # Strategy 3: meta.tag codings (some EHRs stamp LOINC here)
+    for tag in (resource.get("meta") or {}).get("tag", []):
+        system = tag.get("system", "")
+        code = tag.get("code", "")
+        if "loinc" in system.lower() and code:
+            instrument = get_instrument_for_loinc(code)
+            if instrument:
+                return instrument, code
+        # Also try keyword on the tag display
+        display = tag.get("display", "")
+        if display:
+            instrument = get_instrument_by_keyword(display)
+            if instrument:
+                return instrument, instrument.loinc_code
+
+    # Strategy 4: Resource extensions with LOINC coding
+    for ext in resource.get("extension", []):
+        for vc in ext.get("valueCoding", {}) if isinstance(ext.get("valueCoding"), list) else [ext.get("valueCoding", {})]:
+            if not isinstance(vc, dict):
+                continue
+            system = vc.get("system", "")
+            code = vc.get("code", "")
+            if "loinc" in system.lower() and code:
+                instrument = get_instrument_for_loinc(code)
+                if instrument:
+                    return instrument, code
+
+    return None, None
+
+
 async def ingest_fhir_questionnaire_response(
     pool,
     patient_id: str,
@@ -261,11 +330,17 @@ async def ingest_fhir_questionnaire_response(
 ) -> Optional[dict]:
     """Parse a FHIR QuestionnaireResponse (QR) for a known behavioral screener.
 
-    Looks up the questionnaire URL/canonical to find the LOINC code, then
-    delegates to item-level parsing.
+    Uses _resolve_qr_instrument to find the instrument via 4 fallback strategies:
+    (1) LOINC in questionnaire URL, (2) keyword in questionnaire URL/title,
+    (3) meta.tag codings, (4) extension codings.
+
+    Item numbering: prefers 1-based sequential position from the QR item list when
+    linkId is a LOINC item code (5+ digits) or a non-numeric string, to prevent
+    inflated item numbers that break severity banding.
     """
+    import re
+    import json as _json
     from skills.screening_registry import (
-        get_instrument_for_loinc,
         get_severity_band,
         get_triggered_critical_items,
     )
@@ -273,45 +348,59 @@ async def ingest_fhir_questionnaire_response(
     if resource.get("resourceType") != "QuestionnaireResponse":
         return None
 
-    # Try to resolve LOINC from questionnaire reference
-    questionnaire_ref = resource.get("questionnaire", "")
-    loinc_code: Optional[str] = None
+    instrument, loinc_code = _resolve_qr_instrument(resource)
 
-    # Many EHRs embed the LOINC in the questionnaire URL, e.g. "Questionnaire/44249-1"
-    import re
-    m = re.search(r"(\d{5}-\d)", questionnaire_ref)
-    if m:
-        loinc_code = m.group(1)
-
-    if not loinc_code:
-        return None
-
-    instrument = get_instrument_for_loinc(loinc_code)
     if not instrument:
-        try:
-            from skills.sdoh_registry import get_screener_for_panel_loinc
-            sdoh_screener = get_screener_for_panel_loinc(loinc_code)
-        except Exception:
-            sdoh_screener = None
-        if sdoh_screener:
-            return await _ingest_sdoh_qr(
-                pool, patient_id, resource, loinc_code, sdoh_screener,
-                source_type, source_id, data_source,
-            )
+        # Try SDoH path as fallback if no behavioral instrument found
+        # (use the LOINC from questionnaire ref if we can extract it)
+        m_loinc = re.search(r"(\d{4,5}-\d)", resource.get("questionnaire", ""))
+        raw_loinc = m_loinc.group(1) if m_loinc else None
+        if raw_loinc:
+            try:
+                from skills.sdoh_registry import get_screener_for_panel_loinc
+                sdoh_screener = get_screener_for_panel_loinc(raw_loinc)
+            except Exception:
+                sdoh_screener = None
+            if sdoh_screener:
+                return await _ingest_sdoh_qr(
+                    pool, patient_id, resource, raw_loinc, sdoh_screener,
+                    source_type, source_id, data_source,
+                )
         return None
 
-    # Parse item-level answers (QR uses nested items)
+    # Parse item-level answers from the QR item list.
+    # Item numbering strategy:
+    #   - If linkId is purely numeric (e.g. "1", "9") → use it directly as item_num
+    #   - If linkId looks like a LOINC item code (e.g. "44250-7") or contains
+    #     non-digit chars (e.g. "phq9.q1") → use 1-based sequential position
+    #     from the items list so scores add up correctly.
     item_answers: dict[int, int] = {}
-    for item in resource.get("item", []):
+    qr_items = resource.get("item", [])
+    for seq_idx, item in enumerate(qr_items, start=1):
         link_id = item.get("linkId", "")
-        m2 = re.search(r"\d+", link_id)
-        item_num = int(m2.group()) if m2 else None
-        if item_num is None:
-            continue
+        if re.fullmatch(r"\d+", link_id):
+            # Pure integer linkId — use directly
+            item_num: Optional[int] = int(link_id)
+        elif re.search(r"(\d{4,5}-\d)", link_id):
+            # Looks like a LOINC item code — use sequential position
+            item_num = seq_idx
+        else:
+            # Mixed alphanumeric (e.g. "phq9.q1") — extract trailing number
+            m_trailing = re.search(r"(\d+)$", link_id)
+            item_num = int(m_trailing.group(1)) if m_trailing else seq_idx
+
         for ans in item.get("answer", []):
             val_int = ans.get("valueInteger")
             val_dec = ans.get("valueDecimal")
-            val = val_int if val_int is not None else val_dec
+            # valueCoding.code is used by some EHRs for ordinal responses
+            val_coding_code = None
+            vc = ans.get("valueCoding")
+            if isinstance(vc, dict):
+                try:
+                    val_coding_code = int(vc.get("code", ""))
+                except (TypeError, ValueError):
+                    val_coding_code = None
+            val = val_int if val_int is not None else (val_dec if val_dec is not None else val_coding_code)
             if val is not None:
                 try:
                     item_answers[item_num] = int(float(val))
@@ -320,6 +409,19 @@ async def ingest_fhir_questionnaire_response(
                 break
 
     score: Optional[int] = sum(item_answers.values()) if item_answers else None
+
+    # Also check for a pre-computed total score in extension or meta
+    if score is None:
+        for ext in resource.get("extension", []):
+            url = ext.get("url", "")
+            if "score" in url.lower() or "total" in url.lower():
+                v = ext.get("valueDecimal") or ext.get("valueInteger")
+                if v is not None:
+                    try:
+                        score = int(float(v))
+                    except (TypeError, ValueError):
+                        pass
+                    break
 
     band_label: Optional[str] = None
     if score is not None:
@@ -340,7 +442,6 @@ async def ingest_fhir_questionnaire_response(
 
     row_id = str(uuid.uuid4())
 
-    import json as _json
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -358,6 +459,11 @@ async def ingest_fhir_questionnaire_response(
             source_type, source_id, authored_at, data_source,
         )
 
+    log.info(
+        "ingest_fhir_questionnaire_response: patient=%s instrument=%s score=%s band=%s critical=%d loinc=%s",
+        patient_id, instrument.key, score, band_label, len(triggered_critical), loinc_code,
+    )
+
     return {
         "id": row_id,
         "behavioral_screening_id": row_id,
@@ -371,6 +477,7 @@ async def ingest_fhir_questionnaire_response(
             authored_at.date().isoformat()
             if hasattr(authored_at, "date") else None
         ),
+        "loinc_resolution": loinc_code,
     }
 
 
