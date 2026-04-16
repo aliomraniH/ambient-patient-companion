@@ -216,10 +216,29 @@ async def search_patient_data_extended(
             "gap_resolved": False,
         })
 
+    # Normalize elements — MCP may deliver list items as JSON strings instead of dicts
+    normalized_elements: list[dict] = []
+    for el in data_elements:
+        if isinstance(el, str):
+            try:
+                el = json.loads(el)
+            except Exception:
+                el = {}
+        normalized_elements.append(el if isinstance(el, dict) else {})
+
+    # Normalize search_scope — items may also arrive as a single JSON-encoded string
+    if len(search_scope) == 1 and isinstance(search_scope[0], str):
+        try:
+            candidate = json.loads(search_scope[0])
+            if isinstance(candidate, list):
+                search_scope = candidate
+        except Exception:
+            pass
+
     pool = await asyncpg.create_pool(database_url, min_size=1, max_size=3)
     try:
         async with pool.acquire() as conn:
-            for el in data_elements:
+            for el in normalized_elements:
                 loinc = el.get("loinc_code")
                 lookback = el.get("lookback_days", 365)
                 el_type = el.get("element_type", "lab_result")
