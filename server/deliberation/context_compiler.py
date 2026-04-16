@@ -52,6 +52,21 @@ _UUID_RE = re.compile(
 )
 
 
+def _annotate_stigma(text: str) -> str:
+    """Annotate stigmatizing clinical language in-context. Never deletes.
+
+    Applied alongside sanitize_for_context() so the LLM sees a structural-
+    context marker before interpreting adherence/behavioral labels. The
+    database row is never modified — only the in-memory copy.
+    Non-fatal fallback to the original text on import/runtime error.
+    """
+    try:
+        from shared.stigmatizing_language import flag_stigmatizing_language
+        return flag_stigmatizing_language(text)
+    except Exception:
+        return text
+
+
 async def compile_patient_context(
     patient_id: str,
     db_pool,
@@ -295,7 +310,9 @@ async def compile_patient_context(
             clinical_notes_rows = [
                 {
                     "type":   sanitize_for_context(r["note_type"] or ""),
-                    "text":   sanitize_for_context(r["note_text"] or ""),
+                    "text":   _annotate_stigma(
+                        sanitize_for_context(r["note_text"] or "")
+                    ),
                     "date":   r["note_date"].isoformat() if r["note_date"] else "",
                     "author": sanitize_for_context(r["author"] or ""),
                     "source": r["source"] or "",
