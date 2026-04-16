@@ -56,7 +56,7 @@ async def _analyze_with_claude(
 
     response = await _get_anthropic_client().messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2048,
+        max_tokens=4096,
         system=system_prompt,
         messages=[{
             "role": "user",
@@ -90,7 +90,7 @@ async def _analyze_with_gpt4(
 
     response = await _get_openai_client().chat.completions.create(
         model=GPT4_MODEL,
-        max_tokens=2048,
+        max_tokens=4096,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user",

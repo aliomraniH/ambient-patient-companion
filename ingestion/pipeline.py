@@ -101,9 +101,15 @@ class IngestionPipeline:
         self.resolver = ConflictResolver()
 
     def _get_adapter(self):
-        """Stage 1: Adapter selection based on adapter_name."""
+        """Stage 1: Adapter selection based on adapter_name.
+
+        Returns None for 'healthex' — HealthEx patients are pre-registered
+        via register_healthex_patient(); no FHIR bundle fetch is needed.
+        """
         if self.adapter_name == "synthea":
             return SyntheaAdapter()
+        if self.adapter_name == "healthex":
+            return None  # demographics already in patients table
         raise ValueError(f"Unknown adapter: {self.adapter_name}")
 
     async def _check_freshness(self, patient_id: str, conn) -> bool:
@@ -360,6 +366,35 @@ class IngestionPipeline:
             adapter = self._get_adapter()
 
             async with self.pool.acquire() as conn:
+                # HealthEx short-circuit: patient was pre-registered via
+                # register_healthex_patient(); demographics are already in
+                # the patients table.  No FHIR bundle is available, so we
+                # skip stages 2-7 and just stamp freshness so the context
+                # compiler stops treating this patient as perpetually stale.
+                if adapter is None:
+                    if not force_refresh:
+                        is_stale = await self._check_freshness(patient_id, conn)
+                        if not is_stale:
+                            result = IngestionResult(
+                                status="skipped_fresh",
+                                duration_ms=int((time.monotonic() - start_time) * 1000),
+                            )
+                            await self._log_ingestion(patient_id, result, triggered_by, conn)
+                            return result
+
+                    await self._update_freshness(patient_id, 0, conn)
+                    result = IngestionResult(
+                        status="completed",
+                        records_upserted=0,
+                        duration_ms=int((time.monotonic() - start_time) * 1000),
+                    )
+                    await self._log_ingestion(patient_id, result, triggered_by, conn)
+                    logger.info(
+                        "healthex patient %s: freshness stamped (demographics pre-registered)",
+                        patient_id,
+                    )
+                    return result
+
                 # Stage 2: Freshness check
                 if not force_refresh:
                     is_stale = await self._check_freshness(patient_id, conn)

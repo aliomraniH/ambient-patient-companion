@@ -73,7 +73,7 @@ def _load_prompt(filename: str, substitutions: dict) -> str:
 
 
 async def _call_claude(model: str, system: str, user: str,
-                       max_tokens: int = 2048) -> str:
+                       max_tokens: int = 4096) -> str:
     resp = await _get_anthropic_client().messages.create(
         model=model, max_tokens=max_tokens, system=system,
         messages=[{"role": "user", "content": user}]
@@ -82,7 +82,7 @@ async def _call_claude(model: str, system: str, user: str,
 
 
 async def _call_gpt4(model: str, system: str, user: str,
-                     max_tokens: int = 2048) -> str:
+                     max_tokens: int = 4096) -> str:
     resp = await _get_openai_client().chat.completions.create(
         model=model, max_tokens=max_tokens,
         messages=[
@@ -979,6 +979,7 @@ CRITICAL OUTPUT RULES:
 1. Respond ONLY with a single valid JSON object. No markdown, no preamble.
 2. All string values must be properly escaped. No raw quotes inside strings.
 3. If you need more patient data to complete your analysis, include a "data_requests" array.
+4. HARD LIMIT: your entire JSON response MUST be under 3 500 characters. Use short, terse strings. No verbose clinical notes inside values.
 
 JSON SCHEMA:
 {{
@@ -1006,7 +1007,7 @@ Keep all text values compact. Avoid long narratives inside JSON strings.{prior_t
         try:
             response = await _get_anthropic_client().messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=2000,
+                max_tokens=4096,
                 system=system,
                 messages=[{
                     "role": "user",

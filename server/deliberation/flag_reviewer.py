@@ -279,7 +279,7 @@ Return a JSON array of correction objects."""
     try:
         response = await client.messages.create(
             model=REVIEWER_MODEL,
-            max_tokens=2000,
+            max_tokens=4096,
             system=REVIEWER_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
