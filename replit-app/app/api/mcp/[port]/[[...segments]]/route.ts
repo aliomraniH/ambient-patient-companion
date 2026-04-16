@@ -29,6 +29,71 @@ function getClientIp(request: NextRequest): string {
   );
 }
 
+// ---------------------------------------------------------------------------
+// tools/search polyfill
+// FastMCP 3.x does not implement tools/search (MCP spec 2025-03-26).
+// When Claude Web sends tools/search we intercept here: call tools/list on
+// the upstream, filter by the query string, return a conformant response.
+// ---------------------------------------------------------------------------
+
+interface McpTool {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+}
+
+async function handleToolsSearch(
+  port: string,
+  reqBody: Record<string, unknown>,
+  authHeader: string,
+  origin: string | null,
+): Promise<NextResponse> {
+  const params = (reqBody.params ?? {}) as Record<string, unknown>;
+  const query  = typeof params.query === "string" ? params.query.toLowerCase().trim() : "";
+  const id     = reqBody.id ?? 1;
+
+  const listBody = JSON.stringify({
+    jsonrpc: "2.0",
+    id: id,
+    method: "tools/list",
+    params: {},
+  });
+
+  let tools: McpTool[] = [];
+  try {
+    const upstream = await fetch(`http://localhost:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": authHeader,
+      },
+      body: listBody,
+    });
+    const data = await upstream.json() as { result?: { tools?: McpTool[] } };
+    tools = data?.result?.tools ?? [];
+  } catch {
+    tools = [];
+  }
+
+  const matched: McpTool[] = query
+    ? tools.filter((t) => {
+        const haystack = `${t.name} ${t.description ?? ""}`.toLowerCase();
+        return haystack.includes(query);
+      })
+    : tools;
+
+  const cors = openCorsHeaders(origin);
+  return NextResponse.json(
+    {
+      jsonrpc: "2.0",
+      id,
+      result: { tools: matched, nextCursor: null },
+    },
+    { status: 200, headers: cors }
+  );
+}
+
 async function proxy(request: NextRequest, context: RouteContext) {
   const ip = getClientIp(request);
   if (checkRateLimit(ip, "mcp-proxy", 60)) {
@@ -67,6 +132,23 @@ async function proxy(request: NextRequest, context: RouteContext) {
       body = raw || undefined;
     } catch {
       body = undefined;
+    }
+  }
+
+  // Intercept tools/search — not natively implemented by FastMCP 3.x
+  if (request.method === "POST" && body) {
+    try {
+      const parsed = JSON.parse(body) as Record<string, unknown>;
+      if (parsed.method === "tools/search") {
+        return handleToolsSearch(
+          port,
+          parsed,
+          request.headers.get("authorization") ?? "",
+          request.headers.get("origin"),
+        );
+      }
+    } catch {
+      // not JSON or no method field — fall through to normal proxy
     }
   }
 
