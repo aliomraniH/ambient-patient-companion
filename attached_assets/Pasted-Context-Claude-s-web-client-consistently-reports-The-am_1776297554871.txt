@@ -1,0 +1,193 @@
+Context
+Claude's web client consistently reports "The ambient-clinical-intelligence server is
+consistently returning session terminated errors" while the skills companion (port 8002)
+and ingestion (port 8003) servers remain stable. The OAuth layer was recently migrated
+from in-memory Map to a PostgreSQL store (commit c95a3a6), and json_response=True, stateless=True was added to all three servers' mcp.run() calls (commit 7abb377).
+Despite these fixes, the clinical server keeps tearing down sessions, forcing Claude
+to fall back to the skills server.
+Investigation surfaced three concrete problems, any of which can produce the reported
+symptom:
+
+OAuth tables are referenced but never created. replit-app/lib/oauth-store.ts
+INSERTs / SELECTs oauth_clients, oauth_auth_codes, oauth_access_tokens, yet
+no CREATE TABLE DDL exists anywhere in the repo (server/migrations/*,
+mcp-server/db/schema.sql, server/deliberation/migrations/*). The moment a
+cached Bearer token expires or Claude re-registers, every OAuth call raises
+Postgres 42P01 relation does not exist and the flow collapses.
+Lazy DB pool init on a heavy server. server/mcp_server.py is 4267 lines with
+deliberation + guardrails imports. _get_db_pool() (server/mcp_server.py:677-686)
+and AuditMiddleware._get_recorder() (shared/audit_middleware.py:73-88) both
+init on the first tool call. The skills server has the same pattern but is
+small; clinical's cold-path latency is what differs — long enough to exceed
+the MCP client handshake/call window.
+Clinical pool is under-provisioned relative to skills. clinical: min_size=1, max_size=5, no command_timeout; skills (mcp-server/db/connection.py:15-23):
+min_size=2, max_size=10, command_timeout=30. One slow query against a missing
+table can wedge the single warm connection.
+
+Goal: make the clinical MCP server behave the same way the skills server does under
+Claude Web — zero "session terminated" errors, stable reconnects, successful auth
+refresh.
+Root cause ranking
+
+OAuth schema never created — latent; surfaces on token refresh or re-register.
+Clinical-server cold-start latency — first tool call after a connect does
+DB-pool + ensure_table work synchronously; MCP client reports the session as
+dead before the response lands.
+Under-provisioned pool + missing command_timeout on clinical server amplifies #2.
+
+Changes (minimal, targeted)
+1. Add OAuth schema migration
+New file replit-app/db/migrations/001_oauth.sql:
+sqlCREATE TABLE IF NOT EXISTS oauth_clients (
+  client_id     TEXT  PRIMARY KEY,
+  client_secret TEXT  NOT NULL,
+  redirect_uris JSONB NOT NULL,
+  client_name   TEXT,
+  created_at    BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oauth_auth_codes (
+  code                  TEXT  PRIMARY KEY,
+  client_id             TEXT  NOT NULL,
+  redirect_uri          TEXT  NOT NULL,
+  code_challenge        TEXT,
+  code_challenge_method TEXT,
+  expires_at            BIGINT NOT NULL,
+  used                  BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+  token      TEXT PRIMARY KEY,
+  client_id  TEXT NOT NULL,
+  expires_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_exp ON oauth_access_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_oauth_auth_codes_exp    ON oauth_auth_codes(expires_at);
+2. Auto-run the migration inside oauth-store.ts
+Keep the footprint small — gate pool creation on a one-shot DDL promise so every
+/register, /authorize, /token and /api/mcp/... bearer check guarantees the
+tables exist. Edit replit-app/lib/oauth-store.ts:51-58:
+tslet _pool: pg.Pool | null = null;
+let _initPromise: Promise<void> | null = null;
+
+async function ensureSchema(pool: pg.Pool): Promise<void> {
+  const sql = await (await import("fs/promises"))
+    .readFile(new URL("../db/migrations/001_oauth.sql", import.meta.url), "utf8");
+  await pool.query(sql);
+}
+
+function getPool(): pg.Pool {
+  if (!_pool) {
+    _pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+    _initPromise = ensureSchema(_pool).catch((e) => {
+      console.error("oauth schema init failed", e);
+    });
+  }
+  return _pool;
+}
+
+async function withReadyPool<T>(fn: (p: pg.Pool) => Promise<T>): Promise<T> {
+  const pool = getPool();
+  if (_initPromise) await _initPromise;
+  return fn(pool);
+}
+Then replace every await getPool().query(...) in this file with
+await withReadyPool((p) => p.query(...)).
+3. Align clinical DB pool + pre-warm at startup
+Edit server/mcp_server.py:685 to match skills server:
+python_db_pool = await asyncpg.create_pool(
+    dsn, min_size=2, max_size=10, command_timeout=30,
+)
+Edit the if __name__ == "__main__": block in server/mcp_server.py:4260-4267 to
+eagerly initialize the pool + audit table BEFORE mcp.run(...) enters its event loop:
+pythonif __name__ == "__main__":
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    host = os.environ.get("MCP_HOST", "0.0.0.0")
+    port = int(os.environ.get("MCP_PORT", "8000"))
+    if transport in ("streamable-http", "http"):
+        import asyncio
+        from shared.call_recorder import CallRecorder
+
+        async def _prewarm() -> None:
+            pool = await _get_db_pool()
+            await CallRecorder("clinical", pool).ensure_table()
+
+        asyncio.run(_prewarm())
+        mcp.run(
+            transport="streamable-http",
+            host=host,
+            port=port,
+            json_response=True,
+            stateless=True,
+        )
+    else:
+        mcp.run(transport="stdio")
+This keeps AuditMiddleware._get_recorder() cheap on the first tool call (it will
+find self._recorder is None still, but the pool + table already exist, so
+initialization is sub-second). No change needed to
+shared/audit_middleware.py — the existing lazy path remains correct.
+4. (Optional, only if FastMCP install exposes it) prefer lifespan
+If pip show fastmcp reports a version that accepts a lifespan kwarg on
+FastMCP() or mcp.run(), move _prewarm into that hook instead of calling
+asyncio.run() up-front. Verify before picking the form; the asyncio.run
+variant is a safe fallback.
+Files changed
+
+replit-app/db/migrations/001_oauth.sql  (new)
+replit-app/lib/oauth-store.ts           (wrap queries in withReadyPool)
+server/mcp_server.py:685                 (pool config)
+server/mcp_server.py:4260-4267           (pre-warm block before mcp.run)
+
+No changes to shared/audit_middleware.py, shared/call_recorder.py, Next.js
+rewrites, or the /api/mcp/[port]/* proxy — those are already correct.
+Existing code reused
+
+CallRecorder.ensure_table() (shared/call_recorder.py:131-138) — called at
+pre-warm time to materialize mcp_call_log before the first audit write.
+asyncpg.create_pool(...) pattern from mcp-server/db/connection.py:15-23.
+pg.Pool singleton pattern already in replit-app/lib/oauth-store.ts:51-58.
+
+Verification
+
+Run the OAuth migration and confirm schema:
+
+bash   psql "$DATABASE_URL" -f replit-app/db/migrations/001_oauth.sql
+   psql "$DATABASE_URL" -c "\dt oauth_*"   # expect all 3 tables
+
+Restart the three MCP servers via start.sh. Tail logs for
+_prewarm log line on clinical, and for audit_middleware[clinical]: recorder ready.
+Health endpoints respond quickly:
+
+bash   for P in 8001 8002 8003; do curl -fsS -w " %{time_total}\n" http://localhost:$P/health; done
+
+MCP initialize handshake for each server returns 200 within 1s:
+
+bash   for P in 8001 8002 8003; do
+     curl -sS -H "Content-Type: application/json" \
+       -H "Accept: application/json, text/event-stream" \
+       -X POST http://localhost:$P/mcp \
+       -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+   done
+
+One tool call per server — clinical: get_data_source_status; skills:
+get_current_session; ingestion: detect_context_staleness. All must return
+without "session terminated".
+OAuth round-trip:
+
+bash   curl -sS -X POST http://localhost:5000/register \
+     -H "Content-Type: application/json" \
+     -d '{"redirect_uris":["http://localhost/cb"],"client_name":"test"}'
+Confirm oauth_clients now has a row.
+7. In Claude Web: disconnect the clinical server, reconnect, call one tool —
+confirm no "session terminated" over 10 consecutive tool invocations.
+8. pytest tests/test_mcp_discovery.py tests/test_mcp_smoke.py -v — must stay
+green.
+Open questions to confirm with user before executing
+
+Is start.sh invoked in the current Replit deployment, or are the 3 servers
+running as separate workflows? If the latter, the migration runner needs to
+be a pre-step of the Next.js workflow only, not start.sh.
+After the fix, should we also add command_timeout / min_size alignment
+to the ingestion server (ingestion/server.py)? Currently out of scope; can
+be a follow-up if symptoms move there.
+Should the OAuth tables include a periodic sweep for expired rows? Not
+strictly needed for this fix — tokens cap at 24h and auth codes at 5 min —
+but easy to add a cron/DELETE WHERE expires_at < now() query.
