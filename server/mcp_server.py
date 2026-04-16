@@ -3889,28 +3889,31 @@ def _check_anchor_bias(draft_output: str) -> str:
 
     lowered = draft_output.lower()
 
-    # Count mentions per term
+    # Count mentions per term and record first-occurrence position
     counts: dict[str, int] = {}
+    first_pos: dict[str, int] = {}
     for term in _CLINICAL_TERMS:
-        n = len(_re.findall(r"\b" + _re.escape(term) + r"\b", lowered))
-        if n > 0:
-            counts[term] = n
+        matches = list(_re.finditer(r"\b" + _re.escape(term) + r"\b", lowered))
+        if matches:
+            counts[term] = len(matches)
+            first_pos[term] = matches[0].start()
 
     if not counts:
         return ""
 
     total = sum(counts.values())
-    sorted_terms = sorted(counts.items(), key=lambda x: x[1], reverse=True)
-    top_term, top_count = sorted_terms[0]
-    top_ratio = top_count / total
+
+    # Signal 1 — first-mentioned term dominates (anchor / primacy bias)
+    # Identify the term that appears earliest in the text, then check its share.
+    first_term = min(first_pos, key=first_pos.__getitem__)
+    first_ratio = counts[first_term] / total
 
     signals: list[str] = []
 
-    # Signal 1 — single term dominates
-    if total >= 3 and top_ratio > 0.60:
+    if total >= 3 and first_ratio > 0.60:
         signals.append(
-            f"'{top_term}' accounts for {top_ratio:.0%} of clinical term "
-            "mentions — possible anchor bias on first-mentioned concept"
+            f"'{first_term}' (first-mentioned) accounts for {first_ratio:.0%} of "
+            "clinical term mentions — possible primacy/anchor bias"
         )
 
     # Signal 2 — multiple conditions but no differential language
@@ -3930,13 +3933,14 @@ async def run_constitutional_critic(
     originating_agent: str,
     output_type: str,
 ) -> dict:
-    """4-check constitutional critic applied before any delivery.
+    """5-check constitutional critic applied before any delivery.
 
     Pipeline:
       1. Sycophancy (composes check_sycophancy_risk)
       2. Guideline factuality (heuristic; PHI scan also runs here)
       3. Internal contradiction detection (simple negation scan)
-      4. Escalation tier routing
+      4. Anchor / primacy bias (first-mentioned term dominance + differential language)
+      5. Escalation tier routing
 
     Returns escalation_tier 1–4:
       1: automated guardrail handled — return reframe_required=True
@@ -3980,7 +3984,7 @@ async def run_constitutional_critic(
         issues.append({"check": "anchor_bias", "severity": "moderate",
                        "detail": anchor_detail})
 
-    # Step 4 — escalation routing.
+    # Step 5 — escalation routing.
     critical = [i for i in issues if i["severity"] == "critical"]
     high = [i for i in issues if i["severity"] == "high"]
     if critical:
