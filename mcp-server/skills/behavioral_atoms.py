@@ -106,11 +106,19 @@ def register(mcp) -> None:
                 except Exception as e:
                     log.warning("store atom failed: %s", e)
 
+        # Auto-refresh the materialized view so get_behavioral_atom_pressure
+        # and run_behavioral_gap_detection see the newly inserted atoms
+        # without requiring a separate manual refresh call.
+        if stored > 0:
+            from skills.atom_vector_search import refresh_atom_pressure_view
+            await refresh_atom_pressure_view(pool)
+
         return {
             "atoms_extracted": len(atoms),
             "atoms_stored": stored,
             "signal_types_found": sorted(signal_types_found),
             "backend_used": active_backend(),
+            "pressure_view_refreshed": stored > 0,
         }
 
     # ── get_behavioral_atom_pressure ──────────────────────────────────────────

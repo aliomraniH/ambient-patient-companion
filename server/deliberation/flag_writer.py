@@ -101,7 +101,7 @@ async def collect_data_provenance(
     # Check if flag references conditions
     if any(t in text_lower for t in ["prediabetes", "diagnosis", "condition", "active"]):
         conditions = await conn.fetch(
-            """SELECT id, condition_name, clinical_status, onset_date
+            """SELECT id, display, clinical_status, onset_date
                FROM patient_conditions
                WHERE patient_id = $1::uuid
                ORDER BY onset_date DESC NULLS LAST LIMIT 5""",
@@ -113,7 +113,7 @@ async def collect_data_provenance(
                 "record_id": str(cond["id"]),
                 "field": "clinical_status",
                 "value_at_flag_time": cond.get("clinical_status", ""),
-                "condition_name": cond.get("condition_name", ""),
+                "condition_name": cond.get("display", ""),
                 "is_suspect": False,
             })
 

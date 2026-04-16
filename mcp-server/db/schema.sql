@@ -26,8 +26,12 @@ CREATE TABLE IF NOT EXISTS patients (
     is_synthetic    BOOLEAN DEFAULT true,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     data_source     VARCHAR(50) NOT NULL DEFAULT 'synthea',
+    duplicate_of    UUID REFERENCES patients(id),
     UNIQUE(mrn)
 );
+-- duplicate_of: when set, this row is a duplicate registration that was
+-- superseded.  All data queries should use the canonical patient UUID
+-- (the one with duplicate_of IS NULL).
 
 -- ============================================================
 -- 2. patient_conditions

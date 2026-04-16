@@ -225,6 +225,172 @@ async def _set_data_track(track: str, tool_name: str) -> str:
     return track
 
 
+def _phq9_score_to_band(score: int) -> str:
+    """Map a PHQ-9 total score to its standard severity band."""
+    if score <= 4:
+        return "minimal"
+    if score <= 9:
+        return "mild"
+    if score <= 14:
+        return "moderate"
+    if score <= 19:
+        return "moderately_severe"
+    return "severe"
+
+
+async def _ingest_behavioral_health_from_summary(
+    conn, patient_id: str, summary: dict
+) -> dict:
+    """Parse behavioral_health data from the raw HealthEx summary and persist it.
+
+    Handles PHQ-9 data so it reaches behavioral_screenings (and ultimately
+    compute_provider_risk crisis_risk) even when it is passed only at
+    registration time.  The function is idempotent — it uses ON CONFLICT DO
+    NOTHING so re-running will not create duplicate rows.
+
+    Supported structures inside summary["behavioral_health"]:
+      {"phq9": {"score": N, "item_answers": {...}, "assessment_date": "YYYY-MM-DD"}}
+      {"PHQ-9": {"total_score": N, ...}}
+      {"phq9_score": N, "phq9_item_9": ..., "phq9_date": "YYYY-MM-DD"}
+
+    Returns a summary dict with keys inserted (int), skipped (int), errors (list).
+    """
+    bh = summary.get("behavioral_health")
+    if not bh or not isinstance(bh, dict):
+        return {"inserted": 0, "skipped": 0, "errors": []}
+
+    inserted = 0
+    errors: list[str] = []
+
+    # ── PHQ-9 extraction ─────────────────────────────────────────────────────
+    phq9_block = (
+        bh.get("phq9")
+        or bh.get("PHQ-9")
+        or bh.get("PHQ9")
+        or bh.get("phq_9")
+        or None
+    )
+
+    # Flat-format fallback: score at the top level of behavioral_health
+    if phq9_block is None and "phq9_score" in bh:
+        phq9_block = {
+            "score": bh["phq9_score"],
+            "item_answers": {
+                "9": bh.get("phq9_item_9", bh.get("phq_9_item_9", 0))
+            },
+            "assessment_date": bh.get("phq9_date", bh.get("assessment_date", "")),
+        }
+
+    if phq9_block and isinstance(phq9_block, dict):
+        raw_score = phq9_block.get("score") or phq9_block.get("total_score") or 0
+        try:
+            score = int(raw_score)
+        except (TypeError, ValueError):
+            score = 0
+
+        item_answers = phq9_block.get("item_answers") or {}
+        # Normalise item 9 — may be stored as int, text description, or bool
+        _item9_raw = None
+        for k in ("9", "item_9", "phq9_item9", "q9", "Q9", "Q09"):
+            if k in item_answers:
+                _item9_raw = item_answers[k]
+                break
+        # Also check top-level convenience keys
+        if _item9_raw is None:
+            for k in ("phq9_item_9", "phq_9_item_9", "item_9", "si_screen"):
+                if k in bh:
+                    _item9_raw = bh[k]
+                    break
+
+        item9_score = 0
+        if isinstance(_item9_raw, int):
+            item9_score = _item9_raw
+        elif isinstance(_item9_raw, str):
+            # Numeric string or text description → treat any non-zero text as 1
+            try:
+                item9_score = int(_item9_raw)
+            except ValueError:
+                item9_score = 1 if _item9_raw.strip() else 0
+        elif isinstance(_item9_raw, bool):
+            item9_score = int(_item9_raw)
+
+        # Normalise item_answers dict so item 9 is consistently keyed as "9"
+        item_answers["9"] = item9_score
+
+        # Build triggered_critical list for item 9
+        triggered_critical: list[dict] = []
+        if item9_score > 0:
+            si_label = (
+                "passive_si" if item9_score == 1
+                else "active_si" if item9_score >= 2
+                else "si_screen_positive"
+            )
+            triggered_critical.append({
+                "item": "9",
+                "score": item9_score,
+                "alert_text": (
+                    "PHQ-9 item 9 endorsed — suicidal ideation screen positive. "
+                    "Safety review required."
+                ),
+                "severity": si_label,
+            })
+
+        # Parse administered_at
+        raw_date = (
+            phq9_block.get("assessment_date")
+            or phq9_block.get("administered_at")
+            or phq9_block.get("date")
+            or bh.get("assessment_date")
+            or ""
+        )
+        from datetime import timezone as _tz
+        try:
+            if raw_date:
+                from datetime import date as _date
+                assessed_at = datetime.fromisoformat(str(raw_date).replace("Z", "+00:00"))
+            else:
+                assessed_at = datetime.now(tz=_tz.utc)
+        except (ValueError, TypeError):
+            assessed_at = datetime.now(tz=_tz.utc)
+
+        band = _phq9_score_to_band(score)
+
+        try:
+            await conn.execute(
+                """
+                INSERT INTO behavioral_screenings
+                    (id, patient_id, instrument_key, domain, loinc_code,
+                     score, band, item_answers, triggered_critical,
+                     source_type, administered_at, entered_by, data_source)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13)
+                ON CONFLICT DO NOTHING
+                """,
+                str(uuid.uuid4()),
+                patient_id,
+                "PHQ-9",
+                "depression",
+                "44249-1",
+                score,
+                band,
+                json.dumps(item_answers),
+                json.dumps(triggered_critical),
+                "health_summary",
+                assessed_at,
+                "register_healthex_patient",
+                "healthex",
+            )
+            inserted += 1
+            logger.info(
+                "_ingest_behavioral_health_from_summary: PHQ-9 score=%d band=%s item9=%d inserted for %s",
+                score, band, item9_score, patient_id,
+            )
+        except Exception as exc:
+            errors.append(f"phq9_insert: {exc}")
+            logger.warning("behavioral_health PHQ-9 insert failed: %s", exc)
+
+    return {"inserted": inserted, "skipped": 0, "errors": errors}
+
+
 async def register_healthex_patient(
     health_summary_json: str,
     mrn_override: str = "",
@@ -422,6 +588,13 @@ async def register_healthex_patient(
                 "healthex",
             )
 
+            # ── Persist any behavioral_health data (e.g. PHQ-9) from the summary
+            # so it reaches compute_provider_risk and crisis_risk immediately,
+            # even when no separate behavioral screening ingestion call follows.
+            bh_result = await _ingest_behavioral_health_from_summary(
+                conn, patient_id, summary
+            )
+
             await log_skill_execution(
                 conn,
                 "register_healthex_patient",
@@ -431,6 +604,7 @@ async def register_healthex_patient(
                     "mrn": demo["mrn"],
                     "patient_id": patient_id,
                     "duration_ms": int((time.time() - start) * 1000),
+                    "behavioral_health_inserted": bh_result.get("inserted", 0),
                 },
                 data_source="healthex",
             )
