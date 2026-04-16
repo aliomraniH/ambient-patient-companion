@@ -13,7 +13,7 @@ from .domain_registry import (
     RULE_6_AGENTS,
 )
 
-VALID_TIERS = {"TOOL", "RETRIEVAL", "SYNTHESIZED", "PENDING"}
+VALID_TIERS = {"TOOL", "RETRIEVAL", "SYNTHESIZED", "PENDING", "PRIOR_SESSION"}
 
 
 def hash_mrn(mrn: str) -> str:
@@ -279,6 +279,27 @@ def validate_section(section: dict) -> list[dict]:
                 ),
             })
 
+    # Rule 11: PRIOR_SESSION_STALENESS (WARN)
+    # A PRIOR_SESSION section carries data from a previous deliberation
+    # session. If its age exceeds the configured staleness threshold, warn
+    # the caller that the finding should be re-verified via a fresh tool
+    # call before being rendered as current evidence. Threshold defaults to
+    # 72h when not supplied.
+    if tier == "PRIOR_SESSION":
+        age_hours = section.get("source_age_hours")
+        threshold = section.get("staleness_threshold_hours", 72)
+        if age_hours is not None and age_hours > threshold:
+            violations.append({
+                "rule": "PRIOR_SESSION_STALENESS",
+                "severity": "WARN",
+                "message": (
+                    f"Section '{sid}': PRIOR_SESSION data is "
+                    f"{age_hours:.1f}h old (threshold: {threshold}h). "
+                    "Re-verify against current tool calls before treating "
+                    "as current evidence, or trigger a fresh deliberation."
+                ),
+            })
+
     return violations
 
 
@@ -292,6 +313,11 @@ def render_recommendation(section: dict, violations: list[dict]) -> str:
     if tier == "PENDING":
         return "PENDING"
     if tier == "SYNTHESIZED":
+        return "REDUCED_AUTHORITY"
+    if tier == "PRIOR_SESSION":
+        # Prior-session data is always reduced authority: it reflects a
+        # past deliberation and has not been re-verified against live
+        # tools in the current session.
         return "REDUCED_AUTHORITY"
     if tier == "RETRIEVAL":
         return (

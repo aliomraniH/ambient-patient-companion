@@ -384,3 +384,12 @@ CREATE TABLE IF NOT EXISTS system_config (
 INSERT INTO system_config (key, value)
 VALUES ('DATA_TRACK', 'synthea')
 ON CONFLICT (key) DO NOTHING;
+
+-- Hours after which a prior deliberation output is treated as stale
+-- (PRIOR_SESSION provenance tier). Consumers must re-verify stale
+-- findings against current tool calls before rendering. See
+-- shared/provenance/verifier.py Rule 11 and
+-- server/mcp_server.py get_deliberation_results().
+INSERT INTO system_config (key, value)
+VALUES ('deliberation_staleness_hours', '72')
+ON CONFLICT (key) DO NOTHING;

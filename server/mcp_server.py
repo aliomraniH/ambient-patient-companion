@@ -2335,6 +2335,24 @@ async def run_deliberation(
     }
 
 
+async def _get_deliberation_staleness_threshold(conn) -> float:
+    """Read deliberation_staleness_hours from system_config. Defaults to 72h
+    when the key is absent or the value cannot be parsed.
+
+    Used by get_deliberation_results() to tag stale prior-session outputs
+    with the PRIOR_SESSION provenance tier. See
+    shared/provenance/verifier.py Rule 11 for the downstream semantics.
+    """
+    try:
+        val = await conn.fetchval(
+            "SELECT value FROM system_config WHERE key = $1",
+            "deliberation_staleness_hours",
+        )
+        return float(val) if val is not None else 72.0
+    except Exception:
+        return 72.0
+
+
 @mcp.tool()
 async def get_deliberation_results(
     patient_id: str,
@@ -2353,7 +2371,15 @@ async def get_deliberation_results(
 
     Returns:
         Structured outputs from deliberation(s), with metadata.
+        Each deliberation carries `age_hours`, `staleness_threshold_hours`,
+        `is_stale`, and `provenance_tier` — the tier is "PRIOR_SESSION"
+        when the deliberation exceeds the configurable staleness threshold,
+        signaling to downstream consumers that findings must be
+        re-verified against current tool calls (see shared/provenance
+        Rule 11).
     """
+    from datetime import datetime, timezone
+
     pool = await _get_db_pool()
     async with pool.acquire() as conn:
         deliberations = await conn.fetch(
@@ -2367,6 +2393,9 @@ async def get_deliberation_results(
         if not deliberations:
             return {"status": "no_deliberations_found", "patient_id": patient_id}
 
+        staleness_threshold = await _get_deliberation_staleness_threshold(conn)
+        now = datetime.now(timezone.utc)
+
         results = []
         for dlb in deliberations:
             query = """SELECT output_type, output_data, confidence, priority
@@ -2378,11 +2407,25 @@ async def get_deliberation_results(
                 params.append(output_type)
             outputs = await conn.fetch(query, *params)
 
+            triggered_at = dlb["triggered_at"]
+            if triggered_at is not None:
+                if triggered_at.tzinfo is None:
+                    triggered_at = triggered_at.replace(tzinfo=timezone.utc)
+                age_hours = (now - triggered_at).total_seconds() / 3600.0
+            else:
+                age_hours = 0.0
+            is_stale = age_hours > staleness_threshold
+            provenance_tier = "PRIOR_SESSION" if is_stale else "TOOL"
+
             results.append({
                 "deliberation_id": str(dlb["id"]),
                 "triggered_at": dlb["triggered_at"].isoformat(),
                 "convergence_score": dlb["convergence_score"],
                 "rounds_completed": dlb["rounds_completed"],
+                "age_hours": round(age_hours, 2),
+                "staleness_threshold_hours": staleness_threshold,
+                "is_stale": is_stale,
+                "provenance_tier": provenance_tier,
                 "outputs": [dict(o) for o in outputs]
             })
 
