@@ -1,0 +1,229 @@
+Context
+The original plan proposes 7 phases of changes to reduce LLM positional/primacy
+bias in the clinical deliberation pipeline. The research basis (Liu et al. TACL
+2024, BiasBusters ICLR 2026, BiasMedQA npj 2024) is sound, but the original
+plan contains several factual errors about how the codebase works. This corrected
+plan preserves the goals while targeting the right code.
+Key corrections from the original plan
+Original claimRealityImpactAgents are ARIA/MIRA/THEO in deliberationActual Phase 1 agents are Claude (diagnostic reasoning) and GPT-4 (treatment optimization). ARIA/MIRA/THEO are provenance-layer agent names in shared/provenance/domain_registry.py.Phase 3 must permute claude/gpt4 keys, not ARIA/MIRA/THEOorchestrate_refresh is LLM-mediatedIt's a deterministic Python pipeline (ingestion_tools.py:1130) calling HTTP endpoints and functions. No LLM conversation context exists.Phase 4 must target critic revision prompts insteadConstitutional critic is a single promptIt's a 4-step pipeline of discrete checks (mcp_server.py:3832-3905)Phase 5 adds a 5th check step, not a prompt appendageclassify_com_b_barrier doesn't exist / needs SDOH paramAlready implemented at behavioral_tools.py:39-117. Already queries patient_sdoh_flags internally. Changing signature violates ADDITIVE ONLY.Phase 7 adds output warning insteadraw_fhir_cache injects notes into LLM contextraw_fhir_cache is used only in gap validation (gap_validation.py:292-320) for stale lab refresh. Clinical notes come from clinical_notes table in context_compiler.The "unsanitized FHIR note injection" risk is smaller than stated; stigmatizing language helper targets clinical_notes in the context compilerget_deliberation_results uses session_idUses deliberation_id UUID + triggered_at timestamp. No session_id column.Phase 6 staleness uses timestamp age, not session comparison
+
+Phase 1 -- SDOH-First Serialization for LLM Context
+Goal: Place SDOH flags before physiological data in context sent to LLMs, so
+social determinants frame interpretation before lab values anchor reasoning.
+Current state: PatientContextPackage (schemas.py:14-65) serializes via
+model_dump_json() with SDOH at position ~13 (after conditions/meds/labs/vitals
+at positions 8-12). The serialization is called in analyst.py:52,86 and
+critic.py:60,89.
+Changes
+server/deliberation/schemas.py -- Add serialize_for_llm() method to
+PatientContextPackage after line 65 (before DeliberationRequest at line 68):
+pythondef serialize_for_llm(self) -> str:
+    """Serialize with SDOH-first ordering for primacy bias mitigation."""
+    import json
+    raw = self.model_dump()
+    ordered = {}
+    # 1. Demographics
+    for k in ("patient_id", "patient_name", "age", "sex", "mrn",
+              "primary_provider", "practice"):
+        if k in raw:
+            ordered[k] = raw[k]
+    # 2. SDOH context first (structural frame before clinical data)
+    ordered["sdoh_flags"] = raw.get("sdoh_flags", [])
+    # 3. Clinical state
+    for k in ("active_conditions", "current_medications", "recent_labs",
+              "vital_trends", "care_gaps"):
+        if k in raw:
+            ordered[k] = raw[k]
+    # 4. Knowledge, guidelines, temporal, notes
+    for k in ("prior_patient_knowledge", "applicable_guidelines",
+              "upcoming_appointments", "days_since_last_encounter",
+              "deliberation_trigger", "data_inventory",
+              "clinical_notes", "available_media"):
+        if k in raw:
+            ordered[k] = raw[k]
+    return json.dumps(ordered, indent=2, default=str)
+server/deliberation/analyst.py -- Replace context.model_dump_json(indent=2)
+with context.serialize_for_llm() at lines 52 and 86.
+server/deliberation/critic.py -- Replace context.model_dump_json(indent=2)
+with context.serialize_for_llm() at lines 60 and 89.
+Tests
+New file server/deliberation/tests/test_sdoh_first_serialization.py:
+
+test_sdoh_before_conditions: Parse JSON from serialize_for_llm(), assert
+sdoh_flags key appears before active_conditions, recent_labs, vital_trends
+test_no_data_loss: All fields from model_dump() present in serialized output
+test_empty_sdoh: Works when sdoh_flags=[]
+
+
+Phase 2 -- Stigmatizing Language Annotation
+Goal: Annotate (never delete) stigmatizing terms in clinical notes before
+they enter deliberation, so LLMs see structural-context markers instead of
+absorbing implicit bias from adherence labels.
+Current state: No stigmatizing language detection exists. clinical_sanitizer.py
+handles injection vectors only. Clinical notes are assembled in
+context_compiler.py:286-306 with sanitize_for_context().
+Changes
+NEW shared/stigmatizing_language.py -- Standalone helper:
+pythonSTIGMATIZING_TERMS = [
+    {"pattern": "non-compliant|noncompliant|not compliant", "category": "compliance",
+     "alt": "experiencing barriers to adherence"},
+    {"pattern": "non-adherent|nonadherent|not adherent", "category": "compliance",
+     "alt": "not yet adherent"},
+    {"pattern": "refused|refuses|refusing", "category": "compliance",
+     "alt": "declined"},
+    {"pattern": "drug-seeking|drug seeking|narcotic-dependent", "category": "substance_use",
+     "alt": "person with substance use concerns"},
+    {"pattern": "difficult patient|frequent flyer", "category": "behavioral",
+     "alt": "patient with complex care needs"},
+    {"pattern": "agitated|combative|uncooperative", "category": "behavioral",
+     "alt": "experiencing distress"},
+]
+
+def flag_stigmatizing_language(note_text: str) -> str:
+    """Annotate stigmatizing terms inline. Never deletes original text.
+    Returns annotated text with [STIGMA_FLAG: ...] markers."""
+server/deliberation/context_compiler.py -- In the clinical notes assembly
+(lines 295-304), wrap the sanitize_for_context() output with the new helper:
+pythondef _annotate_stigma(text: str) -> str:
+    try:
+        from shared.stigmatizing_language import flag_stigmatizing_language
+        return flag_stigmatizing_language(text)
+    except Exception:
+        return text
+Apply to the "text" field in clinical_notes_rows comprehension.
+Tests
+New file shared/tests/test_stigmatizing_language.py:
+
+test_noncompliant_flagged: "[STIGMA_FLAG:" appears in output
+test_original_term_preserved: Original text not deleted
+test_clean_text_unchanged: No-op for clean notes
+test_case_insensitive: Flags "Non-Compliant" and "NON-COMPLIANT"
+
+
+Phase 3 -- Transcript Reorder Before Synthesis
+Goal: Alternate which model's output the synthesizer sees first, mitigating
+primacy bias in the synthesis step.
+Current state: Transcript (built in critic.py:134-176) always has
+"claude" before "gpt4" in phase1, and claude_critique_of_gpt4 before
+gpt4_critique_of_claude in each round. Synthesizer receives this via
+json.dumps(transcript) in synthesizer.py:30.
+Changes
+server/deliberation/synthesizer.py -- Add before synthesize():
+pythondef _reorder_transcript_for_bias_mitigation(
+    transcript: dict, deliberation_id: str
+) -> dict:
+    """Deterministically permute Claude/GPT-4 order using deliberation_id hash.
+    Even hash = Claude first (default). Odd hash = GPT-4 first."""
+In synthesize(), use the reordered transcript for the prompt only; the original
+is preserved in result.transcript for audit (line 48).
+Tests
+New file server/deliberation/tests/test_transcript_reorder.py:
+
+test_even_hash_claude_first: Deliberation ID with even hash keeps original order
+test_odd_hash_gpt4_first: Deliberation ID with odd hash swaps order
+test_no_data_loss: Values identical, only key order differs
+test_deterministic: Same ID always produces same order
+
+
+Phase 4 -- Categorization Instruction in Critic Revision Prompt
+Goal: Force structured "reasoning reset" between critique rounds by
+requiring models to categorize findings before revising.
+Current state: Revision prompt in critic.py:79-110 instructs models to
+revise but doesn't require structured categorization of their reasoning state.
+Why NOT orchestrate_refresh: orchestrate_refresh (ingestion_tools.py:1130)
+is a deterministic Python pipeline. It calls HTTP endpoints and functions
+sequentially. There is no LLM conversation context to inject prompts into.
+Changes
+server/deliberation/critic.py -- In _revise_with_model(), augment the
+revision prompt (after line 94, before line 96) with:
+- Before revising, categorize each of your findings into one of these buckets:
+    CONFIRMED (evidence directly supports), CHALLENGED (critique raised valid concern),
+    UNCERTAIN (insufficient data), NEW (emerged from critique).
+  Address CHALLENGED items first. Include the category in raw_revision.
+This is a prompt text change only. No signature changes. The categorization
+appears in raw_revision for audit.
+Tests
+Add to server/deliberation/tests/: mock call_model_fn that captures the
+system prompt, assert it contains "CONFIRMED", "CHALLENGED", "UNCERTAIN".
+
+Phase 5 -- Anchor Bias Check in Constitutional Critic
+Goal: Detect primacy/anchor bias in draft outputs before delivery.
+Current state: run_constitutional_critic (mcp_server.py:3832-3905) is a
+4-check pipeline: sycophancy, PHI leak, contradiction, escalation routing.
+Why NOT append to prompt: The critic is not a single prompt. It's a pipeline
+of discrete checks. The sycophancy check uses a short 256-token Haiku call.
+Adding a question to that prompt would exceed its scope.
+Changes
+server/mcp_server.py -- Add Step 5 to run_constitutional_critic() between
+Step 3 (contradiction, ~line 3880) and Step 4 (escalation, line 3882):
+New helper _check_anchor_bias(draft_output: str) -> str:
+
+Heuristic: checks if first-mentioned clinical term dominates (>60% of mentions)
+Checks for absence of differential language ("alternatively", "could also", etc.)
+when multiple conditions are present
+Returns empty string (no issue) or description string
+
+Severity: "moderate" (advisory, does not trigger mandatory reframe).
+Tests
+New file tests/test_constitutional_critic_anchor.py:
+
+test_single_condition_dominance_detected
+test_balanced_output_passes
+test_severity_is_moderate
+test_moderate_only_does_not_force_reframe
+
+
+Phase 6 -- PRIOR_SESSION Provenance Tier + Staleness Gate
+Goal: Tag old deliberation outputs so downstream consumers know they may be
+stale.
+Current state: 4 provenance tiers in shared/provenance/verifier.py:16:
+{"TOOL", "RETRIEVAL", "SYNTHESIZED", "PENDING"}. get_deliberation_results
+(mcp_server.py:2339-2389) queries by patient_id + status, returns outputs with
+triggered_at timestamp.
+Changes
+shared/provenance/verifier.py (line 16):
+pythonVALID_TIERS = {"TOOL", "RETRIEVAL", "SYNTHESIZED", "PENDING", "PRIOR_SESSION"}
+Add Rule 11 (PRIOR_SESSION_STALENESS WARN) to validate_section().
+server/mcp_server.py -- In get_deliberation_results, add staleness
+tagging based on triggered_at age vs configurable threshold from system_config.
+New helper _get_staleness_threshold(conn) -> float: reads
+deliberation_staleness_hours from system_config (default 72h).
+mcp-server/db/schema.sql -- Add after line 386:
+sqlINSERT INTO system_config (key, value)
+VALUES ('deliberation_staleness_hours', '72')
+ON CONFLICT (key) DO NOTHING;
+Tests
+
+test_prior_session_is_valid_tier
+test_staleness_warns_when_old
+test_no_warning_when_fresh
+
+
+Phase 7 -- SDOH-Empty Warning in COM-B Output
+Goal: Warn when COM-B classification may be incomplete due to missing SDOH data.
+Current state: classify_com_b_barrier (behavioral_tools.py:39-117) already
+queries patient_sdoh_flags internally (lines 62-66). If no SDOH flags exist, it
+falls through to the default "Motivation (Reflective)" bucket. Changing the
+function signature would violate ADDITIVE ONLY.
+Changes
+mcp-server/skills/behavioral_tools.py -- After classification logic (line 93),
+add SDOH-empty warning check. Add "sdoh_data_warning" key to the return JSON
+(line 109). Empty string when SDOH data is present; advisory text when absent.
+Tests
+
+test_warning_when_no_sdoh_and_default_bucket
+test_no_warning_when_sdoh_present
+test_existing_return_keys_preserved
+
+
+Execution Order
+OrderPhaseRiskDependencies1SDOH-first serializationLowNone2Stigmatizing language annotationLowNone3Transcript reorderLowNone4Categorization in criticLowNone5Anchor bias checkMediumNone6PRIOR_SESSION tierMediumNone7COM-B SDOH warningLowNone
+All phases are independent. Complete and commit each phase before starting the next.
+Verification
+After all phases:
+
+python -m pytest server/deliberation/tests/ -v -- all deliberation tests pass
+python -m pytest shared/tests/ -v -- all shared tests pass
+python -m pytest tests/ -v -- all integration tests pass
+Manual: run get_deliberation_results for Maria Chen and confirm provenance_tier
+and age_hours fields appear in output
