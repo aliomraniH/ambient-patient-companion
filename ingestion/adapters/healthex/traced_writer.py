@@ -391,7 +391,9 @@ async def _write_one_record(conn, resource_type: str, db_rec: dict) -> bool:
                        (id, patient_id, code, display, onset_date,
                         clinical_status, data_source)
                    VALUES ($1,$2,$3,$4,$5,$6,$7)
-                   ON CONFLICT DO NOTHING""",
+                   ON CONFLICT (natural_key) DO UPDATE SET
+                       clinical_status = EXCLUDED.clinical_status,
+                       data_source     = EXCLUDED.data_source""",
                 db_rec["id"], db_rec["patient_id"],
                 db_rec.get("code", ""),
                 db_rec.get("display", ""),
@@ -405,7 +407,9 @@ async def _write_one_record(conn, resource_type: str, db_rec: dict) -> bool:
                        (id, patient_id, code, display, status,
                         authored_on, data_source)
                    VALUES ($1,$2,$3,$4,$5,$6,$7)
-                   ON CONFLICT DO NOTHING""",
+                   ON CONFLICT (natural_key) DO UPDATE SET
+                       status      = EXCLUDED.status,
+                       data_source = EXCLUDED.data_source""",
                 db_rec["id"], db_rec["patient_id"],
                 db_rec.get("code", ""),
                 db_rec.get("display", ""),
@@ -419,7 +423,8 @@ async def _write_one_record(conn, resource_type: str, db_rec: dict) -> bool:
                        (id, patient_id, event_type, event_date,
                         description, data_source)
                    VALUES ($1,$2,$3,$4,$5,$6)
-                   ON CONFLICT DO NOTHING""",
+                   ON CONFLICT (natural_key) DO UPDATE SET
+                       data_source = EXCLUDED.data_source""",
                 db_rec["id"], db_rec["patient_id"],
                 db_rec.get("event_type", "encounter"),
                 db_rec.get("event_date") or _dt.utcnow(),

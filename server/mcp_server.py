@@ -1413,7 +1413,9 @@ async def _write_condition_rows(conn, records: list[dict]) -> int:
                    (id, patient_id, code, display, onset_date,
                     clinical_status, data_source)
                VALUES ($1,$2,$3,$4,$5,$6,$7)
-               ON CONFLICT DO NOTHING""",
+               ON CONFLICT (natural_key) DO UPDATE SET
+                   clinical_status = EXCLUDED.clinical_status,
+                   data_source     = EXCLUDED.data_source""",
             rec.get("id", str(_uuid_mod.uuid4())),
             rec["patient_id"], rec.get("code", ""),
             rec.get("display", ""), rec.get("onset_date"),
@@ -1431,7 +1433,9 @@ async def _write_medication_rows(conn, records: list[dict]) -> int:
                    (id, patient_id, code, display, status,
                     authored_on, data_source)
                VALUES ($1,$2,$3,$4,$5,$6,$7)
-               ON CONFLICT DO NOTHING""",
+               ON CONFLICT (natural_key) DO UPDATE SET
+                   status      = EXCLUDED.status,
+                   data_source = EXCLUDED.data_source""",
             rec.get("id", str(_uuid_mod.uuid4())),
             rec["patient_id"], rec.get("code", ""),
             rec.get("display", ""), rec.get("status", "active"),
@@ -1527,7 +1531,8 @@ async def _write_encounter_rows(conn, records: list[dict]) -> int:
                    (id, patient_id, event_type, event_date,
                     description, data_source)
                VALUES ($1,$2,$3,$4,$5,$6)
-               ON CONFLICT DO NOTHING""",
+               ON CONFLICT (natural_key) DO UPDATE SET
+                   data_source = EXCLUDED.data_source""",
             rec.get("id", str(_uuid_mod.uuid4())),
             rec["patient_id"],
             rec.get("event_type", "encounter"),
@@ -2271,6 +2276,36 @@ async def ingest_from_healthex(
                     )
                     verified_counts[sub_type] = v
 
+            # ── Round-trip verification ────────────────────────────────────────
+            # For each clinical resource_type just written, reconstruct the
+            # source shape from the warehouse and diff against the payload.
+            # Classifies outcomes as clean | has_gaps | has_pollution |
+            # has_both | unverifiable. Pollution is auto-healed in the
+            # same transaction because the rows were just written.
+            verification_by_type: dict = {}
+            try:
+                from ingestion.verification.ingest_verifier import (
+                    verify_transfer as _verify_transfer,
+                    autoheal_pollution as _autoheal,
+                    STATUS_POLLUTION as _STATUS_POLLUTION,
+                )
+                _verifiable_types = {"conditions", "medications", "labs", "encounters"}
+                for sub_type in written_by_table:
+                    if sub_type not in _verifiable_types:
+                        continue
+                    vr = await _verify_transfer(
+                        conn,
+                        patient_id=patient_id,
+                        resource_type=sub_type,
+                        source_payload=fhir_json,
+                    )
+                    if vr.status == _STATUS_POLLUTION and vr.can_autoheal:
+                        deleted = await _autoheal(conn, vr)
+                        vr.notes.append(f"autohealed {deleted} pollution rows")
+                    verification_by_type[sub_type] = vr.to_summary()
+            except Exception as _ver_exc:
+                logger.warning("verifier skipped: %s", _ver_exc)
+
             # ── Update plan status ─────────────────────────────────────────────
             if plan_id:
                 try:
@@ -2313,6 +2348,7 @@ async def ingest_from_healthex(
             "records_written": written_by_table,
             "total_written": total_written,
             "verified_counts": verified_counts,
+            "verification": verification_by_type,
             "format_detected": format_detected,
             "parser_used": parser_used,
             "duration_ms": duration_ms,
