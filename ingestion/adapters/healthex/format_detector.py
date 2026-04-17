@@ -80,9 +80,14 @@ def detect_format(raw: str) -> tuple[HealthExFormat, object]:
         return HealthExFormat.FHIR_BUNDLE_JSON, payload
 
     # Single FHIR resource (Observation, Condition, etc.)
+    # QuestionnaireResponse was previously missing here — a bare PHQ-9 QR
+    # fell through to UNKNOWN and the typed screening ingestor was never
+    # reached, causing silent behavioral-screening drops.
     if payload.get("resourceType") in (
         "Observation", "Condition", "MedicationRequest",
         "MedicationStatement", "Encounter", "Immunization", "Patient",
+        "QuestionnaireResponse", "DiagnosticReport", "Procedure",
+        "AllergyIntolerance",
     ):
         return HealthExFormat.FHIR_BUNDLE_JSON, {
             "resourceType": "Bundle",

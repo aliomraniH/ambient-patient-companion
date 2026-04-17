@@ -1716,12 +1716,42 @@ async def ingest_from_healthex(
     pool = await _get_db_pool()
     try:
         start = _time.time()
-        valid_types = {"labs", "medications", "conditions", "encounters", "summary", "notes"}
+        valid_types = {
+            "labs", "medications", "conditions", "encounters",
+            "summary", "notes", "screening",
+        }
         if resource_type not in valid_types:
             return json.dumps({
                 "status": "error",
                 "error": f"resource_type must be one of {sorted(valid_types)}, got '{resource_type}'"
             })
+
+        # Introspect the payload up front. When the caller claims one
+        # resource_type but the payload is clearly a QuestionnaireResponse
+        # or a screening Observation, auto-reroute to the screening
+        # ingestor — otherwise the LLM fallback silently drops it.
+        _routing_override: str = ""
+        _introspection_ambiguity: float = 1.0
+        try:
+            from ingestion.adapters.healthex.format_introspector import (
+                introspect as _introspect_payload,
+                ROUTE_BEHAVIORAL_SCREENING as _ROUTE_SCREEN,
+            )
+            _intro = _introspect_payload(fhir_json, resource_type)
+            _introspection_ambiguity = _intro.ambiguity_score
+            if (
+                _intro.routing_recommendation == _ROUTE_SCREEN
+                and resource_type not in ("summary", "screening")
+            ):
+                logger.info(
+                    "ingest_from_healthex: introspection overrode resource_type "
+                    "'%s' → 'screening' (instrument=%s, ambiguity=%.2f)",
+                    resource_type, _intro.instrument_hint, _intro.ambiguity_score,
+                )
+                resource_type = "screening"
+                _routing_override = "introspection"
+        except Exception as _intro_exc:
+            logger.debug("introspection skipped: %s", _intro_exc)
 
         # ── Load FHIR transforms ───────────────────────────────────────────────
         from transforms.fhir_to_schema import (          # type: ignore
@@ -2040,6 +2070,79 @@ async def ingest_from_healthex(
                     written_by_table["behavioral_screenings_from_notes"] = phq9_from_notes
                 format_detected = "clinical_notes"
                 parser_used = "notes_extractor"
+
+            elif resource_type == "screening":
+                # Typed route for FHIR QuestionnaireResponse or a screening
+                # Observation (PHQ-9, GAD-7, AUDIT-C, C-SSRS, etc.). Uses
+                # the existing behavioral_screening_ingestor.
+                from ingestion.adapters.healthex.format_introspector import (
+                    introspect as _introspect,
+                    introspect_bundle_entries as _introspect_entries,
+                    ROUTE_BEHAVIORAL_SCREENING,
+                )
+
+                # Ensure skills path is on sys.path
+                _skills = str(Path(__file__).resolve().parent.parent / "mcp-server")
+                if _skills not in _sys.path:
+                    _sys.path.insert(0, _skills)
+                from skills.behavioral_screening_ingestor import (  # type: ignore
+                    ingest_observation_or_qr,
+                    _ConnPool as _ConnPoolAdapter,
+                )
+
+                intro_payload = _introspect(fhir_json, resource_type)
+                to_route: list[dict] = []
+                if intro_payload.has_bundle_wrapper:
+                    # Bundle — fan out and keep only screening-eligible entries
+                    for entry_intro in _introspect_entries(intro_payload.payload):
+                        if entry_intro.routing_recommendation == ROUTE_BEHAVIORAL_SCREENING:
+                            to_route.append(entry_intro.payload)
+                elif isinstance(intro_payload.payload, dict):
+                    to_route = [intro_payload.payload]
+
+                screenings_written = 0
+                _pool_adapter = _ConnPoolAdapter(conn)
+                for res in to_route:
+                    try:
+                        result = await ingest_observation_or_qr(
+                            _pool_adapter,
+                            patient_id=patient_id,
+                            resource=res,
+                            source_type="fhir_screening",
+                            source_id=res.get("id"),
+                            data_source="healthex",
+                        )
+                    except Exception as _ie:
+                        logger.warning("screening ingest failed: %s", _ie)
+                        continue
+                    if result:
+                        screenings_written += 1
+                        # Emit transfer_log row so this path is audit-visible
+                        try:
+                            from ingestion.adapters.healthex.traced_writer import (
+                                log_single_record_transfer,
+                            )
+                            inst = result.get("instrument_key", "unknown")
+                            adm = result.get("observation_date") or ""
+                            await log_single_record_transfer(
+                                conn,
+                                patient_id=patient_id,
+                                resource_type="behavioral_screenings",
+                                source="healthex",
+                                record_key=f"screening::{inst}::{adm}",
+                                strategy="screening_ingest",
+                                format_detected=fmt_code,
+                                payload_bytes=len(fhir_json.encode("utf-8")),
+                                loinc_code=result.get("loinc_code") or "",
+                                mark_verified=True,
+                            )
+                        except Exception as _tl_exc:
+                            logger.warning("screening transfer_log emit failed: %s", _tl_exc)
+
+                if screenings_written > 0:
+                    written_by_table["behavioral_screenings"] = screenings_written
+                format_detected = fmt_code
+                parser_used = "behavioral_screening_ingestor"
 
             elif resource_type == "summary":
                 # Fan-out: extract every clinical array from the summary
