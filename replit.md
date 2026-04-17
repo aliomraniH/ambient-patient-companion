@@ -407,3 +407,40 @@ cd replit_dashboard && python -m pytest tests/ -v    # 30 dashboard tests
 - **Fence-stripping**: LLMs wrap JSON in ```json``` fences — `json_utils.strip_markdown_fences()` called in analyst.py, critic.py, synthesizer.py before `model_validate_json`
 - **Port config**: Next.js=5000, Config Dashboard=8080, Clinical MCP=8001, Skills MCP=8002, Ingestion MCP=8003
 - **sys.path for shared**: Each server inserts repo root (`Path(__file__).resolve().parent.parent`) into `sys.path` at module top, before any imports. mcp-server/server.py also adds repo root (one extra level needed for Skills server)
+
+## 2026-04-17 — APC Ingest Fix Series Deployed (P-0 → P-4)
+
+**Migrations applied to production DB**:
+- `012_idempotency_keys.sql` — adds STORED `natural_key` columns + UNIQUE
+  indexes on `patient_conditions`, `patient_medications`, `clinical_events`,
+  `behavioral_screenings`. Pre-existing duplicates collapsed:
+  conditions 396 → 160, medications 152 → 64, encounters 243 → 128,
+  screenings 2 → 2. Backups in `_pre_012_*_backup` tables.
+- `013_staleness_band_config.sql` — adds 2 `system_config` rows for previsit
+  brief staleness bands.
+
+**Breaking changes for downstream consumers**:
+1. `previsit_brief` tool now returns each clinical field as
+   `{value, _provenance: {source, tier}}` instead of a bare value.
+   Anything reading `brief["weight"]` directly must now read
+   `brief["weight"]["value"]`.
+2. `ingest_from_healthex` auto-rewrites `resource_type: "labs"` → `"screening"`
+   when the payload is detected as a FHIR QuestionnaireResponse.
+3. Chase-list ranking shifts: `compute_provider_risk` now blends
+   `atom_pressure` from the `atom_pressure_scores` materialized view and
+   classifies a `data_status` per gap (`screened_abnormal`, `overdue`,
+   `screened_normal`, `atoms_only`, `never_screened`). Patients with high
+   behavioral-atom pressure but no formal screening will rank higher than
+   before.
+
+**Operational note**: `atom_pressure_scores` is a MATERIALIZED VIEW.
+Refreshed manually post-deploy; needs a scheduled `REFRESH MATERIALIZED VIEW
+atom_pressure_scores` (cron / pg_cron / external scheduler) — not yet
+configured. See follow-up task E13.
+
+**Migration 012 immutability fix**: original draft used `date::text` and
+`extract(epoch from timestamptz)` in STORED generated columns, both of which
+PG 16 marks STABLE not IMMUTABLE. Patched to:
+- date columns: `(col - DATE '1970-01-01')::text`
+- timestamptz columns: `extract(epoch from (col - TIMESTAMPTZ 'epoch'))::bigint::text`
+  (`extract(epoch from interval)` IS immutable).
