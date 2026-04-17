@@ -223,7 +223,7 @@ class TestScreeningResourceType:
                 patient_id=pid,
                 resource=phq9,
                 source_type="fhir_screening",
-                source_id="phq9-2023",
+                source_id=str(uuid.uuid4()),
                 data_source="healthex",
             )
 

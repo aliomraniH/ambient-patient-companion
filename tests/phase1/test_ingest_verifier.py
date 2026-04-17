@@ -17,7 +17,7 @@ import asyncio
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 import pytest_asyncio
@@ -119,7 +119,7 @@ class TestVerifyTransferClean:
                             clinical_status, data_source)
                        VALUES ($1::uuid, $2::uuid, $3, $4, $5, 'active', 'healthex')
                        ON CONFLICT (natural_key) DO NOTHING""",
-                    str(uuid.uuid4()), pid, code, display, onset,
+                    str(uuid.uuid4()), pid, code, display, date.fromisoformat(onset),
                 )
             result = await verify_transfer(
                 conn, patient_id=pid, resource_type="conditions",
@@ -153,7 +153,7 @@ class TestVerifyTransferClean:
                             clinical_status, data_source)
                        VALUES ($1::uuid, $2::uuid, $3, $4, $5, 'active', 'healthex')
                        ON CONFLICT (natural_key) DO NOTHING""",
-                    str(uuid.uuid4()), pid, code, display, onset,
+                    str(uuid.uuid4()), pid, code, display, date.fromisoformat(onset),
                 )
             result = await verify_transfer(
                 conn, patient_id=pid, resource_type="conditions",

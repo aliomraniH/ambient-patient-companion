@@ -2286,9 +2286,18 @@ async def ingest_from_healthex(
             try:
                 from ingestion.verification.ingest_verifier import (
                     verify_transfer as _verify_transfer,
-                    autoheal_pollution as _autoheal,
                     STATUS_POLLUTION as _STATUS_POLLUTION,
                 )
+                # SAFETY: autoheal is intentionally NOT invoked here.
+                #
+                # The verifier reads the entire patient warehouse (it does
+                # not yet scope by ingest batch / transfer_log batch_id), so
+                # for incremental ingests every legitimate pre-existing row
+                # would be classified as "extra" and autoheal would DELETE
+                # it. Until verify_transfer is reworked to compare only
+                # rows written in the current batch, autoheal stays opt-in
+                # and is exercised only by explicit operator action — the
+                # verifier here is classification/reporting only.
                 _verifiable_types = {"conditions", "medications", "labs", "encounters"}
                 for sub_type in written_by_table:
                     if sub_type not in _verifiable_types:
@@ -2299,9 +2308,13 @@ async def ingest_from_healthex(
                         resource_type=sub_type,
                         source_payload=fhir_json,
                     )
-                    if vr.status == _STATUS_POLLUTION and vr.can_autoheal:
-                        deleted = await _autoheal(conn, vr)
-                        vr.notes.append(f"autohealed {deleted} pollution rows")
+                    if vr.status == _STATUS_POLLUTION:
+                        vr.notes.append(
+                            "autoheal SKIPPED — verifier scope is whole-patient, "
+                            "not per-batch; deleting 'extra' rows would remove "
+                            "legitimate pre-existing data. Run autoheal manually "
+                            "only after verifying scope."
+                        )
                     verification_by_type[sub_type] = vr.to_summary()
             except Exception as _ver_exc:
                 logger.warning("verifier skipped: %s", _ver_exc)

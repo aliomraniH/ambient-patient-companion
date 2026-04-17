@@ -91,9 +91,14 @@ async def brief_patient(db_pool):
         )
     yield pid
     async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM deliberation_outputs WHERE deliberation_id IN "
-                           "(SELECT id FROM deliberations WHERE patient_id=$1::uuid)", pid)
-        await conn.execute("DELETE FROM deliberations WHERE patient_id=$1::uuid", pid)
+        await conn.execute(
+            "DELETE FROM deliberation_outputs dout "
+            " USING deliberations d "
+            " WHERE dout.deliberation_id = d.id "
+            "   AND d.patient_id = $1::text",
+            pid,
+        )
+        await conn.execute("DELETE FROM deliberations WHERE patient_id=$1::text", pid)
         await conn.execute("DELETE FROM obt_scores WHERE patient_id=$1::uuid", pid)
         await conn.execute("DELETE FROM patient_conditions WHERE patient_id=$1::uuid", pid)
         await conn.execute("DELETE FROM patient_medications WHERE patient_id=$1::uuid", pid)
