@@ -18,10 +18,24 @@
 -- (patient_id, metric_type, measured_at); we keep that.
 --
 -- Safety: all operations are additive (ADD COLUMN IF NOT EXISTS,
--- CREATE UNIQUE INDEX IF NOT EXISTS). Existing duplicate rows are NOT
--- removed — the DO block at the bottom first collapses them so the
--- UNIQUE index can be created successfully. Runs inside one
--- transaction so a partial failure rolls back.
+-- CREATE UNIQUE INDEX IF NOT EXISTS). Existing duplicate rows ARE
+-- removed via ROW_NUMBER() dedup keyed on the SAME fingerprint the
+-- natural_key uses, so the UNIQUE index can be created successfully.
+-- Runs inside one transaction so a partial failure rolls back.
+--
+-- IMMUTABILITY NOTE: PostgreSQL STORED generated columns require
+-- IMMUTABLE expressions. date::text and timestamptz::text are STABLE
+-- (depend on session DateStyle / TimeZone). We use:
+--   - (date_col - DATE '1970-01-01')::text       for date columns
+--   - extract(epoch from (tstz - TIMESTAMPTZ 'epoch'))::bigint::text  for timestamptz columns
+--     (extract(epoch from timestamptz) is STABLE because it desugars to
+--      date_part('epoch', timestamptz); subtracting yields an interval,
+--      and extract(epoch from interval) IS IMMUTABLE.)
+-- both of which are IMMUTABLE.
+--
+-- DEDUP NOTE: each DELETE uses exactly the same fingerprint the
+-- natural_key column generates, so any rows that would collide on the
+-- new UNIQUE index are collapsed first (keeping the lowest id).
 
 BEGIN;
 
@@ -29,22 +43,26 @@ BEGIN;
 -- patient_conditions
 -- ============================================================
 
--- Collapse existing duplicates (keep the earliest created_at per key).
--- conditions has no created_at — use id MIN as the tiebreaker.
-DELETE FROM patient_conditions pc
-USING patient_conditions other
-WHERE pc.patient_id = other.patient_id
-  AND COALESCE(pc.code, '') = COALESCE(other.code, '')
-  AND COALESCE(pc.display, '') = COALESCE(other.display, '')
-  AND COALESCE(pc.onset_date::text, '') = COALESCE(other.onset_date::text, '')
-  AND pc.id > other.id;
+WITH ranked AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY
+                   patient_id,
+                   COALESCE(NULLIF(code, ''), 'HASH:' || md5(COALESCE(display, ''))),
+                   COALESCE((onset_date - DATE '1970-01-01')::text, 'null')
+               ORDER BY id
+           ) AS rn
+    FROM patient_conditions
+)
+DELETE FROM patient_conditions
+ WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
 
 ALTER TABLE patient_conditions
     ADD COLUMN IF NOT EXISTS natural_key TEXT
     GENERATED ALWAYS AS (
         patient_id::text || ':cond:' ||
         COALESCE(NULLIF(code, ''), 'HASH:' || md5(COALESCE(display, '')))
-        || ':' || COALESCE(onset_date::text, 'null')
+        || ':' || COALESCE((onset_date - DATE '1970-01-01')::text, 'null')
     ) STORED;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_patient_conditions_natural
@@ -55,20 +73,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_patient_conditions_natural
 -- patient_medications
 -- ============================================================
 
-DELETE FROM patient_medications pm
-USING patient_medications other
-WHERE pm.patient_id = other.patient_id
-  AND COALESCE(pm.code, '') = COALESCE(other.code, '')
-  AND COALESCE(pm.display, '') = COALESCE(other.display, '')
-  AND COALESCE(pm.authored_on::text, '') = COALESCE(other.authored_on::text, '')
-  AND pm.id > other.id;
+WITH ranked AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY
+                   patient_id,
+                   COALESCE(NULLIF(code, ''), 'HASH:' || md5(COALESCE(display, ''))),
+                   COALESCE((authored_on - DATE '1970-01-01')::text, 'null')
+               ORDER BY id
+           ) AS rn
+    FROM patient_medications
+)
+DELETE FROM patient_medications
+ WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
 
 ALTER TABLE patient_medications
     ADD COLUMN IF NOT EXISTS natural_key TEXT
     GENERATED ALWAYS AS (
         patient_id::text || ':med:' ||
         COALESCE(NULLIF(code, ''), 'HASH:' || md5(COALESCE(display, '')))
-        || ':' || COALESCE(authored_on::text, 'null')
+        || ':' || COALESCE((authored_on - DATE '1970-01-01')::text, 'null')
     ) STORED;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_patient_medications_natural
@@ -79,20 +103,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_patient_medications_natural
 -- clinical_events
 -- ============================================================
 
-DELETE FROM clinical_events ce
-USING clinical_events other
-WHERE ce.patient_id = other.patient_id
-  AND COALESCE(ce.event_type, '') = COALESCE(other.event_type, '')
-  AND COALESCE(ce.event_date::text, '') = COALESCE(other.event_date::text, '')
-  AND COALESCE(ce.description, '') = COALESCE(other.description, '')
-  AND ce.id > other.id;
+WITH ranked AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY
+                   patient_id,
+                   COALESCE(NULLIF(event_type, ''), 'NOTYPE'),
+                   COALESCE(extract(epoch from (event_date - TIMESTAMPTZ 'epoch'))::bigint::text, 'null'),
+                   md5(COALESCE(description, ''))
+               ORDER BY id
+           ) AS rn
+    FROM clinical_events
+)
+DELETE FROM clinical_events
+ WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
 
 ALTER TABLE clinical_events
     ADD COLUMN IF NOT EXISTS natural_key TEXT
     GENERATED ALWAYS AS (
         patient_id::text || ':enc:' ||
         COALESCE(NULLIF(event_type, ''), 'NOTYPE')
-        || ':' || COALESCE(event_date::text, 'null')
+        || ':' || COALESCE(extract(epoch from (event_date - TIMESTAMPTZ 'epoch'))::bigint::text, 'null')
         || ':' || md5(COALESCE(description, ''))
     ) STORED;
 
@@ -104,18 +135,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_clinical_events_natural
 -- behavioral_screenings
 -- ============================================================
 
-DELETE FROM behavioral_screenings bs
-USING behavioral_screenings other
-WHERE bs.patient_id = other.patient_id
-  AND bs.instrument_key = other.instrument_key
-  AND bs.administered_at = other.administered_at
-  AND bs.id > other.id;
+WITH ranked AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY
+                   patient_id,
+                   instrument_key,
+                   extract(epoch from (administered_at - TIMESTAMPTZ 'epoch'))::bigint
+               ORDER BY id
+           ) AS rn
+    FROM behavioral_screenings
+)
+DELETE FROM behavioral_screenings
+ WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
 
 ALTER TABLE behavioral_screenings
     ADD COLUMN IF NOT EXISTS natural_key TEXT
     GENERATED ALWAYS AS (
         patient_id::text || ':screen:' || instrument_key
-        || ':' || administered_at::text
+        || ':' || extract(epoch from (administered_at - TIMESTAMPTZ 'epoch'))::bigint::text
     ) STORED;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_behavioral_screenings_natural
