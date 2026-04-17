@@ -105,6 +105,53 @@ def _phi_scan_rows(rows: list[dict]) -> list[dict]:
     return scanned
 
 
+# Placeholder / sentinel strings that LLMs emit when they think a field
+# is missing but the prompt told them to fill something in. Any row
+# whose non-empty values are all placeholders is treated as empty.
+_PLACEHOLDER_VALUES = {
+    "", "unknown", "n/a", "na", "none", "null", "-", "not available",
+    "not specified", "not documented", "unknown/none",
+}
+
+
+def _is_empty_row(row: dict, schema: dict) -> bool:
+    """A row is empty when none of its non-placeholder values carry meaning.
+
+    Used as a safety net: even when the LLM was told not to pad, some
+    responses still include shell rows. Strip them before returning.
+    """
+    if not isinstance(row, dict):
+        return True
+    for k, v in row.items():
+        if v is None:
+            continue
+        if isinstance(v, (int, float)) and v != 0:
+            return False
+        if isinstance(v, str):
+            if v.strip().lower() not in _PLACEHOLDER_VALUES:
+                return False
+        elif v:  # list, dict, anything truthy that isn't str/number
+            return False
+    return True
+
+
+def _strip_empty_rows(rows: list[dict], resource_type: str, schema: dict) -> list[dict]:
+    """Drop rows that are entirely placeholder/empty values.
+
+    Called after required-field validation in llm_normalise. Logs the
+    count of dropped rows (no values — PHI-safe).
+    """
+    before = len(rows)
+    filtered = [r for r in rows if not _is_empty_row(r, schema)]
+    dropped = before - len(filtered)
+    if dropped > 0:
+        log.info(
+            "llm_fallback: stripped %d empty rows for %s (%d → %d)",
+            dropped, resource_type, before, len(filtered),
+        )
+    return filtered
+
+
 def llm_normalise(raw: str, resource_type: str) -> list[dict]:
     """
     LLM fallback normaliser.  Uses Claude Sonnet to extract structured rows
@@ -133,8 +180,10 @@ Example of one correctly formatted row:
 
 RULES:
 - Return ONLY a raw JSON array. No markdown, no explanation, no ```json``` fences.
-- One object per distinct {resource_type} record.
-- If a field is missing from the source, use empty string "".
+- One object per DISTINCT {resource_type} record actually present in the source.
+- DO NOT pad the array to any fixed length. If the source has 1 record, return a list of 1. If 0, return an empty list [].
+- DO NOT invent records to fill a quota. Each row must correspond to a real entry in the source.
+- If a non-required field is missing, use empty string "".
 - Dates must be YYYY-MM-DD format.
 - Do not hallucinate values not present in the source data.
 - Do not include patient identifiers (name, DOB, SSN) in any field value."""
@@ -171,6 +220,12 @@ RULES:
                 continue
             if all(row.get(f) for f in schema["required"]):
                 validated.append(row)
+
+        # Safety net: strip any rows the LLM padded with placeholder values
+        # even though the prompt forbids it. Required-field check above
+        # catches most of these, but some LLMs fill required fields with
+        # strings like "unknown" to satisfy the constraint.
+        validated = _strip_empty_rows(validated, resource_type, schema)
 
         return _phi_scan_rows(validated)
 

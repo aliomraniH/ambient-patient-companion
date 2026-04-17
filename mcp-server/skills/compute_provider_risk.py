@@ -227,13 +227,91 @@ async def compute_provider_risk(
             )
             si_gap_contribution = min(40.0, float(si_gap_count) * 40.0)
 
-            # Final crisis_risk = escalations + SI screen + SI care gap
+            # 2d. Conversation-derived atom pressure (behavioral signals from
+            # clinical notes / companion dialogue). atom_pressure_scores is
+            # a materialized view pivoted on signal_type, so we iterate the
+            # rows rather than expecting per-column named fields.
+            atom_contribution = 0.0
+            atom_signals: list[dict] = []
+            try:
+                atom_rows = await conn.fetch(
+                    """
+                    SELECT signal_type, pressure_score, present_atom_count,
+                           last_atom_at
+                    FROM atom_pressure_scores
+                    WHERE patient_id = $1::uuid
+                      AND signal_type IN ('suicidality', 'depression', 'anxiety')
+                    """,
+                    patient_id,
+                )
+            except Exception as _atom_exc:
+                logger.debug("atom_pressure_scores read skipped: %s", _atom_exc)
+                atom_rows = []
+
+            # Weight atom pressure below formal screening instruments:
+            # item 9 = 1 on PHQ-9 is worth 50 base points. Atom-derived
+            # suicidality at pressure 0.9 is worth at most ~30 pts.
+            _ATOM_WEIGHTS = {
+                "suicidality": 35.0,
+                "depression":  10.0,
+                "anxiety":      5.0,
+            }
+            for row in atom_rows:
+                sig = row["signal_type"]
+                pressure = float(row["pressure_score"] or 0.0)
+                if pressure <= 0.0:
+                    continue
+                w = _ATOM_WEIGHTS.get(sig, 0.0)
+                if w == 0.0:
+                    continue
+                contrib = w * pressure
+                atom_contribution += contrib
+                atom_signals.append({
+                    "signal_type": sig,
+                    "pressure_score": round(pressure, 3),
+                    "present_atom_count": int(row["present_atom_count"] or 0),
+                    "last_atom_at": (
+                        row["last_atom_at"].isoformat()
+                        if row["last_atom_at"] else None
+                    ),
+                    "contribution": round(contrib, 1),
+                })
+            atom_contribution = min(60.0, atom_contribution)
+
+            # Final crisis_risk = escalations + SI screen + SI care gap + atoms
             crisis_risk = min(
                 100.0,
                 crisis_risk_from_escalations
                 + si_risk_contribution
-                + si_gap_contribution,
+                + si_gap_contribution
+                + atom_contribution,
             )
+
+            # Data-status classification: distinguishes a zero-risk score
+            # driven by "we looked and found nothing" from one driven by
+            # "we never looked". Downstream UIs render these differently.
+            has_screen = phq9_row is not None
+            latest_screen_age_days = None
+            if phq9_row and phq9_row["administered_at"]:
+                latest_screen_age_days = (
+                    target - phq9_row["administered_at"].date()
+                ).days
+
+            has_atom_signal = any(
+                float(r["pressure_score"] or 0.0) > 0.3
+                for r in atom_rows
+            )
+
+            if has_screen and (si_risk_contribution > 0 or has_atom_signal):
+                data_status = "screened_abnormal"
+            elif has_screen and latest_screen_age_days is not None and latest_screen_age_days > 365:
+                data_status = "overdue"
+            elif has_screen:
+                data_status = "screened_normal"
+            elif has_atom_signal:
+                data_status = "atoms_only"
+            else:
+                data_status = "never_screened"
 
             # ── Factor 3: SDoH severity ──────────────────────────────────────────
             sdoh_rows = await conn.fetch(
@@ -308,7 +386,10 @@ async def compute_provider_risk(
                     "escalations_30d":     round(crisis_risk_from_escalations, 1),
                     "si_screening":        round(si_risk_contribution, 1),
                     "si_care_gap":         round(si_gap_contribution, 1),
+                    "atom_pressure":       round(atom_contribution, 1),
                     "si_flag":             si_flag,
+                    "atom_signals":        atom_signals,
+                    "data_status":         data_status,
                 },
             }
 

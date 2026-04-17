@@ -1150,6 +1150,35 @@ async def register_healthex_patient(
             # Extract and persist PHQ-9 if behavioral_health is present in summary
             await _ingest_bh_from_summary(conn, patient_id, summary)
 
+            # Emit a transfer_log row so this registration is visible in
+            # get_transfer_audit. Without this, the audit trail starts mid-flow.
+            try:
+                from ingestion.adapters.healthex.traced_writer import (
+                    log_single_record_transfer,
+                )
+                _payload_bytes = len(health_summary_json.encode("utf-8"))
+                _fmt = (
+                    "fhir_patient" if summary.get("resourceType") == "Patient"
+                    else "fhir_bundle" if summary.get("resourceType") == "Bundle"
+                    else "healthex_summary"
+                )
+                await log_single_record_transfer(
+                    conn,
+                    patient_id=patient_id,
+                    resource_type="patient_registration",
+                    source="healthex",
+                    record_key=f"registration::{demo['mrn']}",
+                    strategy="register",
+                    format_detected=_fmt,
+                    payload_bytes=_payload_bytes,
+                    mark_verified=True,
+                )
+            except Exception as _tl_exc:
+                logger.warning(
+                    "register_healthex_patient: transfer_log emit failed: %s",
+                    _tl_exc,
+                )
+
         duration_ms = int((_time.time() - start) * 1000)
         return json.dumps({
             "status": "registered",
@@ -1384,7 +1413,9 @@ async def _write_condition_rows(conn, records: list[dict]) -> int:
                    (id, patient_id, code, display, onset_date,
                     clinical_status, data_source)
                VALUES ($1,$2,$3,$4,$5,$6,$7)
-               ON CONFLICT DO NOTHING""",
+               ON CONFLICT (natural_key) DO UPDATE SET
+                   clinical_status = EXCLUDED.clinical_status,
+                   data_source     = EXCLUDED.data_source""",
             rec.get("id", str(_uuid_mod.uuid4())),
             rec["patient_id"], rec.get("code", ""),
             rec.get("display", ""), rec.get("onset_date"),
@@ -1402,7 +1433,9 @@ async def _write_medication_rows(conn, records: list[dict]) -> int:
                    (id, patient_id, code, display, status,
                     authored_on, data_source)
                VALUES ($1,$2,$3,$4,$5,$6,$7)
-               ON CONFLICT DO NOTHING""",
+               ON CONFLICT (natural_key) DO UPDATE SET
+                   status      = EXCLUDED.status,
+                   data_source = EXCLUDED.data_source""",
             rec.get("id", str(_uuid_mod.uuid4())),
             rec["patient_id"], rec.get("code", ""),
             rec.get("display", ""), rec.get("status", "active"),
@@ -1498,7 +1531,8 @@ async def _write_encounter_rows(conn, records: list[dict]) -> int:
                    (id, patient_id, event_type, event_date,
                     description, data_source)
                VALUES ($1,$2,$3,$4,$5,$6)
-               ON CONFLICT DO NOTHING""",
+               ON CONFLICT (natural_key) DO UPDATE SET
+                   data_source = EXCLUDED.data_source""",
             rec.get("id", str(_uuid_mod.uuid4())),
             rec["patient_id"],
             rec.get("event_type", "encounter"),
@@ -1525,6 +1559,84 @@ def _find_summary_items(summary: dict, sub_type: str) -> list[dict]:
     return []
 
 
+def _record_natural_key(resource_type: str, rec: dict) -> tuple[str, str, str]:
+    """Derive (record_key, loinc_code, icd10_code) for a single DB record.
+
+    record_key is a PHI-safe natural key suitable for transfer_log.record_key:
+    resource type + coded identifier + date. Never name, DOB, or free text.
+    """
+    if resource_type == "conditions":
+        code = rec.get("code", "") or ""
+        onset = rec.get("onset_date") or ""
+        key = f"condition::{code or 'NOCODE'}::{onset}"
+        return key, "", code
+    if resource_type == "medications":
+        code = rec.get("code", "") or ""
+        authored = rec.get("authored_on") or ""
+        key = f"medication::{code or 'NOCODE'}::{authored}"
+        return key, "", ""
+    if resource_type == "labs":
+        code = rec.get("loinc_code") or ""
+        metric = rec.get("metric_type", "") or ""
+        measured = rec.get("measured_at") or ""
+        key = f"lab::{code or metric or 'NOCODE'}::{measured}"
+        return key, code, ""
+    if resource_type == "encounters":
+        etype = rec.get("event_type", "") or ""
+        edate = rec.get("event_date") or ""
+        key = f"encounter::{etype}::{edate}"
+        return key, "", ""
+    if resource_type == "immunizations":
+        code = rec.get("cvx_code") or rec.get("code") or ""
+        given = rec.get("administered_on") or rec.get("date") or ""
+        key = f"immunization::{code or 'NOCODE'}::{given}"
+        return key, "", ""
+    return (f"{resource_type}::unknown", "", "")
+
+
+async def _emit_record_transfer_logs(
+    conn,
+    resource_type: str,
+    records: list[dict],
+    patient_id: str,
+    format_detected: str,
+    strategy: str,
+    payload_bytes: int,
+) -> None:
+    """Emit one verified transfer_log row per DB record written via a direct writer.
+
+    Best-effort: never fails the ingest path. If the transfer_log insert
+    fails the record is still written, only the audit row is missing.
+    """
+    if not records:
+        return
+    try:
+        from ingestion.adapters.healthex.traced_writer import (
+            log_single_record_transfer,
+        )
+    except Exception as _imp_exc:
+        logger.warning("transfer_log helper unavailable: %s", _imp_exc)
+        return
+    for rec in records:
+        try:
+            key, loinc, icd10 = _record_natural_key(resource_type, rec)
+            await log_single_record_transfer(
+                conn,
+                patient_id=patient_id,
+                resource_type=resource_type,
+                source="healthex",
+                record_key=key,
+                strategy=strategy,
+                format_detected=format_detected or "unknown",
+                payload_bytes=payload_bytes,
+                loinc_code=loinc,
+                icd10_code=icd10,
+                mark_verified=True,
+            )
+        except Exception as _tl_exc:
+            logger.warning("transfer_log emit failed for %s: %s", resource_type, _tl_exc)
+
+
 async def _transform_and_write(
     conn,
     resource_type: str,
@@ -1534,8 +1646,17 @@ async def _transform_and_write(
     transform_medications,
     transform_clinical_observations,
     transform_encounters,
+    *,
+    format_detected: str = "",
+    strategy: str = "direct_writer",
+    payload_bytes: int = 0,
 ) -> int:
-    """Transform FHIR resources to DB records and write them. Returns count."""
+    """Transform FHIR resources to DB records and write them. Returns count.
+
+    Emits one verified transfer_log row per produced record. This keeps
+    get_transfer_audit populated for the summary-mode and single-resource
+    paths that bypass execute_transfer_plan_async.
+    """
     if not fhir_resources:
         return 0
     transform_fn_map = {
@@ -1551,7 +1672,12 @@ async def _transform_and_write(
     writer = _WRITER_MAP.get(resource_type)
     if not writer:
         return 0
-    return await writer(conn, records)
+    written = await writer(conn, records)
+    await _emit_record_transfer_logs(
+        conn, resource_type, records, patient_id,
+        format_detected, strategy, payload_bytes,
+    )
+    return written
 
 
 @mcp.tool()
@@ -1595,12 +1721,42 @@ async def ingest_from_healthex(
     pool = await _get_db_pool()
     try:
         start = _time.time()
-        valid_types = {"labs", "medications", "conditions", "encounters", "summary", "notes"}
+        valid_types = {
+            "labs", "medications", "conditions", "encounters",
+            "summary", "notes", "screening",
+        }
         if resource_type not in valid_types:
             return json.dumps({
                 "status": "error",
                 "error": f"resource_type must be one of {sorted(valid_types)}, got '{resource_type}'"
             })
+
+        # Introspect the payload up front. When the caller claims one
+        # resource_type but the payload is clearly a QuestionnaireResponse
+        # or a screening Observation, auto-reroute to the screening
+        # ingestor — otherwise the LLM fallback silently drops it.
+        _routing_override: str = ""
+        _introspection_ambiguity: float = 1.0
+        try:
+            from ingestion.adapters.healthex.format_introspector import (
+                introspect as _introspect_payload,
+                ROUTE_BEHAVIORAL_SCREENING as _ROUTE_SCREEN,
+            )
+            _intro = _introspect_payload(fhir_json, resource_type)
+            _introspection_ambiguity = _intro.ambiguity_score
+            if (
+                _intro.routing_recommendation == _ROUTE_SCREEN
+                and resource_type not in ("summary", "screening")
+            ):
+                logger.info(
+                    "ingest_from_healthex: introspection overrode resource_type "
+                    "'%s' → 'screening' (instrument=%s, ambiguity=%.2f)",
+                    resource_type, _intro.instrument_hint, _intro.ambiguity_score,
+                )
+                resource_type = "screening"
+                _routing_override = "introspection"
+        except Exception as _intro_exc:
+            logger.debug("introspection skipped: %s", _intro_exc)
 
         # ── Load FHIR transforms ───────────────────────────────────────────────
         from transforms.fhir_to_schema import (          # type: ignore
@@ -1920,14 +2076,90 @@ async def ingest_from_healthex(
                 format_detected = "clinical_notes"
                 parser_used = "notes_extractor"
 
+            elif resource_type == "screening":
+                # Typed route for FHIR QuestionnaireResponse or a screening
+                # Observation (PHQ-9, GAD-7, AUDIT-C, C-SSRS, etc.). Uses
+                # the existing behavioral_screening_ingestor.
+                from ingestion.adapters.healthex.format_introspector import (
+                    introspect as _introspect,
+                    introspect_bundle_entries as _introspect_entries,
+                    ROUTE_BEHAVIORAL_SCREENING,
+                )
+
+                # Ensure skills path is on sys.path
+                _skills = str(Path(__file__).resolve().parent.parent / "mcp-server")
+                if _skills not in _sys.path:
+                    _sys.path.insert(0, _skills)
+                from skills.behavioral_screening_ingestor import (  # type: ignore
+                    ingest_observation_or_qr,
+                    _ConnPool as _ConnPoolAdapter,
+                )
+
+                intro_payload = _introspect(fhir_json, resource_type)
+                to_route: list[dict] = []
+                if intro_payload.has_bundle_wrapper:
+                    # Bundle — fan out and keep only screening-eligible entries
+                    for entry_intro in _introspect_entries(intro_payload.payload):
+                        if entry_intro.routing_recommendation == ROUTE_BEHAVIORAL_SCREENING:
+                            to_route.append(entry_intro.payload)
+                elif isinstance(intro_payload.payload, dict):
+                    to_route = [intro_payload.payload]
+
+                screenings_written = 0
+                _pool_adapter = _ConnPoolAdapter(conn)
+                for res in to_route:
+                    try:
+                        result = await ingest_observation_or_qr(
+                            _pool_adapter,
+                            patient_id=patient_id,
+                            resource=res,
+                            source_type="fhir_screening",
+                            source_id=res.get("id"),
+                            data_source="healthex",
+                        )
+                    except Exception as _ie:
+                        logger.warning("screening ingest failed: %s", _ie)
+                        continue
+                    if result:
+                        screenings_written += 1
+                        # Emit transfer_log row so this path is audit-visible
+                        try:
+                            from ingestion.adapters.healthex.traced_writer import (
+                                log_single_record_transfer,
+                            )
+                            inst = result.get("instrument_key", "unknown")
+                            adm = result.get("observation_date") or ""
+                            await log_single_record_transfer(
+                                conn,
+                                patient_id=patient_id,
+                                resource_type="behavioral_screenings",
+                                source="healthex",
+                                record_key=f"screening::{inst}::{adm}",
+                                strategy="screening_ingest",
+                                format_detected=fmt_code,
+                                payload_bytes=len(fhir_json.encode("utf-8")),
+                                loinc_code=result.get("loinc_code") or "",
+                                mark_verified=True,
+                            )
+                        except Exception as _tl_exc:
+                            logger.warning("screening transfer_log emit failed: %s", _tl_exc)
+
+                if screenings_written > 0:
+                    written_by_table["behavioral_screenings"] = screenings_written
+                format_detected = fmt_code
+                parser_used = "behavioral_screening_ingestor"
+
             elif resource_type == "summary":
                 # Fan-out: extract every clinical array from the summary
                 summary = fhir_data if isinstance(fhir_data, dict) else {}
                 sub_types = ["conditions", "medications", "labs", "encounters"]
+                _payload_bytes = len(fhir_json.encode("utf-8"))
                 for sub_type in sub_types:
                     items = _find_summary_items(summary, sub_type)
+                    _sub_strategy = "summary_section"
                     if items:
                         fhir_resources = _normalize_to_fhir(sub_type, items)
+                        _sub_fmt = format_detected or "healthex_summary"
                     else:
                         native_items, fmt, prs = adaptive_parse(fhir_json, sub_type)
                         format_detected = fmt
@@ -1935,17 +2167,44 @@ async def ingest_from_healthex(
                         if not native_items:
                             continue
                         fhir_resources = _normalize_to_fhir(sub_type, native_items)
+                        _sub_fmt = fmt or "unknown"
+
+                    # Emit one summary_section marker row per sub_type with data.
+                    try:
+                        from ingestion.adapters.healthex.traced_writer import (
+                            log_single_record_transfer,
+                        )
+                        await log_single_record_transfer(
+                            conn,
+                            patient_id=patient_id,
+                            resource_type=sub_type,
+                            source="healthex",
+                            record_key=f"summary::{sub_type}::{len(fhir_resources)}",
+                            strategy=_sub_strategy,
+                            format_detected=_sub_fmt,
+                            payload_bytes=_payload_bytes,
+                            mark_verified=True,
+                        )
+                    except Exception as _sec_exc:
+                        logger.warning(
+                            "summary_section transfer_log emit failed: %s",
+                            _sec_exc,
+                        )
 
                     n = await _transform_and_write(
                         conn, sub_type, fhir_resources, patient_id,
                         transform_conditions, transform_medications,
                         transform_clinical_observations, transform_encounters,
+                        format_detected=_sub_fmt,
+                        strategy="summary_record",
+                        payload_bytes=_payload_bytes,
                     )
                     if n > 0:
                         written_by_table[sub_type] = n
 
             else:
                 # Single resource type
+                _payload_bytes_sr = len(fhir_json.encode("utf-8"))
                 if fhir_data is not None:
                     raw_list = _explode_fhir_bundle(fhir_data, resource_type)
                     if raw_list:
@@ -1954,6 +2213,9 @@ async def ingest_from_healthex(
                             conn, resource_type, fhir_resources, patient_id,
                             transform_conditions, transform_medications,
                             transform_clinical_observations, transform_encounters,
+                            format_detected=fmt_code,
+                            strategy="single_resource",
+                            payload_bytes=_payload_bytes_sr,
                         )
                         written_by_table[resource_type] = n
                         format_detected = fmt_code
@@ -1971,6 +2233,9 @@ async def ingest_from_healthex(
                             conn, resource_type, fhir_resources, patient_id,
                             transform_conditions, transform_medications,
                             transform_clinical_observations, transform_encounters,
+                            format_detected=format_detected,
+                            strategy="adaptive_parse",
+                            payload_bytes=_payload_bytes_sr,
                         )
                         written_by_table[resource_type] = n
 
@@ -2010,6 +2275,36 @@ async def ingest_from_healthex(
                         patient_id,
                     )
                     verified_counts[sub_type] = v
+
+            # ── Round-trip verification ────────────────────────────────────────
+            # For each clinical resource_type just written, reconstruct the
+            # source shape from the warehouse and diff against the payload.
+            # Classifies outcomes as clean | has_gaps | has_pollution |
+            # has_both | unverifiable. Pollution is auto-healed in the
+            # same transaction because the rows were just written.
+            verification_by_type: dict = {}
+            try:
+                from ingestion.verification.ingest_verifier import (
+                    verify_transfer as _verify_transfer,
+                    autoheal_pollution as _autoheal,
+                    STATUS_POLLUTION as _STATUS_POLLUTION,
+                )
+                _verifiable_types = {"conditions", "medications", "labs", "encounters"}
+                for sub_type in written_by_table:
+                    if sub_type not in _verifiable_types:
+                        continue
+                    vr = await _verify_transfer(
+                        conn,
+                        patient_id=patient_id,
+                        resource_type=sub_type,
+                        source_payload=fhir_json,
+                    )
+                    if vr.status == _STATUS_POLLUTION and vr.can_autoheal:
+                        deleted = await _autoheal(conn, vr)
+                        vr.notes.append(f"autohealed {deleted} pollution rows")
+                    verification_by_type[sub_type] = vr.to_summary()
+            except Exception as _ver_exc:
+                logger.warning("verifier skipped: %s", _ver_exc)
 
             # ── Update plan status ─────────────────────────────────────────────
             if plan_id:
@@ -2053,6 +2348,7 @@ async def ingest_from_healthex(
             "records_written": written_by_table,
             "total_written": total_written,
             "verified_counts": verified_counts,
+            "verification": verification_by_type,
             "format_detected": format_detected,
             "parser_used": parser_used,
             "duration_ms": duration_ms,
@@ -2172,6 +2468,66 @@ async def get_ingestion_plans(
         return json.dumps({"status": "error", "error": str(e)})
 
 
+# Map of audit resource_type → warehouse table for coverage checks.
+# Excludes "patient_registration" (audit-only) and "summary_section" markers.
+_COVERAGE_TABLES = {
+    "conditions":  "patient_conditions",
+    "medications": "patient_medications",
+    "labs":        "biometric_readings",
+    "encounters":  "clinical_events",
+    "notes":       "clinical_notes",
+    "immunizations": "patient_immunizations",
+    "behavioral_screenings": "behavioral_screenings",
+}
+
+# Resource types emitted to transfer_log that are marker rows, not
+# per-record rows. They should not be counted as per-record coverage.
+_COVERAGE_MARKER_STRATEGIES = {"register", "summary_section"}
+
+
+async def _compute_audit_coverage(conn, patient_id: str) -> list[dict]:
+    """Compute per-resource-type coverage of transfer_log vs warehouse rows.
+
+    Returns a list of {resource_type, transfer_log_rows, warehouse_rows,
+    coverage_gap, warning?} dicts. A non-zero coverage_gap means the
+    warehouse contains records with no corresponding transfer_log entry —
+    typically from ingest paths that predate the P-0 instrumentation.
+    """
+    coverage: list[dict] = []
+    for rt, tbl in _COVERAGE_TABLES.items():
+        try:
+            wh_cnt = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {tbl} WHERE patient_id = $1::uuid",
+                patient_id,
+            )
+        except Exception as exc:
+            # Table may not exist in some environments; skip silently.
+            logger.debug("coverage: %s warehouse read failed: %s", tbl, exc)
+            continue
+
+        tl_cnt = await conn.fetchval(
+            """SELECT COUNT(*) FROM transfer_log
+               WHERE patient_id = $1::uuid
+                 AND resource_type = $2
+                 AND strategy <> ALL($3::text[])""",
+            patient_id, rt, list(_COVERAGE_MARKER_STRATEGIES),
+        ) or 0
+
+        gap = max(0, (wh_cnt or 0) - tl_cnt)
+        entry = {
+            "resource_type": rt,
+            "transfer_log_rows": tl_cnt,
+            "warehouse_rows": wh_cnt or 0,
+            "coverage_gap": gap,
+        }
+        if gap > 0:
+            entry["warning"] = (
+                f"{gap} {rt} rows in warehouse have no transfer_log entry"
+            )
+        coverage.append(entry)
+    return coverage
+
+
 @mcp.tool()
 async def get_transfer_audit(
     patient_id: str,
@@ -2245,6 +2601,11 @@ async def get_transfer_audit(
                 *params, limit,
             )
 
+            # Coverage: compare transfer_log rows to warehouse rows per
+            # resource_type. A gap means clinical data exists that the audit
+            # trail never recorded — usually from a pre-P-0 ingest path.
+            coverage = await _compute_audit_coverage(conn, patient_id)
+
             return json.dumps({
                 "patient_id": patient_id,
                 "total_records": total,
@@ -2256,6 +2617,7 @@ async def get_transfer_audit(
                 "failed_count": sum(
                     r["cnt"] for r in summary_rows if r["status"] == "failed"
                 ),
+                "coverage": coverage,
             }, indent=2, default=str)
 
     except Exception as e:
