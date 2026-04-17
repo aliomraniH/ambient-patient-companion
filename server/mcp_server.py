@@ -1150,6 +1150,35 @@ async def register_healthex_patient(
             # Extract and persist PHQ-9 if behavioral_health is present in summary
             await _ingest_bh_from_summary(conn, patient_id, summary)
 
+            # Emit a transfer_log row so this registration is visible in
+            # get_transfer_audit. Without this, the audit trail starts mid-flow.
+            try:
+                from ingestion.adapters.healthex.traced_writer import (
+                    log_single_record_transfer,
+                )
+                _payload_bytes = len(health_summary_json.encode("utf-8"))
+                _fmt = (
+                    "fhir_patient" if summary.get("resourceType") == "Patient"
+                    else "fhir_bundle" if summary.get("resourceType") == "Bundle"
+                    else "healthex_summary"
+                )
+                await log_single_record_transfer(
+                    conn,
+                    patient_id=patient_id,
+                    resource_type="patient_registration",
+                    source="healthex",
+                    record_key=f"registration::{demo['mrn']}",
+                    strategy="register",
+                    format_detected=_fmt,
+                    payload_bytes=_payload_bytes,
+                    mark_verified=True,
+                )
+            except Exception as _tl_exc:
+                logger.warning(
+                    "register_healthex_patient: transfer_log emit failed: %s",
+                    _tl_exc,
+                )
+
         duration_ms = int((_time.time() - start) * 1000)
         return json.dumps({
             "status": "registered",
@@ -1525,6 +1554,84 @@ def _find_summary_items(summary: dict, sub_type: str) -> list[dict]:
     return []
 
 
+def _record_natural_key(resource_type: str, rec: dict) -> tuple[str, str, str]:
+    """Derive (record_key, loinc_code, icd10_code) for a single DB record.
+
+    record_key is a PHI-safe natural key suitable for transfer_log.record_key:
+    resource type + coded identifier + date. Never name, DOB, or free text.
+    """
+    if resource_type == "conditions":
+        code = rec.get("code", "") or ""
+        onset = rec.get("onset_date") or ""
+        key = f"condition::{code or 'NOCODE'}::{onset}"
+        return key, "", code
+    if resource_type == "medications":
+        code = rec.get("code", "") or ""
+        authored = rec.get("authored_on") or ""
+        key = f"medication::{code or 'NOCODE'}::{authored}"
+        return key, "", ""
+    if resource_type == "labs":
+        code = rec.get("loinc_code") or ""
+        metric = rec.get("metric_type", "") or ""
+        measured = rec.get("measured_at") or ""
+        key = f"lab::{code or metric or 'NOCODE'}::{measured}"
+        return key, code, ""
+    if resource_type == "encounters":
+        etype = rec.get("event_type", "") or ""
+        edate = rec.get("event_date") or ""
+        key = f"encounter::{etype}::{edate}"
+        return key, "", ""
+    if resource_type == "immunizations":
+        code = rec.get("cvx_code") or rec.get("code") or ""
+        given = rec.get("administered_on") or rec.get("date") or ""
+        key = f"immunization::{code or 'NOCODE'}::{given}"
+        return key, "", ""
+    return (f"{resource_type}::unknown", "", "")
+
+
+async def _emit_record_transfer_logs(
+    conn,
+    resource_type: str,
+    records: list[dict],
+    patient_id: str,
+    format_detected: str,
+    strategy: str,
+    payload_bytes: int,
+) -> None:
+    """Emit one verified transfer_log row per DB record written via a direct writer.
+
+    Best-effort: never fails the ingest path. If the transfer_log insert
+    fails the record is still written, only the audit row is missing.
+    """
+    if not records:
+        return
+    try:
+        from ingestion.adapters.healthex.traced_writer import (
+            log_single_record_transfer,
+        )
+    except Exception as _imp_exc:
+        logger.warning("transfer_log helper unavailable: %s", _imp_exc)
+        return
+    for rec in records:
+        try:
+            key, loinc, icd10 = _record_natural_key(resource_type, rec)
+            await log_single_record_transfer(
+                conn,
+                patient_id=patient_id,
+                resource_type=resource_type,
+                source="healthex",
+                record_key=key,
+                strategy=strategy,
+                format_detected=format_detected or "unknown",
+                payload_bytes=payload_bytes,
+                loinc_code=loinc,
+                icd10_code=icd10,
+                mark_verified=True,
+            )
+        except Exception as _tl_exc:
+            logger.warning("transfer_log emit failed for %s: %s", resource_type, _tl_exc)
+
+
 async def _transform_and_write(
     conn,
     resource_type: str,
@@ -1534,8 +1641,17 @@ async def _transform_and_write(
     transform_medications,
     transform_clinical_observations,
     transform_encounters,
+    *,
+    format_detected: str = "",
+    strategy: str = "direct_writer",
+    payload_bytes: int = 0,
 ) -> int:
-    """Transform FHIR resources to DB records and write them. Returns count."""
+    """Transform FHIR resources to DB records and write them. Returns count.
+
+    Emits one verified transfer_log row per produced record. This keeps
+    get_transfer_audit populated for the summary-mode and single-resource
+    paths that bypass execute_transfer_plan_async.
+    """
     if not fhir_resources:
         return 0
     transform_fn_map = {
@@ -1551,7 +1667,12 @@ async def _transform_and_write(
     writer = _WRITER_MAP.get(resource_type)
     if not writer:
         return 0
-    return await writer(conn, records)
+    written = await writer(conn, records)
+    await _emit_record_transfer_logs(
+        conn, resource_type, records, patient_id,
+        format_detected, strategy, payload_bytes,
+    )
+    return written
 
 
 @mcp.tool()
@@ -1924,10 +2045,13 @@ async def ingest_from_healthex(
                 # Fan-out: extract every clinical array from the summary
                 summary = fhir_data if isinstance(fhir_data, dict) else {}
                 sub_types = ["conditions", "medications", "labs", "encounters"]
+                _payload_bytes = len(fhir_json.encode("utf-8"))
                 for sub_type in sub_types:
                     items = _find_summary_items(summary, sub_type)
+                    _sub_strategy = "summary_section"
                     if items:
                         fhir_resources = _normalize_to_fhir(sub_type, items)
+                        _sub_fmt = format_detected or "healthex_summary"
                     else:
                         native_items, fmt, prs = adaptive_parse(fhir_json, sub_type)
                         format_detected = fmt
@@ -1935,17 +2059,44 @@ async def ingest_from_healthex(
                         if not native_items:
                             continue
                         fhir_resources = _normalize_to_fhir(sub_type, native_items)
+                        _sub_fmt = fmt or "unknown"
+
+                    # Emit one summary_section marker row per sub_type with data.
+                    try:
+                        from ingestion.adapters.healthex.traced_writer import (
+                            log_single_record_transfer,
+                        )
+                        await log_single_record_transfer(
+                            conn,
+                            patient_id=patient_id,
+                            resource_type=sub_type,
+                            source="healthex",
+                            record_key=f"summary::{sub_type}::{len(fhir_resources)}",
+                            strategy=_sub_strategy,
+                            format_detected=_sub_fmt,
+                            payload_bytes=_payload_bytes,
+                            mark_verified=True,
+                        )
+                    except Exception as _sec_exc:
+                        logger.warning(
+                            "summary_section transfer_log emit failed: %s",
+                            _sec_exc,
+                        )
 
                     n = await _transform_and_write(
                         conn, sub_type, fhir_resources, patient_id,
                         transform_conditions, transform_medications,
                         transform_clinical_observations, transform_encounters,
+                        format_detected=_sub_fmt,
+                        strategy="summary_record",
+                        payload_bytes=_payload_bytes,
                     )
                     if n > 0:
                         written_by_table[sub_type] = n
 
             else:
                 # Single resource type
+                _payload_bytes_sr = len(fhir_json.encode("utf-8"))
                 if fhir_data is not None:
                     raw_list = _explode_fhir_bundle(fhir_data, resource_type)
                     if raw_list:
@@ -1954,6 +2105,9 @@ async def ingest_from_healthex(
                             conn, resource_type, fhir_resources, patient_id,
                             transform_conditions, transform_medications,
                             transform_clinical_observations, transform_encounters,
+                            format_detected=fmt_code,
+                            strategy="single_resource",
+                            payload_bytes=_payload_bytes_sr,
                         )
                         written_by_table[resource_type] = n
                         format_detected = fmt_code
@@ -1971,6 +2125,9 @@ async def ingest_from_healthex(
                             conn, resource_type, fhir_resources, patient_id,
                             transform_conditions, transform_medications,
                             transform_clinical_observations, transform_encounters,
+                            format_detected=format_detected,
+                            strategy="adaptive_parse",
+                            payload_bytes=_payload_bytes_sr,
                         )
                         written_by_table[resource_type] = n
 
@@ -2172,6 +2329,66 @@ async def get_ingestion_plans(
         return json.dumps({"status": "error", "error": str(e)})
 
 
+# Map of audit resource_type → warehouse table for coverage checks.
+# Excludes "patient_registration" (audit-only) and "summary_section" markers.
+_COVERAGE_TABLES = {
+    "conditions":  "patient_conditions",
+    "medications": "patient_medications",
+    "labs":        "biometric_readings",
+    "encounters":  "clinical_events",
+    "notes":       "clinical_notes",
+    "immunizations": "patient_immunizations",
+    "behavioral_screenings": "behavioral_screenings",
+}
+
+# Resource types emitted to transfer_log that are marker rows, not
+# per-record rows. They should not be counted as per-record coverage.
+_COVERAGE_MARKER_STRATEGIES = {"register", "summary_section"}
+
+
+async def _compute_audit_coverage(conn, patient_id: str) -> list[dict]:
+    """Compute per-resource-type coverage of transfer_log vs warehouse rows.
+
+    Returns a list of {resource_type, transfer_log_rows, warehouse_rows,
+    coverage_gap, warning?} dicts. A non-zero coverage_gap means the
+    warehouse contains records with no corresponding transfer_log entry —
+    typically from ingest paths that predate the P-0 instrumentation.
+    """
+    coverage: list[dict] = []
+    for rt, tbl in _COVERAGE_TABLES.items():
+        try:
+            wh_cnt = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {tbl} WHERE patient_id = $1::uuid",
+                patient_id,
+            )
+        except Exception as exc:
+            # Table may not exist in some environments; skip silently.
+            logger.debug("coverage: %s warehouse read failed: %s", tbl, exc)
+            continue
+
+        tl_cnt = await conn.fetchval(
+            """SELECT COUNT(*) FROM transfer_log
+               WHERE patient_id = $1::uuid
+                 AND resource_type = $2
+                 AND strategy <> ALL($3::text[])""",
+            patient_id, rt, list(_COVERAGE_MARKER_STRATEGIES),
+        ) or 0
+
+        gap = max(0, (wh_cnt or 0) - tl_cnt)
+        entry = {
+            "resource_type": rt,
+            "transfer_log_rows": tl_cnt,
+            "warehouse_rows": wh_cnt or 0,
+            "coverage_gap": gap,
+        }
+        if gap > 0:
+            entry["warning"] = (
+                f"{gap} {rt} rows in warehouse have no transfer_log entry"
+            )
+        coverage.append(entry)
+    return coverage
+
+
 @mcp.tool()
 async def get_transfer_audit(
     patient_id: str,
@@ -2245,6 +2462,11 @@ async def get_transfer_audit(
                 *params, limit,
             )
 
+            # Coverage: compare transfer_log rows to warehouse rows per
+            # resource_type. A gap means clinical data exists that the audit
+            # trail never recorded — usually from a pre-P-0 ingest path.
+            coverage = await _compute_audit_coverage(conn, patient_id)
+
             return json.dumps({
                 "patient_id": patient_id,
                 "total_records": total,
@@ -2256,6 +2478,7 @@ async def get_transfer_audit(
                 "failed_count": sum(
                     r["cnt"] for r in summary_rows if r["status"] == "failed"
                 ),
+                "coverage": coverage,
             }, indent=2, default=str)
 
     except Exception as e:

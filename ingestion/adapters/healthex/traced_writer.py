@@ -288,6 +288,62 @@ async def _update_transfer_async(conn, transfer_id: str, updates: dict) -> None:
         log.warning("transfer_log update failed for %s: %s", transfer_id, e)
 
 
+async def log_single_record_transfer(
+    conn,
+    patient_id: str,
+    resource_type: str,
+    source: str,
+    record_key: str,
+    strategy: str,
+    format_detected: str,
+    payload_bytes: int,
+    *,
+    loinc_code: str = "",
+    icd10_code: str = "",
+    encounter_id: str = "",
+    record_hash: str = "",
+    mark_verified: bool = False,
+) -> str:
+    """Emit a single transfer_log row for paths that bypass execute_transfer_plan.
+
+    Returns the transfer_id (UUID string) for follow-up updates.
+
+    PHI rule: record_key must be a natural key (coded identifiers, dates,
+    instrument names) — never patient name, DOB, or free-text clinical content.
+    """
+    import hashlib as _hashlib
+    batch_id = str(_uuid_mod.uuid4())
+    now = now_utc()
+    tr = TransferRecord(
+        batch_id=batch_id,
+        batch_sequence=1,
+        batch_total=1,
+        chunk_id=batch_id,
+        chunk_sequence=1,
+        chunk_total=1,
+        row={},
+        record_key=record_key,
+        record_hash=record_hash or _hashlib.sha256(record_key.encode()).hexdigest()[:16],
+        loinc_code=loinc_code,
+        icd10_code=icd10_code,
+        encounter_id=encounter_id,
+        resource_type=resource_type,
+        source=source,
+        format_detected=format_detected,
+        strategy=strategy,
+        planned_at=now,
+    )
+    await _log_transfer_async(conn, tr, patient_id, payload_bytes)
+    if mark_verified:
+        await _update_transfer_async(conn, tr.transfer_id, {
+            "status": "verified",
+            "sanitized_at": now,
+            "written_at": now,
+            "verified_at": now,
+        })
+    return tr.transfer_id
+
+
 # ---------------------------------------------------------------------------
 # Per-record DB writers
 # ---------------------------------------------------------------------------
