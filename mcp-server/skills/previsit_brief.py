@@ -1,4 +1,16 @@
-"""Skill: generate_previsit_brief — synthesize 6-month patient data for provider."""
+"""Skill: generate_previsit_brief — synthesize 6-month patient data for provider.
+
+Refactored in P-3 to:
+  - compose missing fields (patient_questions, key_flags) from the
+    deliberation outputs that sibling tools already surface, rather
+    than leaving them as empty placeholders
+  - unify the staleness threshold via system_config
+    (deliberation_staleness_fresh_hours, deliberation_staleness_recent_days)
+    so a 72h deliberation is carried forward with a PRIOR_SESSION tag
+    instead of being dropped at the 24h hard cutoff
+  - stamp every field with _provenance metadata (source tool + tier)
+    so a downstream auditor can see where each value came from
+"""
 
 from __future__ import annotations
 
@@ -17,23 +29,94 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 
+# Defaults mirror the system_config keys written by migration 013.
+# Reads are best-effort; on failure we fall back to these values.
+_DEFAULT_FRESH_HOURS = 24.0
+_DEFAULT_RECENT_DAYS = 7.0
+
+
+async def _read_staleness_band(conn) -> tuple[float, float]:
+    """Return (fresh_hours, recent_hours) from system_config.
+
+    fresh_hours  — deliberations newer than this are tagged TOOL.
+    recent_hours — deliberations newer than this (but older than fresh)
+                   are tagged PRIOR_SESSION.
+    Anything older than recent_hours is tagged PRIOR_SESSION_STALE.
+    """
+    fresh = _DEFAULT_FRESH_HOURS
+    recent_days = _DEFAULT_RECENT_DAYS
+    try:
+        row = await conn.fetchval(
+            "SELECT value FROM system_config WHERE key = $1",
+            "deliberation_staleness_fresh_hours",
+        )
+        if row is not None:
+            fresh = float(row)
+    except Exception as exc:
+        logger.debug("read fresh_hours failed: %s", exc)
+    try:
+        row = await conn.fetchval(
+            "SELECT value FROM system_config WHERE key = $1",
+            "deliberation_staleness_recent_days",
+        )
+        if row is not None:
+            recent_days = float(row)
+    except Exception as exc:
+        logger.debug("read recent_days failed: %s", exc)
+    return fresh, recent_days * 24.0
+
+
+def _classify_freshness(age_hours: float, fresh_hours: float, recent_hours: float) -> dict:
+    """Classify a deliberation by age and return a freshness descriptor.
+
+    Returns a dict carrying: tier, provenance_tag, age_hours, and
+    optional warning text for stale outputs.
+    """
+    if age_hours < fresh_hours:
+        return {
+            "tier": "fresh",
+            "provenance_tag": "TOOL",
+            "age_hours": round(age_hours, 1),
+        }
+    if age_hours < recent_hours:
+        return {
+            "tier": "recent",
+            "provenance_tag": "PRIOR_SESSION",
+            "age_hours": round(age_hours, 1),
+        }
+    return {
+        "tier": "stale",
+        "provenance_tag": "PRIOR_SESSION_STALE",
+        "age_hours": round(age_hours, 1),
+        "warning": (
+            f"deliberation is {age_hours:.0f} h old — re-verify against current "
+            "tool calls before acting on it"
+        ),
+    }
+
+
+def _provenance_tool(source: str, tier: str = "TOOL") -> dict:
+    return {
+        "tier": tier,
+        "source": source,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 async def generate_previsit_brief(
     patient_id: str,
     visit_date: str = "",
 ) -> str:
     """Generate a pre-visit brief for an upcoming appointment.
 
-    Queries 6 months of interval data including vitals trends,
-    medication changes, care gaps, and patient-reported concerns. When a
-    completed deliberation exists within the last 24 hours, its pcp-facing
-    outputs (anticipatory scenarios, predicted patient questions,
-    missing-data flags) are folded into the brief under `recent_deliberation`.
+    Reads from production tables (patient_conditions, patient_medications,
+    care_gaps, obt_scores, deliberations, deliberation_outputs) and
+    composes fields that live under sibling MCP tools (key_flags,
+    patient_questions). Staleness thresholds come from system_config.
 
-    This tool is a cache-aware READER — it NEVER synchronously triggers
-    `run_deliberation`. If a fresh deliberation is not available, the brief
-    is returned from the 6-month query alone. Callers who want a fresh
-    deliberation must invoke `run_deliberation` separately (fire-and-forget)
-    and poll `get_deliberation_results` before re-requesting the brief.
+    Cache-aware READER — NEVER synchronously triggers `run_deliberation`.
+    Prior deliberations are kept with a PRIOR_SESSION provenance tag
+    rather than dropped at a hard 24 h cutoff.
 
     Args:
         patient_id: UUID of the patient
@@ -50,8 +133,8 @@ async def generate_previsit_brief(
 
         async with pool.acquire() as conn:
             data_track = await get_data_track(conn)
+            fresh_hours, recent_hours = await _read_staleness_band(conn)
 
-            # Patient demographics
             patient = await conn.fetchrow(
                 "SELECT first_name, last_name, birth_date, gender "
                 "FROM patients WHERE id = $1",
@@ -60,7 +143,6 @@ async def generate_previsit_brief(
             if not patient:
                 return f"Error: Patient {patient_id} not found"
 
-            # Latest OBT score
             obt = await conn.fetchrow(
                 """
                 SELECT score, primary_driver, trend_direction, confidence
@@ -71,7 +153,6 @@ async def generate_previsit_brief(
                 patient_id,
             )
 
-            # Vital trends (avg systolic, avg glucose over 6 months)
             vitals_summary = await conn.fetch(
                 """
                 SELECT metric_type,
@@ -87,7 +168,6 @@ async def generate_previsit_brief(
                 patient_id, lookback,
             )
 
-            # Active conditions
             conditions = await conn.fetch(
                 """
                 SELECT code, display, clinical_status
@@ -98,7 +178,6 @@ async def generate_previsit_brief(
                 patient_id,
             )
 
-            # Active medications
             medications = await conn.fetch(
                 """
                 SELECT code, display, status
@@ -109,7 +188,6 @@ async def generate_previsit_brief(
                 patient_id,
             )
 
-            # Open care gaps
             care_gaps = await conn.fetch(
                 """
                 SELECT gap_type, description, status
@@ -120,7 +198,6 @@ async def generate_previsit_brief(
                 patient_id,
             )
 
-            # SDoH flags
             sdoh_flags = await conn.fetch(
                 """
                 SELECT domain, severity
@@ -130,7 +207,6 @@ async def generate_previsit_brief(
                 patient_id,
             )
 
-            # Recent crisis events
             crises = await conn.fetch(
                 """
                 SELECT summary, delivered_at
@@ -143,61 +219,9 @@ async def generate_previsit_brief(
                 patient_id, lookback,
             )
 
-            # Build brief
-            brief = {
-                "patient": {
-                    "name": f"{patient['first_name']} {patient['last_name']}",
-                    "birth_date": str(patient["birth_date"]) if patient["birth_date"] else None,
-                    "gender": patient["gender"],
-                },
-                "visit_date": str(target),
-                "obt_score": {
-                    "score": float(obt["score"]) if obt else None,
-                    "primary_driver": obt["primary_driver"] if obt else None,
-                    "trend_direction": obt["trend_direction"] if obt else None,
-                    "confidence": float(obt["confidence"]) if obt else None,
-                },
-                "interval_changes": [
-                    {
-                        "metric": row["metric_type"],
-                        "avg": float(row["avg_val"]),
-                        "min": float(row["min_val"]),
-                        "max": float(row["max_val"]),
-                        "readings": row["reading_count"],
-                    }
-                    for row in vitals_summary
-                ],
-                "active_conditions": [
-                    {"code": r["code"], "display": r["display"]}
-                    for r in conditions
-                ],
-                "active_medications": [
-                    {"code": r["code"], "display": r["display"]}
-                    for r in medications
-                ],
-                "open_care_gaps": [
-                    {"type": r["gap_type"], "description": r["description"]}
-                    for r in care_gaps
-                ],
-                "sdoh_flags": [
-                    {"domain": r["domain"], "severity": r["severity"]}
-                    for r in sdoh_flags
-                ],
-                "recent_crises": [
-                    {
-                        "summary": r["summary"],
-                        "date": r["delivered_at"].isoformat() if r["delivered_at"] else None,
-                    }
-                    for r in crises
-                ],
-                "key_flags": [],
-                "patient_questions": [],
-            }
-
-            # Recent deliberation (cache-aware reader; NEVER triggers run_deliberation).
-            # Pulls pcp-facing outputs from the most recent COMPLETE deliberation
-            # within the last 24 hours. If none, brief renders 6-month data alone.
-            recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            # Recent deliberation — staleness band instead of hard cutoff.
+            # Accept anything within recent_hours; classify by tier.
+            recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=recent_hours)
             delib_row = await conn.fetchrow(
                 """
                 SELECT id, triggered_at, convergence_score, rounds_completed
@@ -210,12 +234,22 @@ async def generate_previsit_brief(
                 """,
                 patient_id, recent_cutoff,
             )
+
+            delib_outputs: list[dict] = []
+            delib_freshness: dict | None = None
+            delib_block: dict | None = None
             if delib_row:
+                age_h = (
+                    datetime.now(timezone.utc)
+                    - ensure_aware(delib_row["triggered_at"])
+                ).total_seconds() / 3600.0
+                delib_freshness = _classify_freshness(age_h, fresh_hours, recent_hours)
+
                 pcp_output_types = (
-                    'anticipatory_scenario',
-                    'predicted_patient_question',
-                    'missing_data_flag',
-                    'care_team_nudge',
+                    "anticipatory_scenario",
+                    "predicted_patient_question",
+                    "missing_data_flag",
+                    "care_team_nudge",
                 )
                 outputs = await conn.fetch(
                     """
@@ -226,41 +260,162 @@ async def generate_previsit_brief(
                     """,
                     delib_row["id"], list(pcp_output_types),
                 )
-                brief["recent_deliberation"] = {
+                delib_outputs = [
+                    {
+                        **dict(o),
+                        "output_data": (
+                            json.loads(o["output_data"])
+                            if isinstance(o["output_data"], str)
+                            else o["output_data"]
+                        ),
+                    }
+                    for o in outputs
+                ]
+                delib_block = {
                     "deliberation_id": str(delib_row["id"]),
                     "triggered_at": delib_row["triggered_at"].isoformat(),
-                    "age_hours": round(
-                        (
-                            datetime.now(timezone.utc)
-                            - ensure_aware(delib_row["triggered_at"])
-                        ).total_seconds() / 3600, 1
-                    ),
+                    "freshness": delib_freshness,
                     "convergence_score": delib_row["convergence_score"],
                     "rounds_completed": delib_row["rounds_completed"],
-                    "outputs": [
-                        {
-                            **dict(o),
-                            "output_data": (
-                                json.loads(o["output_data"])
-                                if isinstance(o["output_data"], str)
-                                else o["output_data"]
-                            ),
-                        }
-                        for o in outputs
+                    "scenarios": [
+                        o for o in delib_outputs
+                        if o["output_type"] == "anticipatory_scenario"
+                    ],
+                    "missing_data_flags": [
+                        o for o in delib_outputs
+                        if o["output_type"] == "missing_data_flag"
+                    ],
+                    "care_team_nudges": [
+                        o for o in delib_outputs
+                        if o["output_type"] == "care_team_nudge"
                     ],
                 }
-            else:
-                brief["recent_deliberation"] = None
 
-            # Generate key flags
-            if obt and float(obt["score"]) < 40:
-                brief["key_flags"].append("OBT score critically low (<40)")
+            # Compose patient_questions from deliberation outputs. Previously
+            # an empty placeholder — the data was already on the table, the
+            # brief just did not read it.
+            patient_questions = [
+                o["output_data"] for o in delib_outputs
+                if o["output_type"] == "predicted_patient_question"
+            ]
+
+            # Compose key_flags from the same sources the care team sees.
+            key_flag_items: list[str] = []
+            if obt and obt["score"] is not None and float(obt["score"]) < 40:
+                key_flag_items.append("OBT score critically low (<40)")
             if any(f["severity"] == "high" for f in sdoh_flags):
-                brief["key_flags"].append("High-severity SDoH flag active")
+                key_flag_items.append("High-severity SDoH flag active")
             if crises:
-                brief["key_flags"].append(
+                key_flag_items.append(
                     f"{len(crises)} crisis event(s) in past 6 months"
                 )
+            # Fold in missing-data flags from a fresh-or-recent deliberation.
+            for o in delib_outputs:
+                if o["output_type"] == "missing_data_flag":
+                    od = o.get("output_data") or {}
+                    label = od.get("label") if isinstance(od, dict) else None
+                    if label:
+                        key_flag_items.append(f"Missing data: {label}")
+
+            # Provenance stamp for deliberation-sourced fields depends on
+            # the freshness tier. Direct-table fields are always TOOL.
+            delib_tier = (
+                delib_freshness["provenance_tag"]
+                if delib_freshness else "TOOL"
+            )
+
+            brief = {
+                "patient": {
+                    "name": f"{patient['first_name']} {patient['last_name']}",
+                    "birth_date": str(patient["birth_date"]) if patient["birth_date"] else None,
+                    "gender": patient["gender"],
+                    "_provenance": _provenance_tool("patients"),
+                },
+                "visit_date": str(target),
+                "staleness_band": {
+                    "fresh_hours": fresh_hours,
+                    "recent_hours": recent_hours,
+                    "_provenance": _provenance_tool("system_config"),
+                },
+                "obt_score": {
+                    "value": {
+                        "score": float(obt["score"]) if obt else None,
+                        "primary_driver": obt["primary_driver"] if obt else None,
+                        "trend_direction": obt["trend_direction"] if obt else None,
+                        "confidence": float(obt["confidence"]) if obt else None,
+                    },
+                    "_provenance": _provenance_tool("obt_scores"),
+                },
+                "interval_changes": {
+                    "value": [
+                        {
+                            "metric": row["metric_type"],
+                            "avg": float(row["avg_val"]),
+                            "min": float(row["min_val"]),
+                            "max": float(row["max_val"]),
+                            "readings": row["reading_count"],
+                        }
+                        for row in vitals_summary
+                    ],
+                    "_provenance": _provenance_tool("biometric_readings"),
+                },
+                "active_conditions": {
+                    "value": [
+                        {"code": r["code"], "display": r["display"]}
+                        for r in conditions
+                    ],
+                    "_provenance": _provenance_tool("patient_conditions"),
+                },
+                "active_medications": {
+                    "value": [
+                        {"code": r["code"], "display": r["display"]}
+                        for r in medications
+                    ],
+                    "_provenance": _provenance_tool("patient_medications"),
+                },
+                "open_care_gaps": {
+                    "value": [
+                        {"type": r["gap_type"], "description": r["description"]}
+                        for r in care_gaps
+                    ],
+                    "_provenance": _provenance_tool("care_gaps"),
+                },
+                "sdoh_flags": {
+                    "value": [
+                        {"domain": r["domain"], "severity": r["severity"]}
+                        for r in sdoh_flags
+                    ],
+                    "_provenance": _provenance_tool("patient_sdoh_flags"),
+                },
+                "recent_crises": {
+                    "value": [
+                        {
+                            "summary": r["summary"],
+                            "date": r["delivered_at"].isoformat() if r["delivered_at"] else None,
+                        }
+                        for r in crises
+                    ],
+                    "_provenance": _provenance_tool("agent_interventions"),
+                },
+                "key_flags": {
+                    "value": key_flag_items,
+                    "_provenance": _provenance_tool(
+                        "composed", tier=delib_tier,
+                    ),
+                },
+                "patient_questions": {
+                    "value": patient_questions,
+                    "_provenance": _provenance_tool(
+                        "deliberation_outputs", tier=delib_tier,
+                    ),
+                },
+                "recent_deliberation": {
+                    "value": delib_block,
+                    "_provenance": _provenance_tool(
+                        "deliberations", tier=delib_tier,
+                    ),
+                },
+            }
 
             await log_skill_execution(
                 conn, "generate_previsit_brief", patient_id, "completed",
@@ -269,11 +424,15 @@ async def generate_previsit_brief(
                     "conditions": len(conditions),
                     "medications": len(medications),
                     "care_gaps": len(care_gaps),
+                    "fresh_hours": fresh_hours,
+                    "recent_hours": recent_hours,
+                    "has_deliberation": delib_block is not None,
+                    "deliberation_tier": delib_tier if delib_block else None,
                 },
                 data_source=data_track,
             )
 
-        return json.dumps(brief)
+        return json.dumps(brief, default=str)
 
     except Exception as e:
         logger.error("generate_previsit_brief failed: %s", e)
