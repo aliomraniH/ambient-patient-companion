@@ -28,6 +28,17 @@ echo "[start.sh] ambient-ingestion MCP Server started on port 8003 (PID $INGESTI
 DASH_PID=$!
 echo "[start.sh] Config Dashboard started on port 8080 (PID $DASH_PID)"
 
+# 4b. Daily refresh of the atom_pressure_scores materialized view.
+#     Replit's PostgreSQL has no pg_cron, so this lightweight Python
+#     daemon is the schedule. It refreshes once on startup, then every
+#     ATOM_PRESSURE_REFRESH_INTERVAL_HOURS (default 24h). Each refresh
+#     stamps system_config.atom_pressure_scores_last_refresh so
+#     `python scripts/refresh_atom_pressure_scores.py --check` can
+#     verify freshness for monitoring.
+python scripts/refresh_atom_pressure_scores.py &
+REFRESH_PID=$!
+echo "[start.sh] atom_pressure_scores refresh daemon started (PID $REFRESH_PID)"
+
 # 5. Next.js — foreground (production build must exist; built in build step)
 echo "[start.sh] Starting Next.js production server (port 5000)..."
 cd replit-app && npm run start

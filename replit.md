@@ -433,10 +433,17 @@ cd replit_dashboard && python -m pytest tests/ -v    # 30 dashboard tests
    behavioral-atom pressure but no formal screening will rank higher than
    before.
 
-**Operational note**: `atom_pressure_scores` is a MATERIALIZED VIEW.
-Refreshed manually post-deploy; needs a scheduled `REFRESH MATERIALIZED VIEW
-atom_pressure_scores` (cron / pg_cron / external scheduler) — not yet
-configured. See follow-up task E13.
+**Operational note**: `atom_pressure_scores` is a MATERIALIZED VIEW that
+is refreshed daily by `scripts/refresh_atom_pressure_scores.py`, started
+in the background by `start.sh` (Replit Postgres has no `pg_cron`). The
+daemon refreshes once on boot, then sleeps for
+`ATOM_PRESSURE_REFRESH_INTERVAL_HOURS` (default 24h) and writes the UTC
+timestamp of every successful refresh to
+`system_config.atom_pressure_scores_last_refresh` (seeded by migration
+014). Monitoring: run `python scripts/refresh_atom_pressure_scores.py
+--check` — exits 0 when the last refresh is within
+`ATOM_PRESSURE_FRESHNESS_THRESHOLD_HOURS` (default 26h), 1 when stale,
+2 when never run.
 
 **Migration 012 immutability fix**: original draft used `date::text` and
 `extract(epoch from timestamptz)` in STORED generated columns, both of which
