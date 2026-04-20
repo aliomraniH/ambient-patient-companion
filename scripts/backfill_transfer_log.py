@@ -25,7 +25,7 @@ import logging
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 import asyncpg
@@ -77,29 +77,71 @@ def _natural_key(resource_type: str, row: dict) -> tuple[str, str, str]:
 
 _TABLE_QUERIES: dict[str, str] = {
     "conditions": (
-        "SELECT code, onset_date, clinical_status, created_at "
+        "SELECT code, onset_date, clinical_status "
         "FROM patient_conditions WHERE patient_id = $1::uuid"
     ),
     "medications": (
-        "SELECT code, authored_on, status, created_at "
+        "SELECT code, authored_on, status "
         "FROM patient_medications WHERE patient_id = $1::uuid"
     ),
     "labs": (
-        "SELECT metric_type, loinc_code, measured_at, created_at "
+        "SELECT metric_type, loinc_code, measured_at "
         "FROM biometric_readings WHERE patient_id = $1::uuid"
     ),
     "encounters": (
-        "SELECT event_type, event_date, created_at "
+        "SELECT event_type, event_date "
         "FROM clinical_events WHERE patient_id = $1::uuid"
     ),
     "behavioral_screenings": (
-        "SELECT instrument_key, loinc_code, administered_at, created_at "
+        "SELECT instrument_key, loinc_code, administered_at "
         "FROM behavioral_screenings WHERE patient_id = $1::uuid"
     ),
     "patient_registration": (
         "SELECT mrn, created_at FROM patients WHERE id = $1::uuid"
     ),
 }
+
+
+_FALLBACK_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
+    "conditions": ("onset_date",),
+    "medications": ("authored_on",),
+    "labs": ("measured_at",),
+    "encounters": ("event_date",),
+    "behavioral_screenings": ("administered_at",),
+    "patient_registration": (),
+}
+
+
+def _coerce_timestamp(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+    return None
+
+
+def _resolve_timestamp(resource_type: str, row: dict) -> datetime:
+    """Pick a sensible timestamp for the synthetic transfer_log row.
+
+    The four clinical tables (patient_conditions, patient_medications,
+    clinical_events, behavioral_screenings) do not carry a created_at
+    column, so we fall back to the most clinically meaningful timestamp
+    on the row (onset_date, authored_on, event_date, administered_at,
+    measured_at). If none is populated we use now() as a last resort,
+    which still beats skipping the row entirely.
+    """
+    ts = _coerce_timestamp(row.get("created_at"))
+    if ts is not None:
+        return ts
+    for col in _FALLBACK_TIMESTAMP_COLUMNS.get(resource_type, ()):
+        ts = _coerce_timestamp(row.get(col))
+        if ts is not None:
+            return ts
+    return datetime.now(timezone.utc)
 
 
 async def _existing_keys(conn, patient_id: str, resource_type: str) -> set[str]:
@@ -130,7 +172,7 @@ async def _backfill_resource(
         key, loinc, icd10 = _natural_key(resource_type, row)
         if key in existing:
             continue
-        created = row.get("created_at") or datetime.now(timezone.utc)
+        created = _resolve_timestamp(resource_type, row)
         key_hash = hashlib.sha256(key.encode()).hexdigest()[:16]
         tid = str(uuid.uuid4())
         batch = str(uuid.uuid4())
