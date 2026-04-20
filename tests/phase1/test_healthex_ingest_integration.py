@@ -6,16 +6,24 @@ Calls the actual FastMCP tool end-to-end against the live database, covering:
     and parses it, returns format_detected/parser_used, records_written is a dict
   - code.text fallback for metric_type (HbA1c with no coding block)
   - onset key alias for native HealthEx conditions
+  - Migration 012 natural-key uniqueness regression: same-day duplicates with
+    the same code collapse, but same-day rows with different codes (and
+    same-code rows on different days) are preserved.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import uuid as _uuid_mod
 
 import pytest
 
 from server.mcp_server import ingest_from_healthex
+
+
+_has_db = "DATABASE_URL" in os.environ
+skip_no_db = pytest.mark.skipif(not _has_db, reason="DATABASE_URL not set")
 
 
 # ---------------------------------------------------------------------------
@@ -167,4 +175,201 @@ class TestOnsetKeyAliasViaIngest:
         assert result["total_written"] == 2, (
             f"Expected 2 condition rows, got {result['total_written']} — "
             "'onset' key alias in _healthex_native_to_fhir_conditions may be broken"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Migration 012 regression: same-day duplicates collapse but distinct
+# same-day events with different codes are preserved. Also covers the
+# multi-episode case (same code, different dates) that must NOT collapse.
+# ---------------------------------------------------------------------------
+
+@skip_no_db
+class TestSameDayDiagnosisUniquenessRegression:
+    """Guards the natural_key contract for ICD-10 conditions and RxNorm meds.
+
+    The new uniqueness rule deduplicates on (patient_id, code, date). This
+    test pins the boundaries:
+      - Two inserts of the SAME code on the SAME day → 1 row (collapse).
+      - Two DIFFERENT codes on the SAME day → 2 rows (preserved).
+      - SAME code on DIFFERENT days → 2 rows (preserved — distinct episodes).
+    A regression here means real, clinically distinct events would silently
+    merge in production.
+    """
+
+    @pytest.mark.asyncio
+    async def test_icd10_same_day_same_code_collapses(
+        self, db_pool, healthex_patient
+    ):
+        pid = healthex_patient
+        async with db_pool.acquire() as conn:
+            for _ in range(2):
+                await conn.execute(
+                    """INSERT INTO patient_conditions
+                           (id, patient_id, code, display, system,
+                            onset_date, clinical_status, data_source)
+                       VALUES ($1::uuid, $2::uuid, 'K80.20',
+                               'Calculus of gallbladder without cholecystitis',
+                               'http://hl7.org/fhir/sid/icd-10',
+                               '2024-08-15', 'active', 'healthex')
+                       ON CONFLICT (natural_key) DO NOTHING""",
+                    str(_uuid_mod.uuid4()), pid,
+                )
+            count = await conn.fetchval(
+                """SELECT COUNT(*) FROM patient_conditions
+                   WHERE patient_id=$1::uuid AND code='K80.20'
+                     AND onset_date='2024-08-15'""",
+                pid,
+            )
+        assert count == 1, (
+            f"Same-day, same-code ICD-10 inserts must collapse to 1, got {count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_icd10_same_day_different_codes_preserved(
+        self, db_pool, healthex_patient
+    ):
+        pid = healthex_patient
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO patient_conditions
+                       (id, patient_id, code, display, system,
+                        onset_date, clinical_status, data_source)
+                   VALUES ($1::uuid, $2::uuid, 'K80.20', 'Gallstones',
+                           'http://hl7.org/fhir/sid/icd-10',
+                           '2024-08-15', 'active', 'healthex')
+                   ON CONFLICT (natural_key) DO NOTHING""",
+                str(_uuid_mod.uuid4()), pid,
+            )
+            await conn.execute(
+                """INSERT INTO patient_conditions
+                       (id, patient_id, code, display, system,
+                        onset_date, clinical_status, data_source)
+                   VALUES ($1::uuid, $2::uuid, 'I10', 'Essential hypertension',
+                           'http://hl7.org/fhir/sid/icd-10',
+                           '2024-08-15', 'active', 'healthex')
+                   ON CONFLICT (natural_key) DO NOTHING""",
+                str(_uuid_mod.uuid4()), pid,
+            )
+            count = await conn.fetchval(
+                """SELECT COUNT(*) FROM patient_conditions
+                   WHERE patient_id=$1::uuid AND onset_date='2024-08-15'""",
+                pid,
+            )
+        assert count == 2, (
+            f"Two ICD-10 codes on the same day must remain distinct, got {count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_icd10_same_code_different_days_preserved(
+        self, db_pool, healthex_patient
+    ):
+        pid = healthex_patient
+        async with db_pool.acquire() as conn:
+            for d in ("2024-01-10", "2024-08-15"):
+                await conn.execute(
+                    """INSERT INTO patient_conditions
+                           (id, patient_id, code, display, system,
+                            onset_date, clinical_status, data_source)
+                       VALUES ($1::uuid, $2::uuid, 'K80.20', 'Gallstones',
+                               'http://hl7.org/fhir/sid/icd-10',
+                               $3::date, 'active', 'healthex')
+                       ON CONFLICT (natural_key) DO NOTHING""",
+                    str(_uuid_mod.uuid4()), pid, d,
+                )
+            count = await conn.fetchval(
+                """SELECT COUNT(*) FROM patient_conditions
+                   WHERE patient_id=$1::uuid AND code='K80.20'""",
+                pid,
+            )
+        assert count == 2, (
+            f"Same ICD-10 code on different days must remain distinct, got {count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rxnorm_same_day_same_code_collapses(
+        self, db_pool, healthex_patient
+    ):
+        pid = healthex_patient
+        async with db_pool.acquire() as conn:
+            for _ in range(3):
+                await conn.execute(
+                    """INSERT INTO patient_medications
+                           (id, patient_id, code, display, system,
+                            status, authored_on, data_source)
+                       VALUES ($1::uuid, $2::uuid, '197361', 'Lisinopril 10 MG',
+                               'http://www.nlm.nih.gov/research/umls/rxnorm',
+                               'active', '2024-08-15', 'healthex')
+                       ON CONFLICT (natural_key) DO NOTHING""",
+                    str(_uuid_mod.uuid4()), pid,
+                )
+            count = await conn.fetchval(
+                """SELECT COUNT(*) FROM patient_medications
+                   WHERE patient_id=$1::uuid AND code='197361'
+                     AND authored_on='2024-08-15'""",
+                pid,
+            )
+        assert count == 1, (
+            f"Same-day, same-code RxNorm inserts must collapse to 1, got {count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rxnorm_same_day_different_codes_preserved(
+        self, db_pool, healthex_patient
+    ):
+        pid = healthex_patient
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO patient_medications
+                       (id, patient_id, code, display, system,
+                        status, authored_on, data_source)
+                   VALUES ($1::uuid, $2::uuid, '197361', 'Lisinopril 10 MG',
+                           'http://www.nlm.nih.gov/research/umls/rxnorm',
+                           'active', '2024-08-15', 'healthex')
+                   ON CONFLICT (natural_key) DO NOTHING""",
+                str(_uuid_mod.uuid4()), pid,
+            )
+            await conn.execute(
+                """INSERT INTO patient_medications
+                       (id, patient_id, code, display, system,
+                        status, authored_on, data_source)
+                   VALUES ($1::uuid, $2::uuid, '314076', 'Atorvastatin 20 MG',
+                           'http://www.nlm.nih.gov/research/umls/rxnorm',
+                           'active', '2024-08-15', 'healthex')
+                   ON CONFLICT (natural_key) DO NOTHING""",
+                str(_uuid_mod.uuid4()), pid,
+            )
+            count = await conn.fetchval(
+                """SELECT COUNT(*) FROM patient_medications
+                   WHERE patient_id=$1::uuid AND authored_on='2024-08-15'""",
+                pid,
+            )
+        assert count == 2, (
+            f"Two RxNorm codes on the same day must remain distinct, got {count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rxnorm_same_code_different_days_preserved(
+        self, db_pool, healthex_patient
+    ):
+        pid = healthex_patient
+        async with db_pool.acquire() as conn:
+            for d in ("2024-01-10", "2024-08-15"):
+                await conn.execute(
+                    """INSERT INTO patient_medications
+                           (id, patient_id, code, display, system,
+                            status, authored_on, data_source)
+                       VALUES ($1::uuid, $2::uuid, '197361', 'Lisinopril 10 MG',
+                               'http://www.nlm.nih.gov/research/umls/rxnorm',
+                               'active', $3::date, 'healthex')
+                       ON CONFLICT (natural_key) DO NOTHING""",
+                    str(_uuid_mod.uuid4()), pid, d,
+                )
+            count = await conn.fetchval(
+                """SELECT COUNT(*) FROM patient_medications
+                   WHERE patient_id=$1::uuid AND code='197361'""",
+                pid,
+            )
+        assert count == 2, (
+            f"Same RxNorm code on different days must remain distinct, got {count}"
         )
