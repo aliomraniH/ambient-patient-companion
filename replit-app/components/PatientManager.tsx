@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { createPatient, updatePatient, deletePatient } from "@/lib/actions";
+import { formatDateOnly } from "@/lib/format-date";
 
 interface Patient {
   id: string;
@@ -247,11 +248,7 @@ export default function PatientManager({ patients: initialPatients }: PatientMan
                     : p.first_name || p.last_name || "\u2014"}
                 </td>
                 <td className="py-2">{p.mrn}</td>
-                <td className="py-2">
-                  {p.birth_date
-                    ? new Date(p.birth_date).toLocaleDateString()
-                    : "\u2014"}
-                </td>
+                <td className="py-2">{formatDateOnly(p.birth_date)}</td>
                 <td className="py-2">{p.gender || "\u2014"}</td>
                 <td className="py-2 flex gap-1">
                   <button

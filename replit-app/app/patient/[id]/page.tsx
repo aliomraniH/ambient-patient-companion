@@ -1,5 +1,6 @@
 import { query } from "@/lib/db";
 import PatientTabs from "@/components/PatientTabs";
+import { formatDateOnly } from "@/lib/format-date";
 
 export const dynamic = "force-dynamic";
 
@@ -71,11 +72,8 @@ export default async function PatientPage({ params }: PatientPageProps) {
           {patient.first_name} {patient.last_name}
         </h1>
         <p className="text-sm text-gray-500">
-          DOB:{" "}
-          {patient.birth_date
-            ? new Date(patient.birth_date).toLocaleDateString()
-            : "—"}{" "}
-          | Gender: {patient.gender || "—"}
+          DOB: {formatDateOnly(patient.birth_date)} | Gender:{" "}
+          {patient.gender || "—"}
         </p>
       </div>
 
