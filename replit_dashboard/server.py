@@ -15,10 +15,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from dotenv import dotenv_values, set_key
 import httpx
+import importlib.util
 import os
+import sys
 import time
 import json
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Refresh-monitor helper — imported from scripts/refresh_atom_pressure_scores.py
+# ---------------------------------------------------------------------------
+
+def _load_refresh_module():
+    """Load the refresh script as a module without requiring scripts/ to be a package."""
+    script_path = Path(__file__).resolve().parent.parent / "scripts" / "refresh_atom_pressure_scores.py"
+    spec = importlib.util.spec_from_file_location(
+        "_refresh_atom_pressure_scores", str(script_path)
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+try:
+    _REFRESH_MOD = _load_refresh_module()
+except Exception:  # pragma: no cover — only happens if scripts/ is missing
+    _REFRESH_MOD = None
 
 # ---------------------------------------------------------------------------
 # Key catalogue
@@ -550,6 +572,40 @@ def _build_mcp_config(domain: str) -> dict:
                 "url": url,
             }
     return {"mcpServers": servers}
+
+
+# ---- Chase-list refresh freshness monitor ---------------------------------
+
+@app.get("/api/health/atom-pressure-refresh")
+async def health_atom_pressure_refresh():
+    """Report freshness of the atom_pressure_scores refresh.
+
+    The dashboard banner polls this endpoint and shows a visible alert
+    when ``status`` is anything other than ``fresh``. Pages/cron jobs can
+    also hit it and treat ``alert: true`` as a paging condition.
+    """
+    if _REFRESH_MOD is None:
+        return {
+            "status": "error",
+            "alert": True,
+            "message": "refresh_atom_pressure_scores module is not importable",
+            "threshold_hours": None,
+            "last_refresh": None,
+            "age_hours": None,
+        }
+    dsn = os.environ.get("DATABASE_URL", "")
+    if not dsn:
+        return {
+            "status": "error",
+            "alert": True,
+            "message": "DATABASE_URL not set — cannot check refresh freshness",
+            "threshold_hours": None,
+            "last_refresh": None,
+            "age_hours": None,
+        }
+    report = await _REFRESH_MOD.freshness_status(dsn)
+    report["alert"] = report["status"] != "fresh"
+    return report
 
 
 # ---- Claude config generation ---------------------------------------------

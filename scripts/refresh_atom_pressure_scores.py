@@ -114,8 +114,36 @@ async def run_daemon(dsn: str) -> int:
             return 0
 
 
-async def check_freshness(dsn: str) -> int:
-    conn = await asyncpg.connect(dsn)
+async def freshness_status(dsn: str) -> dict:
+    """Return a structured freshness report for monitoring.
+
+    Returned shape (always contains ``status`` and ``threshold_hours``):
+        {
+          "status":          "fresh" | "stale" | "never" | "unknown" | "error",
+          "threshold_hours": float,
+          "last_refresh":    ISO timestamp string | None,
+          "age_hours":       float | None,
+          "message":         human-readable summary,
+        }
+
+    ``status`` values:
+      * ``fresh``   — last refresh is within the threshold.
+      * ``stale``   — last refresh is older than the threshold (alert!).
+      * ``never``   — no successful refresh has ever been recorded.
+      * ``unknown`` — recorded value is malformed (alert; treat as stale).
+      * ``error``   — could not reach the database (alert; treat as stale).
+    """
+    threshold = FRESHNESS_THRESHOLD_HOURS
+    try:
+        conn = await asyncpg.connect(dsn)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "threshold_hours": threshold,
+            "last_refresh": None,
+            "age_hours": None,
+            "message": f"Cannot reach database to check freshness: {exc}",
+        }
     try:
         row = await conn.fetchrow(
             "SELECT value, updated_at FROM system_config WHERE key = $1",
@@ -125,11 +153,16 @@ async def check_freshness(dsn: str) -> int:
         await conn.close()
 
     if row is None:
-        logger.error(
-            "No %s entry in system_config — has the refresh ever run?",
-            LAST_REFRESH_KEY,
-        )
-        return 2
+        return {
+            "status": "never",
+            "threshold_hours": threshold,
+            "last_refresh": None,
+            "age_hours": None,
+            "message": (
+                f"No {LAST_REFRESH_KEY} entry in system_config — "
+                "has the refresh ever run?"
+            ),
+        }
 
     # `value` is the source of truth for "when did the refresh actually
     # happen" — `updated_at` only records when the row was last touched
@@ -137,40 +170,70 @@ async def check_freshness(dsn: str) -> int:
     # updated_at, so we must not fall back to updated_at here).
     value = (row["value"] or "").strip()
     if not value or value.lower() == "never":
-        logger.error(
-            "%s is %r — refresh has never completed successfully",
-            LAST_REFRESH_KEY,
-            value or None,
-        )
-        return 2
+        return {
+            "status": "never",
+            "threshold_hours": threshold,
+            "last_refresh": None,
+            "age_hours": None,
+            "message": (
+                f"{LAST_REFRESH_KEY} is {value or None!r} — refresh has "
+                "never completed successfully"
+            ),
+        }
     try:
         last_refresh = datetime.fromisoformat(value)
     except ValueError:
-        logger.error(
-            "%s value %r is not an ISO timestamp — cannot evaluate freshness",
-            LAST_REFRESH_KEY,
-            value,
-        )
-        return 2
+        return {
+            "status": "unknown",
+            "threshold_hours": threshold,
+            "last_refresh": value,
+            "age_hours": None,
+            "message": (
+                f"{LAST_REFRESH_KEY} value {value!r} is not an ISO "
+                "timestamp — cannot evaluate freshness"
+            ),
+        }
     if last_refresh.tzinfo is None:
         last_refresh = last_refresh.replace(tzinfo=timezone.utc)
     age_hours = (datetime.now(timezone.utc) - last_refresh).total_seconds() / 3600.0
-    if age_hours > FRESHNESS_THRESHOLD_HOURS:
-        logger.error(
-            "atom_pressure_scores is STALE: last refresh %.2fh ago "
-            "(threshold %.2fh)",
-            age_hours,
-            FRESHNESS_THRESHOLD_HOURS,
-        )
-        return 1
 
-    logger.info(
-        "atom_pressure_scores is fresh: last refresh %.2fh ago "
-        "(threshold %.2fh)",
-        age_hours,
-        FRESHNESS_THRESHOLD_HOURS,
-    )
-    return 0
+    if age_hours > threshold:
+        return {
+            "status": "stale",
+            "threshold_hours": threshold,
+            "last_refresh": last_refresh.isoformat(),
+            "age_hours": age_hours,
+            "message": (
+                f"atom_pressure_scores is STALE: last refresh "
+                f"{age_hours:.2f}h ago (threshold {threshold:.2f}h)"
+            ),
+        }
+
+    return {
+        "status": "fresh",
+        "threshold_hours": threshold,
+        "last_refresh": last_refresh.isoformat(),
+        "age_hours": age_hours,
+        "message": (
+            f"atom_pressure_scores is fresh: last refresh "
+            f"{age_hours:.2f}h ago (threshold {threshold:.2f}h)"
+        ),
+    }
+
+
+async def check_freshness(dsn: str) -> int:
+    """CLI freshness probe — exit 0 fresh, 1 stale, 2 never/unknown/error."""
+    report = await freshness_status(dsn)
+    status = report["status"]
+    if status == "fresh":
+        logger.info(report["message"])
+        return 0
+    if status == "stale":
+        logger.error(report["message"])
+        return 1
+    # never | unknown | error
+    logger.error(report["message"])
+    return 2
 
 
 def _require_dsn() -> str:
