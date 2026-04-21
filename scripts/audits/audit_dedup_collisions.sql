@@ -112,7 +112,7 @@ SELECT
     COUNT(DISTINCT COALESCE(data_source,   '<NULL>'))       AS distinct_data_source,
     array_agg(DISTINCT source_system)                       AS source_systems,
     array_agg(DISTINCT data_source)                         AS data_sources
-  FROM _pre_012_clinical_events_backup
+  FROM _pre_012_encounters_backup
  GROUP BY patient_id,
           COALESCE(NULLIF(event_type, ''), 'NOTYPE'),
           event_date,
@@ -136,7 +136,7 @@ SELECT
     COUNT(DISTINCT COALESCE(triggered_critical::text,   '<NULL>')) AS distinct_triggered,
     array_agg(DISTINCT score)                               AS scores,
     array_agg(DISTINCT band)                                AS bands
-  FROM _pre_012_behavioral_screenings_backup
+  FROM _pre_012_screenings_backup
  GROUP BY patient_id, instrument_key, administered_at
 HAVING COUNT(*) > 1
    AND (COUNT(DISTINCT COALESCE(score::text,              '<NULL>')) > 1
@@ -202,7 +202,7 @@ SELECT 'clinical_events_collisions_total',
        COUNT(*)
   FROM (
     SELECT 1
-      FROM _pre_012_clinical_events_backup
+      FROM _pre_012_encounters_backup
      GROUP BY patient_id,
               COALESCE(NULLIF(event_type, ''), 'NOTYPE'),
               event_date,
@@ -214,7 +214,7 @@ SELECT 'clinical_events_collisions_with_diffs',
        COUNT(*)
   FROM (
     SELECT 1
-      FROM _pre_012_clinical_events_backup
+      FROM _pre_012_encounters_backup
      GROUP BY patient_id,
               COALESCE(NULLIF(event_type, ''), 'NOTYPE'),
               event_date,
@@ -228,7 +228,7 @@ SELECT 'behavioral_screenings_collisions_total',
        COUNT(*)
   FROM (
     SELECT 1
-      FROM _pre_012_behavioral_screenings_backup
+      FROM _pre_012_screenings_backup
      GROUP BY patient_id, instrument_key, administered_at
     HAVING COUNT(*) > 1
   ) g
@@ -237,7 +237,7 @@ SELECT 'behavioral_screenings_collisions_with_diffs',
        COUNT(*)
   FROM (
     SELECT 1
-      FROM _pre_012_behavioral_screenings_backup
+      FROM _pre_012_screenings_backup
      GROUP BY patient_id, instrument_key, administered_at
     HAVING COUNT(*) > 1
        AND (COUNT(DISTINCT COALESCE(score::text,              '<NULL>')) > 1
