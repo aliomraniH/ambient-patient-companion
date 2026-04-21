@@ -445,6 +445,18 @@ timestamp of every successful refresh to
 `ATOM_PRESSURE_FRESHNESS_THRESHOLD_HOURS` (default 26h), 1 when stale,
 2 when never run.
 
+**On-call paging**: `scripts/page_chase_refresh_alert.py` runs as a
+sibling daemon (also launched by `start.sh`). It polls
+`/api/health/atom-pressure-refresh` every
+`CHASE_REFRESH_PAGER_INTERVAL_MINUTES` (default 60) and, when the
+endpoint returns `alert: true`, fires a Slack message
+(`CHASE_REFRESH_SLACK_WEBHOOK_URL` or `SLACK_WEBHOOK_URL`) and/or an
+email (`CHASE_REFRESH_PAGER_EMAIL_TO` + `SMTP_HOST`/`SMTP_*`). The
+notification names the failure mode (`stale`/`never`/`error`) and links
+to the dashboard (`CHASE_REFRESH_DASHBOARD_URL`, falling back to
+`$REPLIT_DEV_DOMAIN`). De-dup: re-pages only on status change or after
+`CHASE_REFRESH_PAGER_REPAGE_HOURS` (default 6h) of continued failure.
+
 **Migration 012 immutability fix**: original draft used `date::text` and
 `extract(epoch from timestamptz)` in STORED generated columns, both of which
 PG 16 marks STABLE not IMMUTABLE. Patched to:

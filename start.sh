@@ -39,6 +39,17 @@ python scripts/refresh_atom_pressure_scores.py &
 REFRESH_PID=$!
 echo "[start.sh] atom_pressure_scores refresh daemon started (PID $REFRESH_PID)"
 
+# 4c. On-call pager for the chase-list refresh.
+#     Polls /api/health/atom-pressure-refresh every
+#     CHASE_REFRESH_PAGER_INTERVAL_MINUTES (default 60) and fires Slack
+#     and/or email notifications when the response has alert: true, so
+#     the dashboard banner is no longer the only signal that the daily
+#     refresh has stopped. Configure via CHASE_REFRESH_SLACK_WEBHOOK_URL
+#     and/or CHASE_REFRESH_PAGER_EMAIL_TO + SMTP_*.
+python scripts/page_chase_refresh_alert.py &
+PAGER_PID=$!
+echo "[start.sh] chase-list refresh pager started (PID $PAGER_PID)"
+
 # 5. Next.js — foreground (production build must exist; built in build step)
 echo "[start.sh] Starting Next.js production server (port 5000)..."
 cd replit-app && npm run start
