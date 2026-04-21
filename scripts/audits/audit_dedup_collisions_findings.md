@@ -75,3 +75,24 @@ psql "$DATABASE_URL" -f scripts/audits/audit_dedup_collisions.sql
 
 The script is read-only and safe to run in any environment that has the
 `_pre_012_*_backup` tables.
+
+## Re-check log
+
+### 2026-04-21 — production still pre-migration
+
+Re-ran the existence checks against the production read-replica (task #12):
+
+| Check                                                            | Result |
+|------------------------------------------------------------------|-------:|
+| `patient_conditions.natural_key` column exists in production     |      0 |
+| `patient_medications.natural_key` column exists in production    |      0 |
+| `_pre_012_*_backup` tables present in production                 |      0 |
+
+Migration 012 has therefore still not shipped to production. There is no
+production dedup to audit and no backup snapshots to compare against, so
+the audit script was not run and no clinician review was triggered.
+**Status unchanged from the original task #10 review.** This task should
+be re-opened the next time migration 012 is deployed; at that point run
+`audit_dedup_collisions.sql` against `$DATABASE_URL` (production) and
+have a clinician review any flagged groups before deciding whether
+`015_widen_natural_key.sql` is needed.
