@@ -124,3 +124,7 @@ DATA_TRACK = "synthea"
 deploymentTarget = "vm"
 run = ["bash", "start.sh"]
 build = ["bash", "-c", "pip install -r requirements.txt && pip install -r replit_dashboard/requirements.txt && cd replit-app && npm ci && npm run build"]
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 120000
