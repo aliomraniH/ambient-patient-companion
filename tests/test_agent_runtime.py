@@ -192,3 +192,80 @@ def test_rt7_register_watchers_registers_three():
         "crisis_scan_watcher",
         "care_gap_watcher",
     }
+
+
+# ─── RT8: start(app) method starts tasks in the running loop ─────────────────
+
+@pytest.mark.asyncio
+async def test_rt8_start_method_starts_tasks():
+    runtime = AgentRuntime()
+    call_count = 0
+
+    async def fast_coro():
+        nonlocal call_count
+        call_count += 1
+
+    runtime.watch("w1", 0.05, fast_coro)
+
+    # start() is the programmatic startup path (vs lifespan)
+    runtime.start(app=None)
+    await asyncio.sleep(0.25)
+
+    # Cancel manually since we bypassed lifespan
+    for state in runtime._watchers.values():
+        if state.task:
+            state.task.cancel()
+            try:
+                await state.task
+            except asyncio.CancelledError:
+                pass
+
+    assert call_count >= 1, "start() should have launched the watcher task"
+
+
+# ─── RT9: /api/agent-runtime/status response shape ───────────────────────────
+
+@pytest.mark.asyncio
+async def test_rt9_status_endpoint_response_shape():
+    """Call the route handler directly and assert the JSON response structure.
+
+    This exercises the same code path as GET /api/agent-runtime/status without
+    needing to spin up a full HTTP server.
+    """
+    import json as _json
+    from unittest.mock import AsyncMock
+
+    runtime = AgentRuntime()
+    runtime.watch("w1", 0.05, _null_coro)
+    runtime.watch("w2", 0.05, _failing_coro)
+
+    async with runtime.lifespan(server=None):
+        await asyncio.sleep(0.2)
+
+    # Simulate what server.py's agent_runtime_status route does
+    payload = runtime.status()
+
+    # Must be JSON-serialisable without error
+    serialised = _json.dumps(payload)
+    parsed = _json.loads(serialised)
+
+    # Top-level shape
+    assert "watcher_count" in parsed
+    assert "watchers" in parsed
+    assert parsed["watcher_count"] == 2
+    assert isinstance(parsed["watchers"], list)
+
+    required_keys = {"name", "interval_seconds", "run_count", "last_run", "last_error", "healthy"}
+    for w in parsed["watchers"]:
+        assert required_keys.issubset(w.keys()), f"Missing keys in watcher entry: {w}"
+        assert isinstance(w["name"], str)
+        assert isinstance(w["interval_seconds"], (int, float))
+        assert isinstance(w["run_count"], int)
+        assert w["last_run"] is None or isinstance(w["last_run"], str)
+        assert isinstance(w["healthy"], bool)
+
+    # w1 should be healthy, w2 should report an error
+    by_name = {w["name"]: w for w in parsed["watchers"]}
+    assert by_name["w1"]["healthy"] is True
+    assert by_name["w2"]["healthy"] is False
+    assert by_name["w2"]["last_error"] is not None

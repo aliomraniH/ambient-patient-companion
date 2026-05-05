@@ -154,19 +154,35 @@ class AgentRuntime:
                 state.task.cancel()
                 logger.info("AgentRuntime: cancelled watcher '%s'", state.name)
 
+    def start(self, app: Any = None) -> None:
+        """Start all registered watchers immediately in the current event loop.
+
+        This is the programmatic startup path — call it when you manage the
+        event loop yourself (e.g. in tests or custom ASGI wrappers). For
+        FastMCP / Starlette integration, prefer passing ``lifespan=runtime.lifespan``
+        to the ``FastMCP`` constructor so startup and shutdown are tied to the
+        server's own lifecycle.
+
+        Args:
+            app: Unused; accepted for API symmetry with Starlette lifespan
+                 callables that receive the application instance.
+        """
+        self._start_tasks()
+        logger.info("AgentRuntime.start(): %d watcher(s) started", len(self._watchers))
+
     @asynccontextmanager
     async def lifespan(self, server: Any) -> AsyncIterator[dict]:
         """FastMCP / Starlette lifespan context manager.
 
         Pass as ``lifespan=runtime.lifespan`` to the ``FastMCP`` constructor.
-        Starts all registered watchers on entry; cancels and awaits them on
-        exit so the process shuts down cleanly.
+        Starts all registered watchers on entry (via ``start()``) and cancels
+        + awaits them on exit so the process shuts down cleanly.
 
         Example::
 
             mcp = FastMCP("my-server", lifespan=runtime.lifespan)
         """
-        self._start_tasks()
+        self.start(server)
         logger.info("AgentRuntime: %d watcher(s) active", len(self._watchers))
         try:
             yield {}

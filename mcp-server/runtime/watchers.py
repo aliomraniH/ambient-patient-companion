@@ -59,7 +59,7 @@ async def _checkin_atom_watcher() -> None:
                    dc.mood, dc.mood_numeric, dc.stress_level,
                    dc.sleep_hours, dc.sleep_quality, dc.notes
             FROM daily_checkins dc
-            WHERE dc.checkin_date = CURRENT_DATE
+            WHERE dc.completed_at >= NOW() - INTERVAL '10 minutes'
               AND NOT EXISTS (
                 SELECT 1 FROM behavioral_signal_atoms bsa
                 WHERE bsa.source_type = 'checkin'
