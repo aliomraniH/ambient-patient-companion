@@ -409,6 +409,162 @@ class TestLoadPersistedState:
         assert state.last_run is None
         assert state.last_error is None
 
+
+# ---------------------------------------------------------------------------
+# Stale watcher cleanup (pruning orphaned system_config rows)
+# ---------------------------------------------------------------------------
+
+
+class TestStaleWatcherCleanup:
+    """Verify that _load_persisted_state deletes rows for watchers that are no
+    longer registered and leaves rows for watchers that ARE registered."""
+
+    async def test_stale_rows_trigger_delete_execute_call(self):
+        """execute() must be called with a DELETE when stale rows exist."""
+        runtime = AgentRuntime()
+        # No watchers registered — every DB row is stale.
+
+        stale_row = _make_row(
+            f"{_KEY_PREFIX}orphan_watcher",
+            json.dumps({"run_count": 5, "last_run": None, "last_error": None}),
+        )
+        pool = _make_pool(fetch_return=[stale_row])
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=pool)):
+            await runtime._load_persisted_state()
+
+        pool.execute.assert_awaited_once()
+        sql = pool.execute.call_args[0][0]
+        assert "DELETE" in sql.upper(), "execute() must issue a DELETE for stale rows"
+
+    async def test_stale_row_key_is_passed_to_delete(self):
+        """The stale key must appear in the list passed to the DELETE statement."""
+        runtime = AgentRuntime()
+
+        stale_key = f"{_KEY_PREFIX}vanished_watcher"
+        stale_row = _make_row(
+            stale_key,
+            json.dumps({"run_count": 2, "last_run": None, "last_error": None}),
+        )
+        pool = _make_pool(fetch_return=[stale_row])
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=pool)):
+            await runtime._load_persisted_state()
+
+        delete_keys = pool.execute.call_args[0][1]
+        assert stale_key in delete_keys, (
+            f"Expected stale key '{stale_key}' in DELETE args; got {delete_keys}"
+        )
+
+    async def test_multiple_stale_rows_all_deleted(self):
+        """All stale keys must be passed together to a single DELETE call."""
+        runtime = AgentRuntime()
+        # No watchers registered.
+
+        stale_keys = [f"{_KEY_PREFIX}old_watcher_{i}" for i in range(3)]
+        rows = [
+            _make_row(k, json.dumps({"run_count": i, "last_run": None, "last_error": None}))
+            for i, k in enumerate(stale_keys)
+        ]
+        pool = _make_pool(fetch_return=rows)
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=pool)):
+            await runtime._load_persisted_state()
+
+        pool.execute.assert_awaited_once()
+        delete_keys = pool.execute.call_args[0][1]
+        for key in stale_keys:
+            assert key in delete_keys, f"Stale key '{key}' missing from DELETE args"
+
+    async def test_registered_watcher_row_is_not_deleted(self):
+        """A row whose watcher IS registered must not be included in the DELETE."""
+        runtime = AgentRuntime()
+        runtime.watch("active_watcher", 60, AsyncMock())
+
+        rows = [
+            _make_row(
+                f"{_KEY_PREFIX}active_watcher",
+                json.dumps({"run_count": 7, "last_run": None, "last_error": None}),
+            ),
+        ]
+        pool = _make_pool(fetch_return=rows)
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=pool)):
+            await runtime._load_persisted_state()
+
+        # No stale rows — execute (DELETE) should not be called at all.
+        pool.execute.assert_not_awaited()
+
+    async def test_mixed_stale_and_active_rows(self):
+        """Only the stale key is deleted; the active key is left intact."""
+        runtime = AgentRuntime()
+        runtime.watch("live_watcher", 60, AsyncMock())
+
+        stale_key = f"{_KEY_PREFIX}dead_watcher"
+        active_key = f"{_KEY_PREFIX}live_watcher"
+        rows = [
+            _make_row(stale_key, json.dumps({"run_count": 3, "last_run": None, "last_error": None})),
+            _make_row(active_key, json.dumps({"run_count": 1, "last_run": None, "last_error": None})),
+        ]
+        pool = _make_pool(fetch_return=rows)
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=pool)):
+            await runtime._load_persisted_state()
+
+        pool.execute.assert_awaited_once()
+        delete_keys = pool.execute.call_args[0][1]
+        assert stale_key in delete_keys, "Stale key must be in DELETE args"
+        assert active_key not in delete_keys, "Active key must NOT be in DELETE args"
+
+    async def test_active_watcher_state_still_loaded_when_stale_rows_present(self):
+        """After pruning, the legitimate watcher's state is still restored from its row."""
+        runtime = AgentRuntime()
+        runtime.watch("real_watcher", 60, AsyncMock())
+
+        rows = [
+            _make_row(
+                f"{_KEY_PREFIX}stale_watcher",
+                json.dumps({"run_count": 99, "last_run": None, "last_error": None}),
+            ),
+            _make_row(
+                f"{_KEY_PREFIX}real_watcher",
+                json.dumps({"run_count": 12, "last_run": None, "last_error": None}),
+            ),
+        ]
+        pool = _make_pool(fetch_return=rows)
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=pool)):
+            await runtime._load_persisted_state()
+
+        assert runtime._watchers["real_watcher"].run_count == 12
+
+    async def test_no_rows_means_no_delete_called(self):
+        """With an empty DB there is nothing stale — execute must not be called."""
+        runtime = AgentRuntime()
+
+        pool = _make_pool(fetch_return=[])
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=pool)):
+            await runtime._load_persisted_state()
+
+        pool.execute.assert_not_awaited()
+
+    async def test_delete_failure_is_swallowed(self):
+        """If the DELETE raises, _load_persisted_state must not propagate the error."""
+        runtime = AgentRuntime()
+
+        stale_row = _make_row(
+            f"{_KEY_PREFIX}broken_watcher",
+            json.dumps({"run_count": 1, "last_run": None, "last_error": None}),
+        )
+        pool = _make_pool(
+            fetch_return=[stale_row],
+            execute_side_effect=RuntimeError("DELETE failed"),
+        )
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=pool)):
+            await runtime._load_persisted_state()  # must not raise
+
     async def test_multiple_watchers_restored_independently(self):
         """Each registered watcher gets its own state from its own DB row."""
         runtime = AgentRuntime()
@@ -648,3 +804,95 @@ class TestWatcherPersistenceIntegration:
         assert restored.run_count == 42
         assert restored.last_run == dt
         assert restored.last_error == "RuntimeError: out of memory"
+
+    async def test_stale_row_is_deleted_from_db(self, db_pool, watcher_cleanup):
+        """A system_config row for a non-existent watcher must be deleted by _load_persisted_state."""
+        stale_watcher_name = "integ_test_stale_orphan"
+        stale_key = f"{_KEY_PREFIX}{stale_watcher_name}"
+
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO system_config (key, value, updated_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                stale_key,
+                json.dumps({"run_count": 7, "last_run": None, "last_error": None}),
+            )
+
+        row_before = await db_pool.fetchval(
+            "SELECT COUNT(*) FROM system_config WHERE key = $1", stale_key
+        )
+        assert row_before == 1, "Stale row must exist before _load_persisted_state"
+
+        runtime = AgentRuntime()
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime._load_persisted_state()
+
+        row_after = await db_pool.fetchval(
+            "SELECT COUNT(*) FROM system_config WHERE key = $1", stale_key
+        )
+        assert row_after == 0, "Stale row must be deleted after _load_persisted_state"
+
+    async def test_active_watcher_row_is_not_deleted_from_db(self, db_pool, watcher_cleanup):
+        """The system_config row for a registered watcher must survive _load_persisted_state."""
+        active_watcher_name = "integ_test_active_kept"
+        active_key = f"{_KEY_PREFIX}{active_watcher_name}"
+
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO system_config (key, value, updated_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                active_key,
+                json.dumps({"run_count": 3, "last_run": None, "last_error": None}),
+            )
+
+        runtime = AgentRuntime()
+        runtime.watch(active_watcher_name, 60.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime._load_persisted_state()
+
+        row_after = await db_pool.fetchval(
+            "SELECT COUNT(*) FROM system_config WHERE key = $1", active_key
+        )
+        assert row_after == 1, "Active watcher row must NOT be deleted"
+
+    async def test_stale_deleted_active_kept_in_same_load(self, db_pool, watcher_cleanup):
+        """When stale and active rows coexist, only the stale row is deleted."""
+        stale_name = "integ_test_mixed_stale"
+        active_name = "integ_test_mixed_active"
+        stale_key = f"{_KEY_PREFIX}{stale_name}"
+        active_key = f"{_KEY_PREFIX}{active_name}"
+
+        async with db_pool.acquire() as conn:
+            for key in (stale_key, active_key):
+                await conn.execute(
+                    """
+                    INSERT INTO system_config (key, value, updated_at)
+                    VALUES ($1, $2, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                    """,
+                    key,
+                    json.dumps({"run_count": 1, "last_run": None, "last_error": None}),
+                )
+
+        runtime = AgentRuntime()
+        runtime.watch(active_name, 60.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime._load_persisted_state()
+
+        stale_count = await db_pool.fetchval(
+            "SELECT COUNT(*) FROM system_config WHERE key = $1", stale_key
+        )
+        active_count = await db_pool.fetchval(
+            "SELECT COUNT(*) FROM system_config WHERE key = $1", active_key
+        )
+        assert stale_count == 0, "Stale row must be deleted"
+        assert active_count == 1, "Active watcher row must be preserved"
