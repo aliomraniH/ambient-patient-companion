@@ -173,6 +173,28 @@ class AgentRuntime:
             )
             return
 
+        stale_keys = [
+            row["key"]
+            for row in rows
+            if row["key"][len(_KEY_PREFIX):] not in self._watchers
+        ]
+        if stale_keys:
+            logger.warning(
+                "AgentRuntime: pruning %d stale watcher_state row(s) with no "
+                "matching watcher: %s",
+                len(stale_keys),
+                [k[len(_KEY_PREFIX):] for k in stale_keys],
+            )
+            try:
+                await pool.execute(
+                    "DELETE FROM system_config WHERE key = ANY($1::text[])",
+                    stale_keys,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "AgentRuntime: failed to prune stale watcher state rows: %s", exc,
+                )
+
         for row in rows:
             name = row["key"][len(_KEY_PREFIX):]
             if name not in self._watchers:
