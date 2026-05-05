@@ -407,6 +407,78 @@ code { font-family: 'SF Mono','Fira Code','Consolas', monospace; font-size: 11.5
 .items-center { align-items: center; }
 .text-muted { color: var(--muted); }
 .text-xs { font-size: 11px; }
+
+/* ── Watcher health ──────────────────────────── */
+.watcher-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.watcher-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: relative;
+}
+.watcher-card.watcher-error  { border-left: 3px solid var(--danger); }
+.watcher-card.watcher-healthy { border-left: 3px solid var(--ok); }
+.watcher-card.watcher-pending { border-left: 3px solid #cbd5e1; }
+.watcher-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  word-break: break-word;
+}
+.watcher-meta {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.watcher-error-msg {
+  font-size: 11px;
+  color: var(--danger);
+  background: #fee2e2;
+  border-radius: 5px;
+  padding: 4px 7px;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.badge-watcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10.5px;
+  font-weight: 700;
+  align-self: flex-start;
+}
+.badge-w-healthy { background: #dcfce7; color: #166534; }
+.badge-w-error   { background: #fee2e2; color: #991b1b; }
+.badge-w-pending { background: #f1f5f9; color: #64748b; }
+.watcher-section-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.watcher-section-title {
+  font-size: 14px;
+  font-weight: 700;
+}
+.watcher-count-badge {
+  background: #e0e7ff;
+  color: var(--accent);
+  border-radius: 99px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 700;
+}
 </style>
 </head>
 <body>
@@ -441,6 +513,18 @@ code { font-family: 'SF Mono','Fira Code','Consolas', monospace; font-size: 11.5
     </div>
   </div>
 
+  <!-- ── Background watcher alert banner ──────────────────────── -->
+  <div id="watcherAlertBanner" style="display:none;margin-bottom:16px;padding:14px 16px;border-radius:8px;border:1px solid;font-size:13px;line-height:1.4">
+    <div style="display:flex;align-items:flex-start;gap:10px">
+      <span id="watcherAlertIcon" style="font-size:18px;line-height:1">🚨</span>
+      <div style="flex:1">
+        <div id="watcherAlertTitle" style="font-weight:600;margin-bottom:2px">Background watcher failure</div>
+        <div id="watcherAlertMsg" style="opacity:0.9"></div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="checkWatcherHealth()" style="white-space:nowrap">↺ Re-check</button>
+    </div>
+  </div>
+
   <!-- ── Quick status bar ─────────────────────────────────────── -->
   <div class="checklist-bar" id="checklistBar">
     <div class="check-item"><span class="status-dot dot-neutral" id="dotDB"></span> Database</div>
@@ -449,6 +533,19 @@ code { font-family: 'SF Mono','Fira Code','Consolas', monospace; font-size: 11.5
     <div class="check-item"><span class="status-dot dot-neutral" id="dotMCP"></span> MCP servers</div>
     <div style="flex:1"></div>
     <button class="btn btn-ghost btn-sm" onclick="runAllTests()">▶ Test all connections</button>
+  </div>
+
+  <!-- ── Background Watchers ─────────────────────────────────── -->
+  <div id="watcherSection">
+    <div class="watcher-section-header">
+      <span class="watcher-section-title">Background Watchers</span>
+      <span class="watcher-count-badge" id="watcherCount">–</span>
+      <button class="btn btn-ghost btn-sm" onclick="checkWatcherHealth()" style="margin-left:auto">↺ Refresh</button>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Autonomous background tasks running in the Skills MCP server.</div>
+    <div class="watcher-grid" id="watcherGrid">
+      <div style="font-size:12px;color:var(--muted);padding:10px 0">Loading watcher status…</div>
+    </div>
   </div>
 
   <!-- ── Tabs ─────────────────────────────────────────────────── -->
@@ -966,6 +1063,102 @@ function esc(s) {
     .replace(/>/g,'&gt;');
 }
 
+// ── Background watcher health ───────────────────────────────────
+function _fmt_last_run(iso) {
+  if (!iso) return 'never';
+  try {
+    const d = new Date(iso);
+    const diffMs = Date.now() - d.getTime();
+    const diffMin = Math.round(diffMs / 60000);
+    if (diffMin < 1)   return 'just now';
+    if (diffMin < 60)  return diffMin + 'm ago';
+    const diffH = Math.round(diffMin / 60);
+    if (diffH < 24)    return diffH + 'h ago';
+    return Math.round(diffH / 24) + 'd ago';
+  } catch { return iso; }
+}
+
+function _watcherCard(w) {
+  const isPending = w.run_count === 0 && !w.last_error;
+  const stateClass = w.last_error ? 'watcher-error' : isPending ? 'watcher-pending' : 'watcher-healthy';
+  const badgeClass = w.last_error ? 'badge-w-error' : isPending ? 'badge-w-pending' : 'badge-w-healthy';
+  const badgeLabel = w.last_error ? '✗ Error' : isPending ? '○ Pending' : '✓ Healthy';
+  const interval = w.interval_seconds >= 3600
+    ? (w.interval_seconds / 3600).toFixed(0) + 'h'
+    : w.interval_seconds >= 60
+    ? (w.interval_seconds / 60).toFixed(0) + 'm'
+    : w.interval_seconds + 's';
+  return `<div class="watcher-card ${stateClass}">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px">
+      <div class="watcher-name">${esc(w.name)}</div>
+      <span class="badge-watcher ${badgeClass}">${badgeLabel}</span>
+    </div>
+    <div class="watcher-meta">
+      Runs every ${interval} &nbsp;·&nbsp; ${w.run_count} run${w.run_count !== 1 ? 's' : ''}<br>
+      Last run: ${_fmt_last_run(w.last_run)}
+    </div>
+    ${w.last_error ? `<div class="watcher-error-msg">${esc(w.last_error)}</div>` : ''}
+  </div>`;
+}
+
+async function checkWatcherHealth() {
+  const banner  = document.getElementById('watcherAlertBanner');
+  const alertIcon  = document.getElementById('watcherAlertIcon');
+  const alertTitle = document.getElementById('watcherAlertTitle');
+  const alertMsg   = document.getElementById('watcherAlertMsg');
+  const grid    = document.getElementById('watcherGrid');
+  const countEl = document.getElementById('watcherCount');
+
+  try {
+    const res  = await fetch('/api/health/agent-runtime');
+    const data = await res.json();
+
+    if (data.unreachable) {
+      countEl.textContent = '?';
+      grid.innerHTML = `<div style="font-size:12px;color:var(--muted);padding:6px 0">Skills MCP server unreachable — watchers unknown.</div>`;
+      banner.style.display     = 'block';
+      banner.style.background  = '#fee2e2';
+      banner.style.borderColor = '#dc2626';
+      banner.style.color       = '#991b1b';
+      alertIcon.textContent    = '🚨';
+      alertTitle.textContent   = 'Skills MCP server unreachable — watcher status unknown';
+      alertMsg.textContent     = data.error || 'Could not reach http://localhost:8002';
+      return;
+    }
+
+    countEl.textContent = data.watcher_count;
+    if (data.watchers.length === 0) {
+      grid.innerHTML = `<div style="font-size:12px;color:var(--muted);padding:6px 0">No watchers registered.</div>`;
+    } else {
+      grid.innerHTML = data.watchers.map(_watcherCard).join('');
+    }
+
+    const unhealthy = data.watchers.filter(w => w.last_error);
+    if (unhealthy.length > 0) {
+      const names = unhealthy.map(w => w.name).join(', ');
+      banner.style.display     = 'block';
+      banner.style.background  = '#fee2e2';
+      banner.style.borderColor = '#dc2626';
+      banner.style.color       = '#991b1b';
+      alertIcon.textContent    = '🚨';
+      alertTitle.textContent   = `${unhealthy.length} watcher${unhealthy.length > 1 ? 's' : ''} reporting errors`;
+      alertMsg.textContent     = names;
+    } else {
+      banner.style.display = 'none';
+    }
+  } catch (e) {
+    countEl.textContent = '?';
+    grid.innerHTML = `<div style="font-size:12px;color:var(--muted);padding:6px 0">Could not fetch watcher status: ${esc(e.message)}</div>`;
+    banner.style.display     = 'block';
+    banner.style.background  = '#fee2e2';
+    banner.style.borderColor = '#dc2626';
+    banner.style.color       = '#991b1b';
+    alertIcon.textContent    = '🚨';
+    alertTitle.textContent   = 'Watcher health check failed';
+    alertMsg.textContent     = e.message;
+  }
+}
+
 // ── Chase-list refresh freshness banner ────────────────────────
 async function checkRefreshFreshness() {
   const banner  = document.getElementById('refreshBanner');
@@ -1023,9 +1216,13 @@ async function checkRefreshFreshness() {
 // a visible banner without anyone reloading the page.
 setInterval(checkRefreshFreshness, 5 * 60 * 1000);
 
+// Re-poll watcher health every 60 seconds
+setInterval(checkWatcherHealth, 60 * 1000);
+
 // ── Init ────────────────────────────────────────────────────────
 loadConfig();
 checkRefreshFreshness();
+checkWatcherHealth();
 </script>
 </body>
 </html>

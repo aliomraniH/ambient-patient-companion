@@ -574,6 +574,47 @@ def _build_mcp_config(domain: str) -> dict:
     return {"mcpServers": servers}
 
 
+# ---- Agent-runtime watcher health ----------------------------------------
+
+@app.get("/api/health/agent-runtime")
+async def health_agent_runtime():
+    """Proxy the Skills MCP server's watcher health snapshot.
+
+    Returns the same shape as GET /api/agent-runtime/status on port 8002,
+    augmented with ``has_errors``, ``error_count``, and ``unreachable`` flags
+    so the dashboard can decide which UI state to render without extra logic.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                "http://localhost:8002/api/agent-runtime/status", timeout=5
+            )
+            if r.status_code == 200:
+                data = r.json()
+                unhealthy = [w for w in data.get("watchers", []) if not w.get("healthy")]
+                data["has_errors"] = len(unhealthy) > 0
+                data["error_count"] = len(unhealthy)
+                data["unreachable"] = False
+                return data
+            return {
+                "error": f"HTTP {r.status_code}",
+                "watcher_count": 0,
+                "watchers": [],
+                "has_errors": True,
+                "error_count": 0,
+                "unreachable": True,
+            }
+    except Exception as exc:
+        return {
+            "error": str(exc)[:200],
+            "watcher_count": 0,
+            "watchers": [],
+            "has_errors": True,
+            "error_count": 0,
+            "unreachable": True,
+        }
+
+
 # ---- Chase-list refresh freshness monitor ---------------------------------
 
 @app.get("/api/health/atom-pressure-refresh")
