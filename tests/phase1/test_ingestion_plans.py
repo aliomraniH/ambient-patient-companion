@@ -252,7 +252,8 @@ def test_ip7_observation_converter_non_numeric():
     assert len(fhir) == 3
     assert fhir[0]["valueQuantity"]["value"] == 7.8
     assert fhir[1]["valueQuantity"]["value"] == 0.0
-    assert "Negative" in fhir[1]["valueQuantity"]["unit"]
+    assert fhir[1].get("_result_text") == "Negative"
+    assert fhir[2].get("_result_text") == "No growth"
 
 
 # ── IP-8: Planner confidence is higher for known formats ─────────────────────

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import uuid as _uuid_mod
+from datetime import date as _date_mod
 
 import pytest
 
@@ -275,7 +276,7 @@ class TestSameDayDiagnosisUniquenessRegression:
                                'http://hl7.org/fhir/sid/icd-10',
                                $3::date, 'active', 'healthex')
                        ON CONFLICT (natural_key) DO NOTHING""",
-                    str(_uuid_mod.uuid4()), pid, d,
+                    str(_uuid_mod.uuid4()), pid, _date_mod.fromisoformat(d),
                 )
             count = await conn.fetchval(
                 """SELECT COUNT(*) FROM patient_conditions
@@ -363,7 +364,7 @@ class TestSameDayDiagnosisUniquenessRegression:
                                'http://www.nlm.nih.gov/research/umls/rxnorm',
                                'active', $3::date, 'healthex')
                        ON CONFLICT (natural_key) DO NOTHING""",
-                    str(_uuid_mod.uuid4()), pid, d,
+                    str(_uuid_mod.uuid4()), pid, _date_mod.fromisoformat(d),
                 )
             count = await conn.fetchval(
                 """SELECT COUNT(*) FROM patient_medications
