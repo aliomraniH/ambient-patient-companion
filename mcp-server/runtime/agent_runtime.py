@@ -111,7 +111,12 @@ class AgentRuntime:
                               catch-all guard.
         """
         if name in self._watchers:
-            raise ValueError(f"Watcher '{name}' is already registered")
+            logger.warning(
+                "AgentRuntime: watcher '%s' is already registered — "
+                "skipping re-registration (safe to ignore during hot-reload)",
+                name,
+            )
+            return
         self._watchers[name] = _WatcherState(name, interval_seconds, coro_fn)
         logger.info(
             "AgentRuntime: registered watcher '%s' (interval=%.0fs)",

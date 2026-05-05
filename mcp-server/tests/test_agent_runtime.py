@@ -150,8 +150,9 @@ def test_agent_runtime_watch_registers_watcher():
     assert "test_watcher" in names
 
 
-def test_agent_runtime_watch_rejects_duplicate():
-    """AgentRuntime.watch() must raise ValueError on a duplicate watcher name."""
+def test_agent_runtime_watch_skips_duplicate_with_warning(caplog):
+    """AgentRuntime.watch() must log a warning and skip re-registration on a duplicate name."""
+    import logging
     from runtime.agent_runtime import AgentRuntime
 
     rt = AgentRuntime()
@@ -161,8 +162,13 @@ def test_agent_runtime_watch_rejects_duplicate():
 
     rt.watch("dup_watcher", interval_seconds=60.0, coro_fn=_noop)
 
-    with pytest.raises(ValueError, match="dup_watcher"):
+    with caplog.at_level(logging.WARNING, logger="runtime.agent_runtime"):
         rt.watch("dup_watcher", interval_seconds=60.0, coro_fn=_noop)
+
+    assert any("dup_watcher" in r.message and r.levelno == logging.WARNING for r in caplog.records), (
+        "Expected a WARNING log mentioning 'dup_watcher' on duplicate registration"
+    )
+    assert rt.status()["watcher_count"] == 1, "Duplicate registration must not add a second watcher"
 
 
 def test_behavioral_atoms_exports_register_watchers():
