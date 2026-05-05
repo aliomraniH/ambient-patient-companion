@@ -5,6 +5,9 @@ Covers:
   - _load_persisted_state:  pre-populates in-memory state from DB rows
 
 All tests mock ``db.connection.get_pool`` so no real database is required.
+
+Integration tests (class TestWatcherPersistenceIntegration) require
+DATABASE_URL to be set and are skipped automatically otherwise.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -434,3 +438,213 @@ class TestLoadPersistedState:
         assert runtime._watchers["watcher_y"].run_count == 3
         assert runtime._watchers["watcher_y"].last_run is None
         assert runtime._watchers["watcher_y"].last_error == "Err"
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — require a real DATABASE_URL
+# ---------------------------------------------------------------------------
+
+_TEST_KEY_PREFIX = f"{_KEY_PREFIX}integ_test_"
+
+
+@pytest_asyncio.fixture
+async def watcher_cleanup(db_pool):
+    """Delete all system_config rows created by integration tests on teardown."""
+    yield
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM system_config WHERE key LIKE $1",
+            f"{_TEST_KEY_PREFIX}%",
+        )
+
+
+class TestWatcherPersistenceIntegration:
+    """Integration tests that write to and read from a real system_config table.
+
+    Skipped automatically when DATABASE_URL is not present in the environment.
+    Each test cleans up its own rows via the ``watcher_cleanup`` fixture.
+    """
+
+    async def test_persist_then_load_run_count(self, db_pool, watcher_cleanup):
+        """run_count written by _persist_watcher_state is restored by _load_persisted_state."""
+        watcher_name = "integ_test_run_count"
+        state = _WatcherState(
+            name=watcher_name,
+            interval_seconds=60.0,
+            coro_fn=AsyncMock(),
+        )
+        state.run_count = 17
+        state.last_run = None
+        state.last_error = None
+
+        runtime = AgentRuntime()
+        runtime.watch(watcher_name, 60.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime._persist_watcher_state(state)
+
+        runtime2 = AgentRuntime()
+        runtime2.watch(watcher_name, 60.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime2._load_persisted_state()
+
+        assert runtime2._watchers[watcher_name].run_count == 17
+
+    async def test_persist_then_load_last_run(self, db_pool, watcher_cleanup):
+        """last_run datetime survives the persist → load round-trip with full precision."""
+        watcher_name = "integ_test_last_run"
+        dt = datetime(2025, 4, 22, 14, 30, 55, tzinfo=timezone.utc)
+
+        state = _WatcherState(
+            name=watcher_name,
+            interval_seconds=120.0,
+            coro_fn=AsyncMock(),
+        )
+        state.run_count = 3
+        state.last_run = dt
+        state.last_error = None
+
+        runtime = AgentRuntime()
+        runtime.watch(watcher_name, 120.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime._persist_watcher_state(state)
+
+        runtime2 = AgentRuntime()
+        runtime2.watch(watcher_name, 120.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime2._load_persisted_state()
+
+        loaded = runtime2._watchers[watcher_name].last_run
+        assert loaded is not None
+        assert loaded == dt
+
+    async def test_persist_then_load_last_error(self, db_pool, watcher_cleanup):
+        """last_error string survives the persist → load round-trip unchanged."""
+        watcher_name = "integ_test_last_error"
+        error_msg = "ConnectionError: timed out after 30s"
+
+        state = _WatcherState(
+            name=watcher_name,
+            interval_seconds=300.0,
+            coro_fn=AsyncMock(),
+        )
+        state.run_count = 5
+        state.last_run = None
+        state.last_error = error_msg
+
+        runtime = AgentRuntime()
+        runtime.watch(watcher_name, 300.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime._persist_watcher_state(state)
+
+        runtime2 = AgentRuntime()
+        runtime2.watch(watcher_name, 300.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime2._load_persisted_state()
+
+        assert runtime2._watchers[watcher_name].last_error == error_msg
+
+    async def test_persist_then_load_none_last_error(self, db_pool, watcher_cleanup):
+        """A None last_error round-trips as None (not the string 'None')."""
+        watcher_name = "integ_test_none_error"
+
+        state = _WatcherState(
+            name=watcher_name,
+            interval_seconds=60.0,
+            coro_fn=AsyncMock(),
+        )
+        state.run_count = 2
+        state.last_run = None
+        state.last_error = None
+
+        runtime = AgentRuntime()
+        runtime.watch(watcher_name, 60.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime._persist_watcher_state(state)
+
+        runtime2 = AgentRuntime()
+        runtime2.watch(watcher_name, 60.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime2._load_persisted_state()
+
+        assert runtime2._watchers[watcher_name].last_error is None
+
+    async def test_upsert_overwrites_previous_row(self, db_pool, watcher_cleanup):
+        """Calling _persist_watcher_state twice updates the row rather than inserting a duplicate."""
+        watcher_name = "integ_test_upsert"
+
+        state = _WatcherState(
+            name=watcher_name,
+            interval_seconds=60.0,
+            coro_fn=AsyncMock(),
+        )
+        state.run_count = 1
+        state.last_run = None
+        state.last_error = None
+
+        runtime = AgentRuntime()
+        runtime.watch(watcher_name, 60.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime._persist_watcher_state(state)
+
+        state.run_count = 9
+        state.last_error = "ValueError: second run failed"
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime._persist_watcher_state(state)
+
+        runtime2 = AgentRuntime()
+        runtime2.watch(watcher_name, 60.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime2._load_persisted_state()
+
+        restored = runtime2._watchers[watcher_name]
+        assert restored.run_count == 9
+        assert restored.last_error == "ValueError: second run failed"
+
+        async with db_pool.acquire() as conn:
+            row_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM system_config WHERE key = $1",
+                f"{_KEY_PREFIX}{watcher_name}",
+            )
+        assert row_count == 1
+
+    async def test_full_state_round_trip(self, db_pool, watcher_cleanup):
+        """All three fields — run_count, last_run, last_error — survive the round-trip together."""
+        watcher_name = "integ_test_full"
+        dt = datetime(2026, 1, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+        state = _WatcherState(
+            name=watcher_name,
+            interval_seconds=600.0,
+            coro_fn=AsyncMock(),
+        )
+        state.run_count = 42
+        state.last_run = dt
+        state.last_error = "RuntimeError: out of memory"
+
+        runtime = AgentRuntime()
+        runtime.watch(watcher_name, 600.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime._persist_watcher_state(state)
+
+        runtime2 = AgentRuntime()
+        runtime2.watch(watcher_name, 600.0, AsyncMock())
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            await runtime2._load_persisted_state()
+
+        restored = runtime2._watchers[watcher_name]
+        assert restored.run_count == 42
+        assert restored.last_run == dt
+        assert restored.last_error == "RuntimeError: out of memory"
