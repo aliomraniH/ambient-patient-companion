@@ -7,16 +7,17 @@ cleanly when it shuts down.
 
 Usage (in server.py)::
 
-    from runtime.agent_runtime import AgentRuntime
+    from runtime.agent_runtime import get_runtime
     from runtime.watchers import register_watchers
 
-    runtime = AgentRuntime()
+    runtime = get_runtime()          # always returns the same singleton
     register_watchers(runtime)
 
     mcp = FastMCP("...", lifespan=runtime.lifespan)
 
-A skill module can also register its own watchers before ``server.py`` calls
-``load_skills()`` — the runtime is shared and any coroutine can be registered::
+A skill module can also register its own watchers — because ``get_runtime()``
+returns the same instance, watchers registered inside ``register(mcp)`` will
+be picked up by the lifespan that server.py installs::
 
     # inside a skill's register(mcp) function
     from runtime.agent_runtime import get_runtime
@@ -163,10 +164,23 @@ class AgentRuntime:
         to the ``FastMCP`` constructor so startup and shutdown are tied to the
         server's own lifecycle.
 
+        Safe to call only once per runtime instance. A second call is a no-op
+        with a warning so accidental double-starts (e.g. test teardown races)
+        do not spawn duplicate task pairs.
+
         Args:
             app: Unused; accepted for API symmetry with Starlette lifespan
                  callables that receive the application instance.
         """
+        already_running = any(
+            s.task and not s.task.done() for s in self._watchers.values()
+        )
+        if already_running:
+            logger.warning(
+                "AgentRuntime.start() called while watchers are already running — "
+                "ignoring duplicate start to prevent double task spawning"
+            )
+            return
         self._start_tasks()
         logger.info("AgentRuntime.start(): %d watcher(s) started", len(self._watchers))
 

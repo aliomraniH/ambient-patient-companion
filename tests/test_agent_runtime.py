@@ -269,3 +269,40 @@ async def test_rt9_status_endpoint_response_shape():
     assert by_name["w1"]["healthy"] is True
     assert by_name["w2"]["healthy"] is False
     assert by_name["w2"]["last_error"] is not None
+
+
+# ─── RT10: live route wiring via HTTP ────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_rt10_status_route_wiring():
+    """Hit the real GET /api/agent-runtime/status endpoint on the running
+    Skills MCP server (localhost:8002) to confirm server.py wired the route.
+
+    Skipped automatically when the server is not reachable (e.g. CI without
+    the workflow running).
+    """
+    import httpx
+
+    url = "http://localhost:8002/api/agent-runtime/status"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        pytest.skip("Skills MCP server not reachable at localhost:8002")
+
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+    data = resp.json()
+
+    assert "watcher_count" in data, "Response missing 'watcher_count'"
+    assert "watchers" in data, "Response missing 'watchers'"
+    assert isinstance(data["watchers"], list)
+
+    required_keys = {"name", "interval_seconds", "run_count", "last_run", "last_error", "healthy"}
+    for w in data["watchers"]:
+        assert required_keys.issubset(w.keys()), f"Watcher entry missing keys: {w}"
+
+    # The three built-in watchers must be present
+    names = {w["name"] for w in data["watchers"]}
+    assert "checkin_atom_watcher" in names
+    assert "crisis_scan_watcher" in names
+    assert "care_gap_watcher" in names

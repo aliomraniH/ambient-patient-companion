@@ -19,16 +19,18 @@ from starlette.responses import JSONResponse
 
 from db.connection import get_pool
 from shared.audit_middleware import AuditMiddleware
-from runtime.agent_runtime import AgentRuntime
+from runtime.agent_runtime import get_runtime
 from runtime.watchers import register_watchers
 
 # ── Agent runtime — autonomous background watchers ────────────────────────────
-# Bridges call-driven MCP tools and proactive scheduled execution.
+# Uses the module-level singleton so skills loaded later via load_skills() can
+# call get_runtime().watch(...) to self-register additional watchers and have
+# them picked up by the same running instance.
 # Three built-in watchers start with the server process:
 #   • checkin_atom_watcher  (every 5 min)  — atom extraction for new check-ins
 #   • crisis_scan_watcher   (every 60 min) — crisis escalation for recent patients
 #   • care_gap_watcher      (every 24 h)   — flag overdue open care gaps
-runtime = AgentRuntime()
+runtime = get_runtime()
 register_watchers(runtime)
 
 mcp = FastMCP(
