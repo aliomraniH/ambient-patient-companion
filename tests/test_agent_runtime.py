@@ -67,11 +67,24 @@ def test_rt2_watch_registers_watcher():
     assert status["watchers"][0]["healthy"] is True
 
 
-def test_rt2_duplicate_name_raises():
+def test_rt2_duplicate_name_skips_with_warning(caplog):
+    """Task #25 changed watch() to warn-and-skip instead of raising.
+
+    A duplicate registration should:
+    1. Emit a WARNING mentioning the watcher name.
+    2. Leave the watcher count at 1 (original kept, duplicate ignored).
+    """
+    import logging
     runtime = AgentRuntime()
     runtime.watch("w1", 60.0, _null_coro)
-    with pytest.raises(ValueError, match="already registered"):
+    with caplog.at_level(logging.WARNING, logger="runtime.agent_runtime"):
         runtime.watch("w1", 30.0, _null_coro)
+    assert any("w1" in r.message for r in caplog.records), (
+        "Expected a WARNING mentioning the duplicate watcher name 'w1'"
+    )
+    assert runtime.status()["watcher_count"] == 1, (
+        "Duplicate registration must not add a second watcher"
+    )
 
 
 # ─── RT3: fast watcher executes within window ─────────────────────────────────
@@ -178,12 +191,22 @@ async def test_rt6_status_shape_after_run():
     assert w2["last_error"] is not None
 
 
-# ─── RT7: register_watchers() registers the three built-in watchers ───────────
+# ─── RT7: all three watchers register via their skill modules ─────────────────
 
-def test_rt7_register_watchers_registers_three():
+def test_rt7_all_three_watchers_register_via_skill_modules():
+    """Task #24 migrated the three built-in watchers into their skill files.
+
+    Each skill now exports register_watchers(runtime) instead of the old
+    centralised runtime/watchers.py. This test verifies that calling the
+    hook on all three skill modules produces the expected watcher set.
+    """
     runtime = AgentRuntime()
-    from runtime.watchers import register_watchers
-    register_watchers(runtime)
+    from skills.behavioral_atoms import register_watchers as rw_atoms
+    from skills.crisis_escalation import register_watchers as rw_crisis
+    from skills.care_gap import register_watchers as rw_care_gap
+    rw_atoms(runtime)
+    rw_crisis(runtime)
+    rw_care_gap(runtime)
     status = runtime.status()
     assert status["watcher_count"] == 3
     names = {w["name"] for w in status["watchers"]}

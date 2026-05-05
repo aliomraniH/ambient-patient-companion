@@ -8,12 +8,23 @@ cleanly when it shuts down.
 Usage (in server.py)::
 
     from runtime.agent_runtime import get_runtime
-    from runtime.watchers import register_watchers
 
     runtime = get_runtime()          # always returns the same singleton
-    register_watchers(runtime)
-
     mcp = FastMCP("...", lifespan=runtime.lifespan)
+
+    # Pass runtime to load_skills so skill modules can self-register watchers
+    load_skills(mcp, runtime=runtime)
+
+Each skill module that wants an autonomous watcher exports a hook::
+
+    # inside a skill file (e.g. skills/behavioral_atoms.py)
+    def register_watchers(runtime):
+        runtime.watch("my_watcher", interval_seconds=300, coro_fn=_my_watcher)
+
+``load_skills()`` calls this hook automatically for every skill that defines
+it, so watchers are declared alongside the tools they support.  No central
+registry file is needed — adding or removing a skill file also adds/removes
+its watchers.
 
 A skill module can also register its own watchers — because ``get_runtime()``
 returns the same instance, watchers registered inside ``register(mcp)`` will
