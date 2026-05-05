@@ -20,21 +20,18 @@ from starlette.responses import JSONResponse
 from db.connection import get_pool
 from shared.audit_middleware import AuditMiddleware
 from runtime.agent_runtime import get_runtime
-from runtime.watchers import register_watchers
 
 # ── Agent runtime — autonomous background watchers ────────────────────────────
 # Uses the module-level singleton so any skill module that exports
 # register_watchers(runtime) can declare its own background tasks — the same
 # instance is passed to load_skills() below.
 #
-# Two built-in watchers start via register_watchers() from runtime/watchers.py:
-#   • crisis_scan_watcher   (every 60 min) — crisis escalation for recent patients
-#   • care_gap_watcher      (every 24 h)   — flag overdue open care gaps
-#
-# One skill-owned watcher is registered by skills/behavioral_atoms.py:
-#   • checkin_atom_watcher  (every 5 min)  — atom extraction for new check-ins
+# All watchers are now registered by their respective skill files via the
+# register_watchers(runtime) hook in load_skills():
+#   • checkin_atom_watcher  (every 5 min)  — skills/behavioral_atoms.py
+#   • crisis_scan_watcher   (every 60 min) — skills/crisis_escalation.py
+#   • care_gap_watcher      (every 24 h)   — skills/care_gap.py
 runtime = get_runtime()
-register_watchers(runtime)
 
 mcp = FastMCP(
     "ambient-skills-companion",

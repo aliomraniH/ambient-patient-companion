@@ -192,3 +192,96 @@ def test_behavioral_atoms_register_watchers_registers_checkin_atom_watcher():
     assert "checkin_atom_watcher" in names, (
         f"Expected 'checkin_atom_watcher' to be registered; got: {names}"
     )
+
+
+# ── crisis_escalation watcher ─────────────────────────────────────────────────
+
+def test_crisis_escalation_exports_register_watchers():
+    """skills.crisis_escalation must export a register_watchers() callable."""
+    from skills import crisis_escalation
+
+    assert hasattr(crisis_escalation, "register_watchers"), (
+        "crisis_escalation must export register_watchers(runtime)"
+    )
+    assert callable(crisis_escalation.register_watchers)
+
+
+def test_crisis_escalation_register_watchers_registers_crisis_scan_watcher():
+    """crisis_escalation.register_watchers() must register crisis_scan_watcher."""
+    from skills import crisis_escalation
+
+    rt = _MockRuntime()
+    crisis_escalation.register_watchers(rt)
+
+    names = [w["name"] for w in rt.watched]
+    assert "crisis_scan_watcher" in names, (
+        f"Expected 'crisis_scan_watcher' to be registered; got: {names}"
+    )
+
+
+def test_crisis_escalation_watcher_interval():
+    """crisis_scan_watcher must be registered with a 3600-second interval."""
+    from skills import crisis_escalation
+
+    rt = _MockRuntime()
+    crisis_escalation.register_watchers(rt)
+
+    watcher = next(w for w in rt.watched if w["name"] == "crisis_scan_watcher")
+    assert watcher["interval_seconds"] == 3600.0, (
+        f"Expected 3600.0s interval; got {watcher['interval_seconds']}"
+    )
+
+
+# ── care_gap watcher ──────────────────────────────────────────────────────────
+
+def test_care_gap_exports_register_watchers():
+    """skills.care_gap must export a register_watchers() callable."""
+    from skills import care_gap
+
+    assert hasattr(care_gap, "register_watchers"), (
+        "care_gap must export register_watchers(runtime)"
+    )
+    assert callable(care_gap.register_watchers)
+
+
+def test_care_gap_register_watchers_registers_care_gap_watcher():
+    """care_gap.register_watchers() must register care_gap_watcher."""
+    from skills import care_gap
+
+    rt = _MockRuntime()
+    care_gap.register_watchers(rt)
+
+    names = [w["name"] for w in rt.watched]
+    assert "care_gap_watcher" in names, (
+        f"Expected 'care_gap_watcher' to be registered; got: {names}"
+    )
+
+
+def test_care_gap_watcher_interval():
+    """care_gap_watcher must be registered with an 86400-second interval."""
+    from skills import care_gap
+
+    rt = _MockRuntime()
+    care_gap.register_watchers(rt)
+
+    watcher = next(w for w in rt.watched if w["name"] == "care_gap_watcher")
+    assert watcher["interval_seconds"] == 86400.0, (
+        f"Expected 86400.0s interval; got {watcher['interval_seconds']}"
+    )
+
+
+def test_care_gap_exports_register():
+    """skills.care_gap must export a register() callable (even if no MCP tools)."""
+    from skills import care_gap
+
+    assert hasattr(care_gap, "register"), "care_gap must export register(mcp)"
+    assert callable(care_gap.register)
+
+
+def test_watchers_py_has_no_register_watchers():
+    """runtime.watchers must no longer export register_watchers() after migration."""
+    from runtime import watchers
+
+    assert not hasattr(watchers, "register_watchers"), (
+        "runtime.watchers should be empty — watchers are now in skill files"
+    )

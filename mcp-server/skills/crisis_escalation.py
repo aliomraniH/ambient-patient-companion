@@ -245,5 +245,79 @@ async def run_crisis_escalation(
         return f"Error: {e}"
 
 
+# ── Autonomous watcher ────────────────────────────────────────────────────────
+
+CRISIS_SCAN_INTERVAL: float = 3600.0    # 60 minutes
+
+
+async def _crisis_scan_watcher() -> None:
+    """Run crisis escalation for every patient who checked in within 24 h."""
+    import logging as _logging
+    from db.connection import get_pool
+
+    _log = _logging.getLogger(__name__)
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT patient_id
+            FROM daily_checkins
+            WHERE checkin_date >= CURRENT_DATE - 1
+            """,
+        )
+
+    if not rows:
+        _log.debug("crisis_scan_watcher: no recent check-ins to scan")
+        return
+
+    patient_ids = [str(r["patient_id"]) for r in rows]
+    _log.info(
+        "crisis_scan_watcher: scanning %d patient(s) for crisis indicators",
+        len(patient_ids),
+    )
+
+    escalated = 0
+    for pid in patient_ids:
+        try:
+            import json as _json
+            result = await run_crisis_escalation(pid)
+            parsed = _json.loads(result) if isinstance(result, str) else result
+            if parsed.get("escalation_triggered"):
+                escalated += 1
+                _log.warning(
+                    "crisis_scan_watcher: escalation triggered for patient %s — %s",
+                    pid, parsed.get("triggers"),
+                )
+        except Exception as exc:
+            _log.warning(
+                "crisis_scan_watcher: failed for patient %s: %s", pid, exc,
+            )
+
+    _log.info(
+        "crisis_scan_watcher: scanned %d patient(s), %d escalation(s) triggered",
+        len(patient_ids), escalated,
+    )
+
+
+def register_watchers(runtime) -> None:
+    """Register crisis-scan background watcher with *runtime*.
+
+    Called automatically by skills/__init__.py load_skills() when a runtime
+    instance is provided.  Keeping watcher registration here makes the skill
+    self-contained: its MCP tool (register) and its autonomous behaviour
+    (register_watchers) live in the same file.
+    """
+    runtime.watch(
+        name="crisis_scan_watcher",
+        interval_seconds=CRISIS_SCAN_INTERVAL,
+        coro_fn=_crisis_scan_watcher,
+    )
+    logger.info(
+        "crisis_escalation: registered crisis_scan_watcher (interval=%.0fs)",
+        CRISIS_SCAN_INTERVAL,
+    )
+
+
 def register(mcp: FastMCP):
     mcp.tool(run_crisis_escalation)
