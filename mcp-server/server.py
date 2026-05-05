@@ -19,16 +19,59 @@ from starlette.responses import JSONResponse
 
 from db.connection import get_pool
 from shared.audit_middleware import AuditMiddleware
+from runtime.agent_runtime import AgentRuntime
+from runtime.watchers import register_watchers
+
+# ── Agent runtime — autonomous background watchers ────────────────────────────
+# Bridges call-driven MCP tools and proactive scheduled execution.
+# Three built-in watchers start with the server process:
+#   • checkin_atom_watcher  (every 5 min)  — atom extraction for new check-ins
+#   • crisis_scan_watcher   (every 60 min) — crisis escalation for recent patients
+#   • care_gap_watcher      (every 24 h)   — flag overdue open care gaps
+runtime = AgentRuntime()
+register_watchers(runtime)
 
 mcp = FastMCP(
     "ambient-skills-companion",
-    instructions="Ambient Skills Companion — specialized clinical skills and knowledge tools including motivational interviewing, health literacy assessment, care gap analysis, OBT scoring, patient education, call history auditing, and multi-domain clinical reasoning. Use these tools to enhance patient engagement and apply evidence-based clinical skills.",
+    instructions=(
+        "Ambient Skills Companion — specialized clinical skills and knowledge tools "
+        "including motivational interviewing, health literacy assessment, care gap "
+        "analysis, OBT scoring, patient education, call history auditing, and "
+        "multi-domain clinical reasoning. Use these tools to enhance patient "
+        "engagement and apply evidence-based clinical skills."
+    ),
+    lifespan=runtime.lifespan,
 )
 
 
 @mcp.custom_route("/health", methods=["GET"])
 async def rest_health(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "server": "ambient-skills-companion", "version": "1.0.0"})
+
+
+@mcp.custom_route("/api/agent-runtime/status", methods=["GET"])
+async def agent_runtime_status(request: Request) -> JSONResponse:
+    """Return health snapshot for all registered autonomous watchers.
+
+    Shape::
+
+        {
+          "watcher_count": 3,
+          "watchers": [
+            {
+              "name": "checkin_atom_watcher",
+              "interval_seconds": 300,
+              "run_count": 12,
+              "last_run": "2025-05-05T14:30:00+00:00",
+              "last_error": null,
+              "healthy": true
+            },
+            ...
+          ]
+        }
+    """
+    return JSONResponse(runtime.status())
+
 
 # Auto-discover and register all skill tools
 load_skills(mcp)
