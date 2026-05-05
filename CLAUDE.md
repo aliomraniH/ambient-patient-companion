@@ -563,20 +563,21 @@ await pool.execute("INSERT INTO deliberation_outputs (confidence) VALUES ($1)", 
 
 ```bash
 # Run individual suites
-python -m pytest tests/phase1/ -v                    # 196 tests
-python -m pytest tests/phase2/ -v                    # 95 tests
-python -m pytest server/deliberation/tests/ -v       # 290+ deliberation unit tests
-python -m pytest ingestion/tests/ -v                 # 152 tests
-python -m pytest shared/tests/ -v                   # 34 tests (coercion + datetime)
+python -m pytest tests/phase1/ -v                    # 255 tests
+python -m pytest tests/phase2/ -v                    # 156 tests
+python -m pytest server/deliberation/tests/ -v       # 258 deliberation unit tests
+python -m pytest ingestion/tests/ -v                 # 269 tests
+python -m pytest shared/tests/ -v                    # 24 tests (coercion + datetime)
 python -m pytest tests/e2e/ -v                       # 28 tests
-python -m pytest tests/test_mcp_discovery.py -v      # 26 tests (DN-1–DN-26)
-python -m pytest tests/test_mcp_smoke.py -v          # 24 tests
-cd mcp-server && python -m pytest tests/ -v          # 110 tests
+python -m pytest tests/test_mcp_discovery.py tests/test_mcp_smoke.py -v  # 50 tests
+python -m pytest tests/test_agent_runtime.py -v      # 11 AgentRuntime tests (RT1-RT10)
+PYTHONPATH=mcp-server python -m pytest mcp-server/tests/ -v  # 170 tests
 cd replit-app && npm test                            # 37 Jest tests
-cd replit_dashboard && python -m pytest tests/ -v    # 30 tests
+cd replit_dashboard && python -m pytest tests/ -v    # 37 tests
 
 # Run all Python tests at once
 python -m pytest tests/ server/deliberation/tests/ ingestion/tests/ shared/tests/ -v
+PYTHONPATH=mcp-server python -m pytest mcp-server/tests/ -v
 ```
 
 ### pytest configuration (pytest.ini)
@@ -634,10 +635,45 @@ TestOAuthDiscovery      DN-24 to DN-26  OAuth route files, oauth-store.ts, respo
 - Patient CRUD: `POST /api/patients/`, `GET/PUT/DELETE /api/patients/[id]/`
 
 ### Skills Server
-- `load_skills(mcp)` in `mcp-server/server.py` auto-discovers all `.py` files in `mcp-server/skills/` with a `register(mcp)` function
+- `load_skills(mcp, runtime=runtime)` in `mcp-server/server.py` auto-discovers all `.py` files in `mcp-server/skills/` with a `register(mcp)` function
 - Each skill module must export `register(mcp: FastMCP) -> None`; modules without `register()` log a WARNING and are skipped (expected for helpers)
-- 21 modules loaded; 22+ tools total (4 from call_history.py, multiple from ingestion_tools.py + behavioral stack)
+- Optionally export `register_watchers(runtime: AgentRuntime) -> None` to declare autonomous background tasks — `load_skills()` calls it automatically when `runtime` is provided
+- 26 modules loaded; 22+ tools total (4 from call_history.py, multiple from ingestion_tools.py + behavioral stack)
 - `mcp-server/server.py` must insert repo root into `sys.path` at the top — `mcp-server/` is one level deeper than repo root, so `_REPO_ROOT = Path(__file__).resolve().parent.parent`
+
+### AgentRuntime (mcp-server/runtime/agent_runtime.py)
+- Singleton via `get_runtime()` — always returns the same instance; skills and server.py share it
+- `runtime.watch(name, interval_seconds, coro_fn)` — register a background watcher (duplicate names: warn + skip, not raise)
+- `runtime.lifespan(server)` — asynccontextmanager; pass as `lifespan=runtime.lifespan` to `FastMCP()`
+  - At startup: loads persisted state from `system_config`, then spawns all watcher tasks
+  - At shutdown: cancels + awaits all tasks (clean shutdown)
+- `runtime.status()` → JSON-serialisable health snapshot: `{watcher_count, watchers: [{name, interval_seconds, run_count, last_run, last_error, healthy}]}`
+- **Persistence**: after every watcher execution, upserts `system_config` key `watcher_state:<name>` with `{run_count, last_run, last_error}` — restored on restart. Stale rows (watcher no longer registered) are deleted at boot.
+- **Endpoint**: `GET /api/agent-runtime/status` on port 8002 — proxied through Config Dashboard `/api/health/agent-runtime`
+- **Adding a new autonomous watcher**: add `register_watchers(runtime)` to your skill file; `load_skills()` picks it up automatically — no changes to server.py or watchers.py needed
+
+### To Server 2 (skills server) — with autonomous watcher
+
+```python
+# Create mcp-server/skills/my_skill.py
+
+WATCHER_INTERVAL = 300  # seconds — monkey-patchable in tests
+
+async def _my_watcher():
+    """Runs every WATCHER_INTERVAL seconds, no arguments."""
+    # DB access, LLM calls, etc.
+    pass
+
+def register_watchers(runtime) -> None:
+    """Called by load_skills() when runtime is provided."""
+    runtime.watch("my_watcher", WATCHER_INTERVAL, _my_watcher)
+
+def register(mcp: FastMCP) -> None:
+    @mcp.tool
+    async def my_skill_tool(patient_id: str) -> str:
+        """Skill tool description."""
+        return json.dumps({"result": "..."})
+```
 
 ### AuditMiddleware
 - `shared/audit_middleware.py` provides `AuditMiddleware(Middleware)` — a FastMCP middleware subclass

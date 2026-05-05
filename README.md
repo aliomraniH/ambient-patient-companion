@@ -74,7 +74,8 @@ graph TB
 
     subgraph "MCP Server 2 — Port 8002"
         S2["ambient-skills-companion<br/>FastMCP 3.2"]
-        SK["21 skill modules<br/>auto-discovered"]
+        SK["26 skill modules<br/>auto-discovered"]
+        AR["AgentRuntime<br/>3 autonomous watchers"]
         T2["22+ Tools · AuditMiddleware"]
     end
 
@@ -156,7 +157,17 @@ Guardrail Pipeline:
 
 ### Server 2 — `ambient-skills-companion` · `mcp-server/server.py`
 
-22+ tools auto-discovered from `mcp-server/skills/` via a `register(mcp)` convention. 21 skill modules loaded. Every tool call is logged to `mcp_call_log` via `AuditMiddleware`.
+22+ tools auto-discovered from `mcp-server/skills/` via a `register(mcp)` convention. 26 skill modules loaded. Every tool call is logged to `mcp_call_log` via `AuditMiddleware`.
+
+**AgentRuntime** — in addition to call-driven MCP tools, the Skills server runs an embedded `AgentRuntime` (`mcp-server/runtime/agent_runtime.py`) that starts three autonomous background watchers on server boot. Each skill file that wants proactive execution exports a `register_watchers(runtime)` hook; `load_skills()` calls it automatically. Watcher run state is persisted to `system_config` (key `watcher_state:<name>`) after every execution and restored on restart.
+
+| Watcher | Interval | Purpose |
+|---------|----------|---------|
+| `checkin_atom_watcher` | 5 min | Extract behavioral atoms from new check-ins, run gap detection |
+| `crisis_scan_watcher` | 60 min | Crisis escalation scan for patients with recent activity |
+| `care_gap_watcher` | 24 h | Flag overdue open care gaps, insert agent interventions |
+
+Live watcher health is available at `GET /api/agent-runtime/status` on the Skills server and proxied through the Config Dashboard watcher health panel.
 
 ```
 Public URL: https://[your-replit-domain]/mcp-skills
@@ -319,7 +330,7 @@ erDiagram
 ```
 
 **Table groups:**
-- **Base schema** (22 tables): `patients`, `patient_conditions`, `patient_medications`, `biometric_readings`, `daily_checkins`, `obt_scores`, `provider_risk_scores`, `sdoh_assessments`, `care_gaps`, `ingestion_log`, `source_freshness`, `system_config` + 10 more
+- **Base schema** (22 tables): `patients`, `patient_conditions`, `patient_medications`, `biometric_readings`, `daily_checkins`, `obt_scores`, `provider_risk_scores`, `sdoh_assessments`, `care_gaps`, `ingestion_log`, `source_freshness`, `system_config` (also stores `watcher_state:<name>` rows for AgentRuntime persistence) + 10 more
 - **Deliberation** (4 tables): `deliberations`, `deliberation_outputs`, `patient_knowledge`, `core_knowledge_updates`
 - **Flag lifecycle** (3 tables): `deliberation_flags`, `flag_review_runs`, `flag_corrections`
 - **Ingestion** (4 tables): `ingestion_plans`, `transfer_log`, `clinical_notes`, `media_references`
@@ -447,23 +458,24 @@ graph LR
 
 ---
 
-## Test Coverage — ~800 tests
+## Test Coverage — ~1,300 tests
 
 ```
 ┌────────────────────────────────────────┬────────┬───────────┐
 │ Suite                                  │ Tests  │ Framework │
 ├────────────────────────────────────────┼────────┼───────────┤
-│ Phase 1 Clinical Intelligence          │  196   │ pytest    │
-│ Phase 2 Deliberation + Flags           │   95   │ pytest    │
-│ Deliberation Engine Unit               │  290+  │ pytest    │
-│ Ingestion Pipeline                     │  152   │ pytest    │
-│ Skills MCP Backend                     │  110   │ pytest    │
-│ Shared Utilities (coercion+datetime)   │   34   │ pytest    │
+│ Phase 1 Clinical Intelligence          │  255   │ pytest    │
+│ Phase 2 Deliberation + Flags           │  156   │ pytest    │
+│ Deliberation Engine Unit               │  258   │ pytest    │
+│ Ingestion Pipeline                     │  269   │ pytest    │
+│ Skills MCP Backend + AgentRuntime      │  181   │ pytest    │
+│   ↳ mcp-server/tests/ (170)           │        │           │
+│   ↳ tests/test_agent_runtime.py (11)  │        │           │
+│ Shared Utilities (coercion+datetime)   │   24   │ pytest    │
 │ End-to-End MCP Use-Cases               │   28   │ pytest    │
-│ MCP Smoke Tests                        │   24   │ pytest    │
-│ MCP Discovery + OAuth (DN-1–DN-26)     │   26   │ pytest    │
+│ MCP Smoke + Discovery + OAuth          │   50   │ pytest    │
 │ Frontend (Next.js)                     │   37   │ Jest      │
-│ Config Dashboard                       │   30   │ anyio     │
+│ Config Dashboard                       │   37   │ anyio     │
 └────────────────────────────────────────┴────────┴───────────┘
 ```
 
@@ -472,10 +484,11 @@ python -m pytest tests/phase1/ -v
 python -m pytest tests/phase2/ -v
 python -m pytest server/deliberation/tests/ -v
 python -m pytest ingestion/tests/ -v
-python -m pytest shared/tests/ -v                  # coerce_confidence + ensure_aware
+python -m pytest shared/tests/ -v                          # coerce_confidence + ensure_aware
 python -m pytest tests/e2e/ -v
-python -m pytest tests/test_mcp_discovery.py -v   # DN-1 to DN-26
-cd mcp-server && python -m pytest tests/ -v
+python -m pytest tests/test_mcp_discovery.py tests/test_mcp_smoke.py -v
+python -m pytest tests/test_agent_runtime.py -v           # RT1-RT10 AgentRuntime
+PYTHONPATH=mcp-server python -m pytest mcp-server/tests/ -v
 cd replit-app && npm test
 cd replit_dashboard && python -m pytest tests/ -v
 ```
@@ -518,11 +531,21 @@ ambient-patient-companion/
 │       └── flag_writer.py       Flag registry writes
 │
 ├── mcp-server/                  Server 2: ambient-skills-companion (port 8002)
-│   ├── server.py                FastMCP: auto-discovers skills (22+ tools)
-│   │                            + sys.path fix for shared/ + AuditMiddleware("skills", get_pool)
-│   ├── skills/                  21 skill modules (register(mcp) convention)
-│   │   ├── call_history.py      NEW: 4 audit query tools
-│   │   └── …                    compute_obt_score · crisis_escalation · behavioral stack · …
+│   ├── server.py                FastMCP: auto-discovers skills (22+ tools) + AgentRuntime lifespan
+│   │                            + GET /api/agent-runtime/status + AuditMiddleware("skills", get_pool)
+│   ├── runtime/                 Autonomous background-task engine
+│   │   ├── agent_runtime.py     AgentRuntime singleton: watch/start/lifespan/status
+│   │   │                        Persist state to system_config · prune stale rows at boot
+│   │   └── watchers.py          Migration-notice shell (watchers live in skill files)
+│   ├── skills/                  26 skill modules (register(mcp) + register_watchers(runtime) hooks)
+│   │   ├── behavioral_atoms.py  Behavioral atom tools + checkin_atom_watcher (every 5 min)
+│   │   ├── care_gap.py          Care gap skill + care_gap_watcher (every 24 h)
+│   │   ├── crisis_escalation.py Crisis escalation tools + crisis_scan_watcher (every 60 min)
+│   │   ├── call_history.py      4 audit query tools
+│   │   └── …                    compute_obt_score · behavioral stack · ingestion_tools · …
+│   ├── tests/                   170 tests (skills + AgentRuntime + watcher persistence)
+│   │   ├── test_agent_runtime.py   15 tests (load_skills hook, watch, duplicate guard)
+│   │   └── test_watcher_persistence.py  31 tests (persist/restore/stale-prune, 9 integration)
 │   ├── db/schema.sql            22-table base schema (source of truth)
 │   └── transforms/              FHIR-to-schema transformers
 │
@@ -542,13 +565,15 @@ ambient-patient-companion/
 │
 ├── replit_dashboard/            Config Dashboard (port 8080)
 ├── scripts/
-│   └── generate_mcp_json.py     Regenerates .mcp.json from $REPLIT_DEV_DOMAIN
+│   ├── generate_mcp_json.py     Regenerates .mcp.json from $REPLIT_DEV_DOMAIN
+│   └── post-merge.sh            Post-merge setup: pip install + npm install + schema apply
 ├── tests/
-│   ├── phase1/                  196 Phase 1 tests
-│   ├── phase2/                  95 Phase 2 tests
+│   ├── phase1/                  255 Phase 1 tests
+│   ├── phase2/                  156 Phase 2 tests
 │   ├── e2e/                     28 end-to-end tests
-│   ├── test_mcp_smoke.py        24 MCP smoke tests
-│   └── test_mcp_discovery.py    26 discovery + OAuth tests (DN-1–DN-26)
+│   ├── test_mcp_smoke.py        MCP smoke tests
+│   ├── test_mcp_discovery.py    Discovery + OAuth tests (DN-1–DN-26)
+│   └── test_agent_runtime.py    11 AgentRuntime tests (RT1-RT10)
 ├── .mcp.json                    MCP client discovery (auto-regenerated at startup)
 ├── start.sh                     Production startup script
 ├── config/system_prompts/       Role-based prompts (pcp · care_manager · patient)

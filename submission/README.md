@@ -1,7 +1,7 @@
 # Ambient Patient Companion — Clinical Intelligence MCP
 
 **Server type:** Remote MCP (FastMCP / Streamable HTTP)  
-**Endpoint:** `https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp`  
+**Endpoint:** `https://[your-replit-domain]/mcp`  
 **Protocol version:** MCP 2024-11-05  
 **Transport:** Streamable HTTP  
 
@@ -9,7 +9,7 @@
 
 ## What This Integration Does
 
-Ambient Patient Companion gives Claude a real-time clinical intelligence layer built for primary care and care management workflows. It connects Claude to a live patient health warehouse (PostgreSQL) and a 15-tool MCP server that enforces USPSTF clinical guidelines, runs drug interaction checks, applies a four-layer safety guardrail pipeline, and executes a full **Dual-LLM Deliberation Engine** — where Claude and GPT-4 independently analyze a patient's context, cross-critique each other across multiple rounds, and synthesize five structured clinical output categories.
+Ambient Patient Companion gives Claude a real-time clinical intelligence layer built for primary care and care management workflows. It connects Claude to a live patient health warehouse (PostgreSQL) and three FastMCP servers (23 + 22+ + 4 tools) that enforce USPSTF clinical guidelines, run drug interaction checks, apply a three-layer safety guardrail pipeline, and execute a full **Dual-LLM Deliberation Engine** — where Claude and GPT-4o independently analyze a patient's context, cross-critique each other across multiple rounds, and synthesize five structured clinical output categories. The Skills server also runs an embedded **AgentRuntime** with three autonomous background watchers (behavioral atom extraction, crisis scanning, care gap flagging) that operate proactively between Claude sessions.
 
 The system is designed for three roles: **primary care physicians (PCP)**, **care managers**, and **patients**. Every tool response is role-aware, citation-backed, and filtered through clinical safety rules before returning to Claude.
 
@@ -37,10 +37,13 @@ A five-phase pre-computation pipeline that runs before an encounter:
 
 | Phase | What happens |
 |---|---|
+| 0.5 — Planning | Pre-deliberation agenda built by Haiku |
 | 0 — Context | Patient EHR compiled from warehouse (conditions, meds, labs, biometrics, SDOH) |
-| 1 — Analysis | Claude and GPT-4 independently analyze in parallel |
+| 1 — Analysis | Claude Sonnet and GPT-4o independently analyze in parallel |
 | 2 — Critique | Each model critiques the other's reasoning across 1–3 rounds |
 | 3 — Synthesis | Claude synthesizes into 5 structured output categories |
+| 3.25 — Review | Domain review by Haiku; triggers re-deliberation if needed |
+| 3.5 — Safety | Guardrail wrapper on deliberation output |
 | 4 — Adaptation | Nudges formatted for SMS / push / portal |
 | 5 — Commit | All outputs stored atomically in the warehouse |
 
@@ -68,7 +71,7 @@ A five-phase pre-computation pipeline that runs before an encounter:
 | `get_data_source_status` | Report the active data track and registered sources |
 | `register_healthex_patient` | Create/upsert a HealthEx patient row and return their warehouse UUID |
 | `ingest_from_healthex` | Write one resource type (labs / medications / conditions / encounters / summary) from HealthEx FHIR into the warehouse |
-| `run_deliberation` | Trigger a full Dual-LLM deliberation session (all 5 phases) for a patient |
+| `run_deliberation` | Trigger a full Dual-LLM deliberation session (6-phase pipeline) for a patient |
 | `get_deliberation_results` | Retrieve structured outputs from the most recent deliberation |
 | `get_patient_knowledge` | Fetch accumulated patient-specific inferences from past deliberations |
 | `get_pending_nudges` | List undelivered nudges queued for a patient or care team |
@@ -82,12 +85,12 @@ No installation required. The server runs as a hosted remote MCP — add it to C
 ### Add to Claude Web
 
 1. Open Claude → Settings → Integrations → Add integration
-2. Enter the MCP URL:
-   ```
-   https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp
-   ```
-3. Name it: **Ambient Clinical Intelligence**
-4. Click Connect — no API key required for the demo endpoint
+2. Enter the MCP URL for each server you want to connect:
+   - Clinical Intelligence: `https://[your-replit-domain]/mcp`
+   - Skills Companion: `https://[your-replit-domain]/mcp-skills`
+   - Ingestion: `https://[your-replit-domain]/mcp-ingestion`
+3. Name it: **Ambient Clinical Intelligence** (or similar)
+4. Click Connect — OAuth PKCE handshake completes automatically
 
 ### Self-hosting
 
@@ -241,9 +244,11 @@ Claude will:
 | Framework | FastMCP 3.2.0 |
 | Language | Python 3.12 |
 | Transport | Streamable HTTP (MCP 2024-11-05) |
-| Database | PostgreSQL 14+ (26 tables) |
-| LLMs used server-side | Claude Sonnet (analysis + synthesis), GPT-4o (deliberation critic) |
-| Test coverage | 215 tests (100 phase1 + 48 skills + 37 Jest + 30 dashboard) |
-| Endpoint | `/mcp` |
-| Health check | `GET /health` |
-| REST adapter | `POST /tools/<name>` for all 15 tools |
+| Database | PostgreSQL 14+ (35 tables) |
+| LLMs used server-side | `claude-sonnet-4-20250514` (clinical + synthesis), `gpt-4o` (critic), `claude-haiku-4-5-20251001` (planner + flag reviewer) |
+| MCP servers | 3 (Clinical 23 tools · Skills 22+ tools · Ingestion 4 tools) |
+| Autonomous watchers | 3 (checkin atoms · crisis scan · care gaps) via AgentRuntime |
+| Test coverage | ~1,300 tests (pytest + Jest) |
+| Endpoints | `/mcp` · `/mcp-skills` · `/mcp-ingestion` |
+| Health check | `GET /health` on each server |
+| REST adapter | `POST /tools/<name>` for Clinical server tools |

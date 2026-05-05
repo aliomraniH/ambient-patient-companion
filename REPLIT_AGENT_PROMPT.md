@@ -5,7 +5,7 @@ of truth for this project.
 
 # Ambient Patient Companion — Current State Guide
 
-This document describes the current state of the codebase (as of 2026-04-15, commit `94d0fe6`)
+This document describes the current state of the codebase (as of 2026-05-05, commit `b6368f7`)
 for any agent or collaborator picking up the project.
 
 ---
@@ -23,6 +23,11 @@ A production multi-agent AI health system:
 - **5 Data Quality Validators (F1–F5)** — FHIR conformance, clinical plausibility, source anchoring
 - **MCP Audit Log System** — every Claude tool call recorded to `mcp_call_log` (35th table)
 - **Universal Provenance Gate** — `verify_output_provenance` on all 3 servers
+- **AgentRuntime** — embedded autonomous background-task scheduler in the Skills server
+  - 3 built-in watchers: `checkin_atom_watcher` (5 min), `crisis_scan_watcher` (60 min), `care_gap_watcher` (24 h)
+  - Each watcher is declared in its skill file via `register_watchers(runtime)` hook
+  - Watcher state persisted to `system_config` after every run; restored + stale rows pruned at boot
+  - Live health: `GET /api/agent-runtime/status` (port 8002) + Config Dashboard watcher panel
 
 ---
 
@@ -48,6 +53,7 @@ Health checks (after startup):
 curl http://localhost:8001/health  # {"ok":true,"server":"ambient-clinical-intelligence"}
 curl http://localhost:8002/health  # {"ok":true,"server":"ambient-skills-companion"}
 curl http://localhost:8003/health  # {"ok":true,"server":"ambient-ingestion"}
+curl http://localhost:8002/api/agent-runtime/status  # watcher health JSON
 ```
 
 ---
@@ -96,31 +102,21 @@ search_tool_calls(tool_name="run_deliberation")  → flexible filter
 
 ---
 
-## Key Files Changed in Last Session
+## AgentRuntime — Key Files
 
-| File | Change |
-|------|--------|
-| `shared/coercion.py` | NEW — coerce_confidence(): normalises LLM confidence values |
-| `shared/datetime_utils.py` | NEW — ensure_aware(): UTC tzinfo for naive DB datetimes |
-| `shared/call_recorder.py` | NEW — CallRecorder + session tracking for audit log |
-| `shared/audit_middleware.py` | NEW — AuditMiddleware(Middleware) FastMCP hook |
-| `shared/tests/test_coerce_confidence.py` | NEW — 28 unit tests |
-| `shared/tests/test_datetime_utils.py` | NEW — 6 unit tests |
-| `mcp-server/skills/call_history.py` | NEW — 4 audit query MCP tools |
-| `mcp-server/server.py` | MODIFIED — sys.path fix + AuditMiddleware wired |
-| `server/mcp_server.py` | MODIFIED — AuditMiddleware("clinical") wired |
-| `ingestion/server.py` | MODIFIED — AuditMiddleware("ingestion") wired |
-| `replit.md` | UPDATED — reflects all current state |
-| `README.md` | UPDATED — reflects all current state |
-| `CLAUDE.md` | UPDATED — reflects all current state |
-
----
-
-## Bug Fixes Applied
-
-1. **coerce_confidence**: `float > 1.0` now clamps to 1.0 (not ÷100); `int > 1` divides by 100
-2. **source_freshness**: `register_healthex_patient` writes `last_ingested_at = NULL` (never `NOW()`)
-3. **ensure_aware**: prevents `TypeError: can't subtract offset-naive and offset-aware datetimes`
+| File | Purpose |
+|------|---------|
+| `mcp-server/runtime/agent_runtime.py` | AgentRuntime singleton: watch/start/lifespan/status, persist/restore/prune |
+| `mcp-server/runtime/watchers.py` | Empty migration-notice shell (watchers now live in skill files) |
+| `mcp-server/skills/behavioral_atoms.py` | `register_watchers()` → checkin_atom_watcher (5 min) |
+| `mcp-server/skills/crisis_escalation.py` | `register_watchers()` → crisis_scan_watcher (60 min) |
+| `mcp-server/skills/care_gap.py` | `register_watchers()` → care_gap_watcher (24 h) |
+| `mcp-server/skills/__init__.py` | `load_skills(mcp, runtime=None)` — calls register_watchers hook |
+| `mcp-server/server.py` | Uses `get_runtime()` singleton, passes runtime to load_skills |
+| `replit_dashboard/server.py` | `GET /api/health/agent-runtime` — proxies Skills server status |
+| `tests/test_agent_runtime.py` | 11 root-level runtime tests (RT1–RT10) |
+| `mcp-server/tests/test_agent_runtime.py` | 15 skill-registration tests |
+| `mcp-server/tests/test_watcher_persistence.py` | 31 persist/restore/stale-prune tests (incl. 9 integration) |
 
 ---
 
@@ -128,16 +124,16 @@ search_tool_calls(tool_name="run_deliberation")  → flexible filter
 
 ```bash
 # All Python tests
-python -m pytest tests/phase1/ -v                    # 196 Phase 1
-python -m pytest tests/phase2/ -v                    # 95 Phase 2
-python -m pytest server/deliberation/tests/ -v       # 290+ deliberation unit
-python -m pytest ingestion/tests/ -v                 # 152 ingestion
-python -m pytest shared/tests/ -v                   # 34 shared utilities
+python -m pytest tests/phase1/ -v                    # 255 Phase 1
+python -m pytest tests/phase2/ -v                    # 156 Phase 2
+python -m pytest server/deliberation/tests/ -v       # 258 deliberation unit
+python -m pytest ingestion/tests/ -v                 # 269 ingestion
+python -m pytest shared/tests/ -v                    # 24 shared utilities
 python -m pytest tests/e2e/ -v                       # 28 end-to-end
-python -m pytest tests/test_mcp_discovery.py -v      # 26 discovery + OAuth
-python -m pytest tests/test_mcp_smoke.py -v          # 24 smoke
-cd mcp-server && python -m pytest tests/ -v          # 110 skills backend
-cd replit_dashboard && python -m pytest tests/ -v    # 30 dashboard
+python -m pytest tests/test_mcp_discovery.py tests/test_mcp_smoke.py -v  # 50
+python -m pytest tests/test_agent_runtime.py -v      # 11 AgentRuntime (RT1-RT10)
+PYTHONPATH=mcp-server python -m pytest mcp-server/tests/ -v  # 170 skills + runtime
+cd replit_dashboard && python -m pytest tests/ -v    # 37 dashboard
 
 # Frontend
 cd replit-app && npm test                            # 37 Jest tests
@@ -153,6 +149,8 @@ cd replit-app && npm test                            # 37 Jest tests
 - Always call `ensure_aware()` before datetime arithmetic on DB-read TIMESTAMP columns
 - `last_ingested_at` must be written as `NULL` on patient registration (never `NOW()`)
 - `AuditMiddleware` must be added AFTER tool registration (`mcp.add_middleware(...)` at end of server module)
+- `load_skills(mcp, runtime=runtime)` — always pass the singleton runtime so skill watchers are registered
+- `AgentRuntime.watch()` is safe to call with duplicate names (warns + skips) — no ValueError raised
 - Model names: `claude-sonnet-4-20250514`, `gpt-4o`, `claude-haiku-4-5-20251001`
 - `pytest-asyncio==0.21.2` pinned — do NOT upgrade to 1.x
 - Import shared utilities as `from shared.coercion import ...` (repo root is on sys.path in all 3 servers)
@@ -162,5 +160,5 @@ cd replit-app && npm test                            # 37 Jest tests
 
 ## GitHub
 
-Repository: https://github.com/aliomraniH/ambient-patient-companion  
-Last commit: `94d0fe6`
+Repository: https://github.com/aliomraniH/ambient-patient-companion
+Last commit: `b6368f7` (2026-05-05)
