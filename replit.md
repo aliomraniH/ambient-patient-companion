@@ -23,7 +23,8 @@ Individual component commands (All MCP servers require `MCP_TRANSPORT=streamable
 - `OPENAI_API_KEY`: GPT-4o API key (Replit Secret)
 - `LANGSMITH_API_KEY`: (Optional) For LangSmith tracing (Replit Secret)
 - `HF_TOKEN`: HuggingFace Pro token (Replit Secret)
-- `GITHUB_TOKEN`: GitHub push access (Replit Secret)
+- `GITHUB_DEPLOY_KEY`: **Preferred** — SSH deploy key private key for GitHub push (never expires). Run `bash scripts/setup_deploy_key.sh` once to generate, then add the public key to GitHub and store the private key here.
+- `GITHUB_TOKEN`: Fallback — classic/fine-grained PAT for GitHub push via HTTPS (expires; prefer `GITHUB_DEPLOY_KEY`).
 - `DATABASE_URL`: Auto-set by Replit PostgreSQL
 - `REPLIT_DEV_DOMAIN`: Auto-set, used for MCP JSON generation
 
@@ -107,6 +108,7 @@ The Ambient Patient Companion connects large language models to a clinical intel
 - **Deliberation workflow:** `run_deliberation` is asynchronous; poll `get_deliberation_results` for the output.
 - **HealthEx ingestion protocol:** `register_healthex_patient` must precede `ingest_from_healthex`.
 - **LLM JSON parsing:** Use `json_utils.strip_markdown_fences()` to remove Markdown fences from LLM-generated JSON before validation.
+- **GitHub deploy key newline:** The private key stored in `GITHUB_DEPLOY_KEY` must end with a newline. `push_to_github.sh` appends one automatically, but verify with `echo "$GITHUB_DEPLOY_KEY" | tail -c1 | xxd` if SSH auth fails unexpectedly.
 
 ## Pointers
 

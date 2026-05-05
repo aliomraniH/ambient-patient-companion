@@ -235,7 +235,8 @@ All secrets are Replit Secrets (never in `.env` files):
 | `ANTHROPIC_API_KEY` | Secret | Claude Sonnet + Haiku API calls |
 | `OPENAI_API_KEY` | Secret | GPT-4o deliberation critic |
 | `LANGSMITH_API_KEY` | Secret | Optional LangSmith tracing |
-| `GITHUB_TOKEN` | Secret | GitHub push access |
+| `GITHUB_DEPLOY_KEY` | Secret | **Preferred** — SSH deploy key private key for GitHub push (never expires). Generate with `bash scripts/setup_deploy_key.sh`. |
+| `GITHUB_TOKEN` | Secret | Fallback — classic/fine-grained PAT for GitHub push via HTTPS (expires; prefer `GITHUB_DEPLOY_KEY`). |
 | `DATABASE_URL` | Auto (Replit) | PostgreSQL connection string |
 | `REPLIT_DEV_DOMAIN` | Auto (Replit) | Public domain — used by `generate_mcp_json.py` |
 
