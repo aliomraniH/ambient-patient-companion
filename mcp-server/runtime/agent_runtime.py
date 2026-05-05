@@ -22,17 +22,25 @@ be picked up by the lifespan that server.py installs::
     # inside a skill's register(mcp) function
     from runtime.agent_runtime import get_runtime
     get_runtime().watch("my_watcher", interval_seconds=300, coro_fn=_my_watcher)
+
+Watcher run state (run_count, last_run, last_error) is persisted to the
+``system_config`` table after every execution so that health is accurate
+immediately after a server restart.  Each watcher occupies one row with key
+``watcher_state:<name>`` and a JSON value.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Callable, Coroutine
 
 logger = logging.getLogger(__name__)
+
+_KEY_PREFIX = "watcher_state:"
 
 # Module-level singleton so skills can reach the runtime without a circular import
 _runtime: AgentRuntime | None = None
@@ -75,6 +83,10 @@ class AgentRuntime:
     creates tasks on startup (via ``lifespan``) and cancels them on shutdown.
     Errors inside a watcher coroutine are caught and stored in ``status()``
     — they never propagate out and never crash the loop.
+
+    Run state is persisted to ``system_config`` (key ``watcher_state:<name>``)
+    after each execution and reloaded at startup, so ``status()`` reflects
+    historical counts and timestamps immediately after a restart.
     """
 
     def __init__(self) -> None:
@@ -106,12 +118,103 @@ class AgentRuntime:
             name, interval_seconds,
         )
 
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    async def _persist_watcher_state(self, state: _WatcherState) -> None:
+        """Upsert one system_config row for this watcher after each execution."""
+        key = f"{_KEY_PREFIX}{state.name}"
+        value = json.dumps({
+            "run_count": state.run_count,
+            "last_run": state.last_run.isoformat() if state.last_run else None,
+            "last_error": state.last_error,
+        })
+        now = datetime.now(timezone.utc)
+        try:
+            from db.connection import get_pool  # local import avoids circular deps
+            pool = await get_pool()
+            await pool.execute(
+                """
+                INSERT INTO system_config (key, value, updated_at)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (key) DO UPDATE
+                    SET value      = EXCLUDED.value,
+                        updated_at = EXCLUDED.updated_at
+                """,
+                key, value, now,
+            )
+        except Exception as exc:
+            logger.warning(
+                "AgentRuntime: failed to persist state for watcher '%s': %s",
+                state.name, exc,
+            )
+
+    async def _load_persisted_state(self) -> None:
+        """Read system_config rows and pre-populate in-memory watcher state.
+
+        Called once at startup (inside ``lifespan``) before tasks are spawned
+        so that ``status()`` is accurate from the very first request.
+        Any DB or JSON error is caught and logged — missing history is not fatal.
+        """
+        try:
+            from db.connection import get_pool  # local import avoids circular deps
+            pool = await get_pool()
+            rows = await pool.fetch(
+                "SELECT key, value FROM system_config WHERE key LIKE $1",
+                f"{_KEY_PREFIX}%",
+            )
+        except Exception as exc:
+            logger.warning(
+                "AgentRuntime: could not load persisted watcher state (DB error): %s", exc,
+            )
+            return
+
+        for row in rows:
+            name = row["key"][len(_KEY_PREFIX):]
+            if name not in self._watchers:
+                continue
+            try:
+                data = json.loads(row["value"])
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning(
+                    "AgentRuntime: malformed persisted state for watcher '%s': %s",
+                    name, exc,
+                )
+                continue
+
+            if not isinstance(data, dict):
+                logger.warning(
+                    "AgentRuntime: persisted state for watcher '%s' is not a dict "
+                    "(got %s) — skipping",
+                    name, type(data).__name__,
+                )
+                continue
+
+            state = self._watchers[name]
+            raw_count = data.get("run_count")
+            try:
+                state.run_count = max(0, int(raw_count)) if raw_count is not None else 0
+            except (TypeError, ValueError):
+                state.run_count = 0
+            last_run_str = data.get("last_run")
+            if last_run_str and isinstance(last_run_str, str):
+                try:
+                    state.last_run = datetime.fromisoformat(last_run_str)
+                except ValueError:
+                    pass
+            raw_error = data.get("last_error")
+            state.last_error = str(raw_error) if raw_error is not None else None
+            logger.info(
+                "AgentRuntime: restored state for watcher '%s' "
+                "(run_count=%d, last_run=%s)",
+                name, state.run_count, state.last_run,
+            )
+
     # ── Execution loop ────────────────────────────────────────────────────────
 
     async def _run_watcher(self, state: _WatcherState) -> None:
         """Infinite loop for one watcher.
 
-        Pattern: execute → record outcome → sleep → repeat.
+        Pattern: execute → record outcome → persist → sleep → repeat.
         asyncio.CancelledError is re-raised after cleanup so the task ends.
         All other exceptions are caught, logged, and stored in state.last_error
         — the loop always continues.
@@ -133,6 +236,8 @@ class AgentRuntime:
 
             state.run_count += 1
             state.last_run = datetime.now(timezone.utc)
+
+            await self._persist_watcher_state(state)
 
             try:
                 await asyncio.sleep(state.interval_seconds)
@@ -189,13 +294,16 @@ class AgentRuntime:
         """FastMCP / Starlette lifespan context manager.
 
         Pass as ``lifespan=runtime.lifespan`` to the ``FastMCP`` constructor.
-        Starts all registered watchers on entry (via ``start()``) and cancels
-        + awaits them on exit so the process shuts down cleanly.
+        Loads persisted watcher state from the DB before starting tasks so
+        that ``status()`` is accurate from the first request.  Then starts all
+        registered watchers and cancels + awaits them on exit so the process
+        shuts down cleanly.
 
         Example::
 
             mcp = FastMCP("my-server", lifespan=runtime.lifespan)
         """
+        await self._load_persisted_state()
         self.start(server)
         logger.info("AgentRuntime: %d watcher(s) active", len(self._watchers))
         try:
