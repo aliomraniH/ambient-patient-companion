@@ -1,16 +1,11 @@
 """Built-in autonomous watchers for the Skills MCP server.
 
-Three watchers are registered here and started by AgentRuntime at server
-startup. They call the same skill logic used by the MCP tools, but proactively
-— no clinician trigger required.
+Two built-in watchers are registered here and started by AgentRuntime at
+server startup. They call the same skill logic used by the MCP tools, but
+proactively — no clinician trigger required.
 
 Watcher summary
 ---------------
-checkin_atom_watcher  — every 5 min
-    Finds daily check-ins entered today that have no behavioral atoms yet.
-    Extracts atoms + runs gap detection for each affected patient. This
-    closes the "new check-in → manual MCP call required" gap.
-
 crisis_scan_watcher  — every 60 min
     Finds patients who had a check-in in the last 24 h and runs
     run_crisis_escalation for each. Catches high-stress / SI signals
@@ -20,18 +15,21 @@ care_gap_watcher  — every 24 h
     Finds patients with open care gaps older than 60 days and inserts an
     agent_interventions row of type 'care_gap_reminder' if one has not
     already been created in the last 7 days.
+
+Note: checkin_atom_watcher (every 5 min) has been migrated to
+skills/behavioral_atoms.py as a proof-of-concept of the register_watchers()
+hook.  It is registered automatically by load_skills() via that module's
+register_watchers(runtime) export.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
 # Configurable intervals (seconds) — override in tests via monkey-patching
-CHECKIN_ATOM_INTERVAL: float = 300.0     # 5 minutes
 CRISIS_SCAN_INTERVAL: float = 3600.0    # 60 minutes
 CARE_GAP_INTERVAL: float = 86400.0      # 24 hours
 
@@ -40,110 +38,7 @@ CARE_GAP_AGE_DAYS: int = 60
 CARE_GAP_DEDUP_DAYS: int = 7
 
 
-# ── 1. checkin_atom_watcher ───────────────────────────────────────────────────
-
-async def _checkin_atom_watcher() -> None:
-    """Extract behavioral atoms from today's unprocessed check-ins."""
-    from db.connection import get_pool
-    from skills.behavioral_atom_extractor import extract_atoms_from_checkin
-    from skills.atom_embedder import embed_signal_value, active_backend
-    from skills.atom_vector_search import refresh_atom_pressure_view
-    from skills.behavioral_gap_detector import run_gap_detector_for_patient
-
-    pool = await get_pool()
-
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT dc.id, dc.patient_id,
-                   dc.mood, dc.mood_numeric, dc.stress_level,
-                   dc.sleep_hours, dc.sleep_quality, dc.notes
-            FROM daily_checkins dc
-            WHERE dc.completed_at >= NOW() - INTERVAL '10 minutes'
-              AND NOT EXISTS (
-                SELECT 1 FROM behavioral_signal_atoms bsa
-                WHERE bsa.source_type = 'checkin'
-                  AND bsa.source_id   = dc.id
-              )
-            LIMIT 50
-            """,
-        )
-
-    if not rows:
-        return
-
-    logger.info(
-        "checkin_atom_watcher: found %d unprocessed check-in(s) — extracting atoms",
-        len(rows),
-    )
-
-    patients_processed: set[str] = set()
-    atoms_stored_total = 0
-
-    for row in rows:
-        checkin_id = str(row["id"])
-        patient_id = str(row["patient_id"])
-        checkin = dict(row)
-
-        atoms = extract_atoms_from_checkin(checkin, source_id=checkin_id)
-        if not atoms:
-            continue
-
-        stored = 0
-        async with pool.acquire() as conn:
-            for atom in atoms:
-                embedding = embed_signal_value(atom.signal_value)
-                embedding_str = (
-                    "[" + ",".join(str(x) for x in embedding) + "]"
-                    if embedding else None
-                )
-                try:
-                    await conn.execute(
-                        """
-                        INSERT INTO behavioral_signal_atoms
-                            (id, patient_id, signal_type, signal_value, confidence,
-                             source_type, source_id, extracted_at, embedding, data_source)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8::vector, 'healthex')
-                        ON CONFLICT DO NOTHING
-                        """,
-                        str(uuid.uuid4()),
-                        patient_id,
-                        atom.signal_type,
-                        atom.signal_value,
-                        float(atom.confidence),
-                        "checkin",
-                        checkin_id,
-                        embedding_str,
-                    )
-                    stored += 1
-                except Exception as exc:
-                    logger.warning(
-                        "checkin_atom_watcher: insert failed for patient %s: %s",
-                        patient_id, exc,
-                    )
-
-        atoms_stored_total += stored
-        patients_processed.add(patient_id)
-
-    if atoms_stored_total > 0:
-        await refresh_atom_pressure_view(pool)
-
-    for patient_id in patients_processed:
-        try:
-            await run_gap_detector_for_patient(pool, patient_id)
-        except Exception as exc:
-            logger.warning(
-                "checkin_atom_watcher: gap detection failed for %s: %s",
-                patient_id, exc,
-            )
-
-    logger.info(
-        "checkin_atom_watcher: stored %d atom(s) for %d patient(s); backend=%s",
-        atoms_stored_total, len(patients_processed), active_backend(),
-    )
-
-
-# ── 2. crisis_scan_watcher ────────────────────────────────────────────────────
+# ── 1. crisis_scan_watcher ────────────────────────────────────────────────────
 
 async def _crisis_scan_watcher() -> None:
     """Run crisis escalation for every patient who checked in within 24 h."""
@@ -266,18 +161,17 @@ async def _care_gap_watcher() -> None:
 # ── Registration ──────────────────────────────────────────────────────────────
 
 def register_watchers(runtime: "AgentRuntime") -> None:  # noqa: F821
-    """Register the three built-in clinical watchers with *runtime*.
+    """Register the two built-in clinical watchers with *runtime*.
 
     Called once from server.py before ``mcp.run()``; safe to call in tests
     with a fresh AgentRuntime instance.
+
+    Note: checkin_atom_watcher is registered by skills/behavioral_atoms.py
+    via its register_watchers(runtime) export — see load_skills() in
+    skills/__init__.py.
     """
     from runtime.agent_runtime import AgentRuntime  # noqa: F401 (type reference)
 
-    runtime.watch(
-        name="checkin_atom_watcher",
-        interval_seconds=CHECKIN_ATOM_INTERVAL,
-        coro_fn=_checkin_atom_watcher,
-    )
     runtime.watch(
         name="crisis_scan_watcher",
         interval_seconds=CRISIS_SCAN_INTERVAL,
@@ -289,4 +183,4 @@ def register_watchers(runtime: "AgentRuntime") -> None:  # noqa: F821
         coro_fn=_care_gap_watcher,
     )
 
-    logger.info("register_watchers: 3 built-in watchers registered")
+    logger.info("register_watchers: 2 built-in watchers registered")

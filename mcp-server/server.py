@@ -23,13 +23,16 @@ from runtime.agent_runtime import get_runtime
 from runtime.watchers import register_watchers
 
 # ── Agent runtime — autonomous background watchers ────────────────────────────
-# Uses the module-level singleton so skills loaded later via load_skills() can
-# call get_runtime().watch(...) to self-register additional watchers and have
-# them picked up by the same running instance.
-# Three built-in watchers start with the server process:
-#   • checkin_atom_watcher  (every 5 min)  — atom extraction for new check-ins
+# Uses the module-level singleton so any skill module that exports
+# register_watchers(runtime) can declare its own background tasks — the same
+# instance is passed to load_skills() below.
+#
+# Two built-in watchers start via register_watchers() from runtime/watchers.py:
 #   • crisis_scan_watcher   (every 60 min) — crisis escalation for recent patients
 #   • care_gap_watcher      (every 24 h)   — flag overdue open care gaps
+#
+# One skill-owned watcher is registered by skills/behavioral_atoms.py:
+#   • checkin_atom_watcher  (every 5 min)  — atom extraction for new check-ins
 runtime = get_runtime()
 register_watchers(runtime)
 
@@ -75,8 +78,10 @@ async def agent_runtime_status(request: Request) -> JSONResponse:
     return JSONResponse(runtime.status())
 
 
-# Auto-discover and register all skill tools
-load_skills(mcp)
+# Auto-discover and register all skill tools.
+# Passing runtime lets any skill that exports register_watchers(runtime)
+# declare its own background watchers without editing watchers.py.
+load_skills(mcp, runtime=runtime)
 
 # Audit every tool call — records inputs, outputs, timing and session to mcp_call_log
 mcp.add_middleware(AuditMiddleware("skills", get_pool))

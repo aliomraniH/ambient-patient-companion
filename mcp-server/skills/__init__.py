@@ -2,6 +2,10 @@
 
 Scans the skills package for modules with a ``register(mcp)`` function
 and calls each one to register MCP tools.
+
+Optional hook: if a module also exports ``register_watchers(runtime)``,
+the loader calls it with the AgentRuntime singleton so the skill can own
+its autonomous background behaviour alongside its MCP tool surface.
 """
 
 import importlib
@@ -13,8 +17,16 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 
-def load_skills(mcp):
-    """Discover and register all skill modules."""
+def load_skills(mcp, runtime=None):
+    """Discover and register all skill modules.
+
+    Args:
+        mcp:     FastMCP instance — passed to each module's ``register(mcp)``.
+        runtime: Optional AgentRuntime singleton.  When provided, any module
+                 that also exports ``register_watchers(runtime)`` will have
+                 that hook called automatically, allowing the skill to declare
+                 its own background watchers without editing watchers.py.
+    """
     import skills
 
     for _, modname, _ in pkgutil.iter_modules(skills.__path__):
@@ -27,5 +39,9 @@ def load_skills(mcp):
                 logger.info("Loaded skill: %s", modname)
             else:
                 logger.warning("Skill module %s has no register() function", modname)
+
+            if runtime is not None and hasattr(module, "register_watchers"):
+                module.register_watchers(runtime)
+                logger.info("Loaded watchers for skill: %s", modname)
         except Exception as e:
             logger.error("Failed to load skill %s: %s", modname, e)

@@ -470,6 +470,134 @@ def register(mcp) -> None:
         }
 
 
+# ── Background watcher ────────────────────────────────────────────────────────
+
+CHECKIN_ATOM_INTERVAL: float = 300.0  # 5 minutes — override in tests via monkey-patching
+
+
+async def _checkin_atom_watcher() -> None:
+    """Extract behavioral atoms from check-ins completed in the last 10 minutes.
+
+    Finds daily check-ins that have no behavioral atoms yet, extracts atoms,
+    embeds them, persists them to behavioral_signal_atoms, and runs gap
+    detection for every affected patient.  Runs every 5 minutes so the
+    "new check-in → manual MCP call required" lag is eliminated.
+    """
+    from db.connection import get_pool
+    from skills.behavioral_atom_extractor import extract_atoms_from_checkin
+    from skills.atom_embedder import embed_signal_value, active_backend
+    from skills.atom_vector_search import refresh_atom_pressure_view
+    from skills.behavioral_gap_detector import run_gap_detector_for_patient
+
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT dc.id, dc.patient_id,
+                   dc.mood, dc.mood_numeric, dc.stress_level,
+                   dc.sleep_hours, dc.sleep_quality, dc.notes
+            FROM daily_checkins dc
+            WHERE dc.completed_at >= NOW() - INTERVAL '10 minutes'
+              AND NOT EXISTS (
+                SELECT 1 FROM behavioral_signal_atoms bsa
+                WHERE bsa.source_type = 'checkin'
+                  AND bsa.source_id   = dc.id
+              )
+            LIMIT 50
+            """,
+        )
+
+    if not rows:
+        return
+
+    log.info(
+        "checkin_atom_watcher: found %d unprocessed check-in(s) — extracting atoms",
+        len(rows),
+    )
+
+    patients_processed: set[str] = set()
+    atoms_stored_total = 0
+
+    for row in rows:
+        checkin_id = str(row["id"])
+        patient_id = str(row["patient_id"])
+        checkin = dict(row)
+
+        atoms = extract_atoms_from_checkin(checkin, source_id=checkin_id)
+        if not atoms:
+            continue
+
+        stored = 0
+        async with pool.acquire() as conn:
+            for atom in atoms:
+                embedding = embed_signal_value(atom.signal_value)
+                embedding_str = (
+                    "[" + ",".join(str(x) for x in embedding) + "]"
+                    if embedding else None
+                )
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO behavioral_signal_atoms
+                            (id, patient_id, signal_type, signal_value, confidence,
+                             source_type, source_id, extracted_at, embedding, data_source)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8::vector, 'healthex')
+                        ON CONFLICT DO NOTHING
+                        """,
+                        str(uuid.uuid4()),
+                        patient_id,
+                        atom.signal_type,
+                        atom.signal_value,
+                        float(atom.confidence),
+                        "checkin",
+                        checkin_id,
+                        embedding_str,
+                    )
+                    stored += 1
+                except Exception as exc:
+                    log.warning(
+                        "checkin_atom_watcher: insert failed for patient %s: %s",
+                        patient_id, exc,
+                    )
+
+        atoms_stored_total += stored
+        patients_processed.add(patient_id)
+
+    if atoms_stored_total > 0:
+        await refresh_atom_pressure_view(pool)
+
+    for patient_id in patients_processed:
+        try:
+            await run_gap_detector_for_patient(pool, patient_id)
+        except Exception as exc:
+            log.warning(
+                "checkin_atom_watcher: gap detection failed for %s: %s",
+                patient_id, exc,
+            )
+
+    log.info(
+        "checkin_atom_watcher: stored %d atom(s) for %d patient(s); backend=%s",
+        atoms_stored_total, len(patients_processed), active_backend(),
+    )
+
+
+def register_watchers(runtime) -> None:
+    """Register behavioral-atom background watchers with *runtime*.
+
+    Called automatically by skills/__init__.py load_skills() when a runtime
+    instance is provided.  Moving watcher registration here keeps the skill
+    self-contained: its MCP tools (register) and its autonomous behaviour
+    (register_watchers) live in the same file.
+    """
+    runtime.watch(
+        name="checkin_atom_watcher",
+        interval_seconds=CHECKIN_ATOM_INTERVAL,
+        coro_fn=_checkin_atom_watcher,
+    )
+    log.info("behavioral_atoms: registered checkin_atom_watcher (interval=%.0fs)", CHECKIN_ATOM_INTERVAL)
+
+
 async def get_behavioral_context(
     db_pool,
     patient_id: str,
