@@ -18,6 +18,8 @@ Individual component commands (All MCP servers require `MCP_TRANSPORT=streamable
 - **Skills MCP Server:** `cd mcp-server && MCP_TRANSPORT=streamable-http MCP_PORT=8002 python server.py` (Port 8002)
 - **Ingestion MCP Server:** `MCP_TRANSPORT=streamable-http MCP_PORT=8003 python -m ingestion.server` (Port 8003)
 
+**Get your MCP URLs:** After `./start.sh`, run `cat .mcp.json` or check the Replit preview domain.
+
 **Required Environment Variables:**
 - `ANTHROPIC_API_KEY`: Claude API key (Replit Secret)
 - `OPENAI_API_KEY`: GPT-4o API key (Replit Secret)

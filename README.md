@@ -7,6 +7,188 @@ A production multi-agent AI health system that continuously generates the optima
 
 ---
 
+## Get Started in 3 Steps
+
+Connect Claude (or any MCP-compatible LLM) to a live clinical intelligence layer and explore insights from your medical reports — imported via HealthEx, your own FHIR data, or the built-in demo patient.
+
+```
+  ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+  │   Step 1         │     │   Step 2         │     │   Step 3         │
+  │                  │     │                  │     │                  │
+  │  Import this     │────▶│  Get your MCP    │────▶│  Add to Claude   │
+  │  repo to Replit  │     │  server URLs     │     │  and explore     │
+  │                  │     │                  │     │  your data       │
+  └──────────────────┘     └──────────────────┘     └──────────────────┘
+```
+
+---
+
+### Step 1 — Import this repository to Replit
+
+[![Run on Replit](https://replit.com/badge/github/aliomraniH/ambient-patient-companion)](https://replit.com/new/github/aliomraniH/ambient-patient-companion)
+
+Click the badge above, or do it manually:
+
+1. Go to **[replit.com](https://replit.com)** → click **Create Repl**
+2. Choose **Import from GitHub**
+3. Paste `https://github.com/aliomraniH/ambient-patient-companion`
+4. Click **Import from GitHub** — the environment configures automatically
+
+Once imported, open the **Secrets** tab (lock icon in the sidebar) and add:
+
+| Secret name | What to put there |
+|---|---|
+| `ANTHROPIC_API_KEY` | Your Claude API key (`sk-ant-...`) |
+| `OPENAI_API_KEY` | Your OpenAI key — used by the deliberation engine's GPT-4o critic |
+
+Then start all services with one command in the Shell tab:
+
+```bash
+./start.sh
+```
+
+This regenerates your server URLs, then starts all 5 services in parallel:
+
+```
+Port 5000  — Next.js frontend + OAuth layer
+Port 8001  — Clinical MCP server  (44 tools · guardrails · deliberation engine)
+Port 8002  — Skills MCP server    (41 tools · behavioral stack · AgentRuntime)
+Port 8003  — Ingestion MCP server (HealthEx + FHIR pipeline)
+Port 8080  — Config Dashboard     (watcher health · environment monitor)
+```
+
+---
+
+### Step 2 — Get your MCP server URLs
+
+After `start.sh` runs, your permanent server URLs are written to `.mcp.json`. See them with:
+
+```bash
+cat .mcp.json
+```
+
+They follow this pattern — replace `<your-replit-domain>` with the domain shown in your Replit preview pane:
+
+```
+Clinical Intelligence:  https://<your-replit-domain>/mcp
+Skills Companion:       https://<your-replit-domain>/mcp-skills
+Ingestion Pipeline:     https://<your-replit-domain>/mcp-ingestion
+```
+
+**Verify all three servers are up:**
+
+```bash
+curl https://<your-domain>/health
+# → {"ok": true, "server": "ambient-clinical-intelligence", "version": "1.0.0"}
+
+curl https://<your-domain>/mcp-skills/health
+# → {"ok": true, "server": "ambient-skills-companion", "version": "1.0.0"}
+```
+
+---
+
+### Step 3 — Add to Claude and explore your medical data
+
+#### Connect to Claude
+
+1. Open **Claude** → **Settings** → **Integrations** → **Add custom integration**
+2. Paste your server URL(s) — start with the Clinical server, add the others when ready:
+
+```
+https://<your-domain>/mcp           ← Clinical Intelligence (start here)
+https://<your-domain>/mcp-skills    ← Skills + behavioral + audit tools
+https://<your-domain>/mcp-ingestion ← HealthEx / FHIR ingestion
+```
+
+3. Name it **Ambient Clinical Intelligence** → click **Connect**. OAuth completes automatically — no login screen appears.
+
+---
+
+#### Option A — Import a medical report from HealthEx
+
+If you have **HealthEx MCP** connected to Claude alongside Ambient, use this sequence:
+
+**Prompt 1 — Register the patient:**
+```
+Register this patient in Ambient: [Full name], MRN [HX-XXXXX],
+[age]-year-old [sex] with [primary condition].
+```
+
+**Prompt 2 — Ingest their data:**
+```
+Now ingest this patient's HealthEx data into the Ambient warehouse —
+pull their labs, conditions, medications, and encounters summary.
+```
+
+**Prompt 3 — Run clinical deliberation:**
+```
+Run a full deliberation for this patient and show me:
+- The top anticipatory clinical scenarios for the next 30/90/180 days
+- Any critical missing data flags
+- The behavioral nudges queued for delivery
+```
+
+> **Important — why the order matters:** Ambient enforces a ground-truth gate. If you skip ingestion and try to deliberate directly, you'll get `"status": "ingestion_required"` — by design. Deliberating on an un-ingested patient produces confidently wrong outputs (phantom BMI, missing labs, stale care gaps). The gate exists precisely because *the AI doesn't know what it doesn't know*.
+
+---
+
+#### Option B — Import your own FHIR data
+
+Ambient's ingestion pipeline accepts 5 formats automatically — FHIR R4 JSON bundles, QuestionnaireResponse, flat FHIR text, plain clinical summaries, or compressed table format.
+
+```
+I have FHIR data for a new patient. Please:
+1. Register them with register_healthex_patient (name: [name], MRN: [id])
+2. Ingest their data with ingest_from_healthex — I'll paste the FHIR below
+3. Then run deliberation and summarize the key clinical findings
+
+[paste your FHIR R4 bundle or clinical summary here]
+```
+
+---
+
+#### Option C — Try the built-in demo patient (no HealthEx required)
+
+```
+Load the demo patient Maria Chen (MRN MC-2025-4829) and:
+1. Show me what USPSTF screenings she's overdue for
+2. Check for any drug interactions in her current medications
+3. Run a deliberation and show me her top anticipatory scenarios
+```
+
+Maria Chen: 54F, Taiwanese-American, Type 2 DM + HTN + obesity (BMI 31), food insecurity flag, 14-month gap since last HbA1c.
+
+---
+
+#### What happens under the hood
+
+```mermaid
+sequenceDiagram
+    participant You
+    participant Claude
+    participant Ambient as Ambient MCP Servers
+    participant DB as PostgreSQL Warehouse
+
+    You->>Claude: "Register and deliberate on [patient]"
+    Claude->>Ambient: register_healthex_patient()
+    Ambient->>DB: upsert patient + source_freshness row
+    Claude->>Ambient: ingest_from_healthex(resource_type="summary")
+    Ambient->>Ambient: 5-format adaptive parser + ETL
+    Ambient->>DB: write labs · conditions · meds · encounters
+    Claude->>Ambient: run_deliberation(mode="full")
+    Ambient->>Ambient: Phase 0 context compile (11K token budget)
+    Ambient->>Ambient: Phase 1 Claude + GPT-4o analyze in parallel
+    Ambient->>Ambient: Phase 2 cross-critique across 1–3 rounds
+    Ambient->>Ambient: Phase 3 synthesis → 5 output categories
+    Ambient->>Ambient: Phase 3.5 guardrail safety wrapper
+    Ambient->>DB: atomic commit of all deliberation outputs
+    Claude->>Ambient: get_deliberation_results()
+    Ambient-->>Claude: scenarios · flags · nudges · knowledge
+    Claude-->>You: Structured clinical insights
+```
+
+---
+
 ## The Core Premise
 
 Traditional healthcare software forces clinicians and patients to navigate static dashboards designed for a generic "average" user. The Ambient Patient Companion inverts this entirely.
@@ -577,6 +759,6 @@ ambient-patient-companion/
 ├── .mcp.json                    MCP client discovery (auto-regenerated at startup)
 ├── start.sh                     Production startup script
 ├── config/system_prompts/       Role-based prompts (pcp · care_manager · patient)
-├── prototypes/                  4 HTML proof-of-concept prototypes
+├── docs/images/                 Architecture and session screenshots
 └── submission/README.md         MCP marketplace submission
 ```
