@@ -3009,6 +3009,78 @@ async def run_deliberation(
         # Consume the token so it cannot be replayed.
         _MODE_SELECTION_CACHE.pop(selection_token, None)
 
+    # ── HealthEx ground-truth gate ────────────────────────────────────────
+    # Deliberating on un-ingested HealthEx data produces confidently wrong
+    # outputs: phantom BMI, missing labs, stale care gaps calibrated to a
+    # patient who no longer exists in that state.
+    #
+    # Hard block  — no ingest has ever completed (last_ingested_at IS NULL).
+    # Soft warn   — data exists but has aged past its TTL (is_stale = true).
+    #
+    # Gate failures are silently swallowed so they never block deliberation
+    # on non-HealthEx patients or when the DB is temporarily unavailable.
+    _healthex_freshness_warning: dict | None = None
+    try:
+        import uuid as _uuid_check
+        _gate_pool = await _get_db_pool()
+        async with _gate_pool.acquire() as _gc:
+            # Accept both UUID and MRN as patient_id.
+            try:
+                _uuid_val = str(_uuid_check.UUID(patient_id))
+                _pt = await _gc.fetchrow(
+                    "SELECT id, data_source FROM patients WHERE id = $1::uuid",
+                    _uuid_val,
+                )
+            except ValueError:
+                _pt = await _gc.fetchrow(
+                    "SELECT id, data_source FROM patients WHERE mrn = $1",
+                    patient_id,
+                )
+
+            if _pt and _pt["data_source"] == "healthex":
+                _real_id = str(_pt["id"])
+                _sf = await _gc.fetchrow(
+                    """
+                    SELECT last_ingested_at, is_stale, ttl_hours, records_count
+                    FROM source_freshness
+                    WHERE patient_id = $1::uuid AND source_name = 'healthex'
+                    """,
+                    _real_id,
+                )
+                _never_ingested = _sf is None or _sf["last_ingested_at"] is None
+                if _never_ingested:
+                    return {
+                        "status": "ingestion_required",
+                        "reason": "healthex_data_not_ingested",
+                        "patient_id": patient_id,
+                        "message": (
+                            "This HealthEx patient has no ingested ground-truth data. "
+                            "Deliberating on an empty warehouse produces fictional "
+                            "outputs: wrong BMI, missing labs, phantom care gaps. "
+                            "Required sequence: register_healthex_patient → "
+                            "ingest_from_healthex → then re-run deliberation."
+                        ),
+                        "required_sequence": [
+                            "register_healthex_patient",
+                            "ingest_from_healthex",
+                        ],
+                    }
+                elif _sf["is_stale"]:
+                    _healthex_freshness_warning = {
+                        "level": "stale_data",
+                        "source": "healthex",
+                        "last_ingested_at": _sf["last_ingested_at"].isoformat(),
+                        "ttl_hours": _sf["ttl_hours"],
+                        "records_count": _sf["records_count"],
+                        "message": (
+                            "HealthEx data is past its TTL. Deliberation will proceed "
+                            "on the prior ingestion. Re-run ingest_from_healthex to "
+                            "refresh ground truth before acting on these outputs."
+                        ),
+                    }
+    except Exception:
+        pass  # gate failures must never block deliberation
+
     engine = await get_deliberation_engine()
     request = DeliberationRequest(
         patient_id=patient_id,
@@ -3018,14 +3090,20 @@ async def run_deliberation(
 
     # ── Dispatch ─────────────────────────────────────────────────────────
     if effective_mode == "triage":
-        return await engine.run_triage(request)
+        _res = await engine.run_triage(request)
+        if _healthex_freshness_warning:
+            _res["data_freshness_warning"] = _healthex_freshness_warning
+        return _res
 
     if effective_mode == "progressive":
-        return await engine.run_progressive(request)
+        _res = await engine.run_progressive(request)
+        if _healthex_freshness_warning:
+            _res["data_freshness_warning"] = _healthex_freshness_warning
+        return _res
 
     # mode == "full"
     result = await engine.run(request)
-    return {
+    _full_result = {
         "deliberation_id": result.deliberation_id,
         "status": "complete",
         "mode": "full",
@@ -3080,8 +3158,11 @@ async def run_deliberation(
         "critical_flags": [
             f.description for f in result.missing_data_flags
             if f.priority in ("critical", "high")
-        ]
+        ],
     }
+    if _healthex_freshness_warning:
+        _full_result["data_freshness_warning"] = _healthex_freshness_warning
+    return _full_result
 
 
 async def _get_staleness_threshold(conn) -> float:
