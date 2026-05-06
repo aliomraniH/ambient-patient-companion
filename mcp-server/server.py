@@ -75,6 +75,103 @@ async def agent_runtime_status(request: Request) -> JSONResponse:
     return JSONResponse(runtime.status())
 
 
+# ── REST wrappers for behavioral tools ───────────────────────────────────────
+# Mirror of the MCP tool implementations exposed as plain POST endpoints so
+# that callers using REST-style paths (e.g. /mcp-skills/tools/<name>) work
+# correctly after the next.config.ts pass-through rewrite.
+
+
+@mcp.custom_route("/tools/get_behavioral_atom_pressure", methods=["POST"])
+async def rest_get_behavioral_atom_pressure(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        patient_id = body.get("patient_id", "")
+        signal_types = body.get("signal_types", None)
+        from skills.atom_vector_search import get_atom_pressure_for_patient
+        pool = await get_pool()
+        pressure = await get_atom_pressure_for_patient(pool, patient_id, signal_types)
+        return JSONResponse({"patient_id": patient_id, "pressure": pressure})
+    except Exception as exc:
+        logger.warning("REST get_behavioral_atom_pressure error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/tools/run_behavioral_gap_detection", methods=["POST"])
+async def rest_run_behavioral_gap_detection(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        patient_id = body.get("patient_id", "")
+        from skills.behavioral_gap_detector import run_gap_detector_for_patient
+        pool = await get_pool()
+        gaps = await run_gap_detector_for_patient(pool, patient_id)
+        return JSONResponse({
+            "patient_id": patient_id,
+            "gaps_detected": len(gaps),
+            "gaps": gaps,
+        })
+    except Exception as exc:
+        logger.warning("REST run_behavioral_gap_detection error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/tools/get_behavioral_screening_summary", methods=["POST"])
+async def rest_get_behavioral_screening_summary(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        patient_id = body.get("patient_id", "")
+        from skills.screening_registry import DOMAINS
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            screening_rows = await conn.fetch(
+                """
+                SELECT domain,
+                       MAX(administered_at) AS last_screened,
+                       COUNT(*) AS screening_count
+                FROM behavioral_screenings
+                WHERE patient_id = $1::uuid
+                GROUP BY domain
+                """,
+                patient_id,
+            )
+            gap_rows = await conn.fetch(
+                """
+                SELECT domain, gap_type, temporal_confidence, pressure_score
+                FROM behavioral_screening_gaps
+                WHERE patient_id = $1::uuid
+                  AND status = 'open'
+                """,
+                patient_id,
+            )
+        screened = {r["domain"]: dict(r) for r in screening_rows}
+        gaps = {r["domain"]: dict(r) for r in gap_rows}
+        domain_summary: dict = {}
+        for key, label in DOMAINS.items():
+            s = screened.get(key)
+            g = gaps.get(key)
+            last_screened = None
+            if s and s.get("last_screened"):
+                last_screened = s["last_screened"].isoformat()
+            domain_summary[key] = {
+                "label": label,
+                "screened": s is not None,
+                "last_screened": last_screened,
+                "screening_count": s["screening_count"] if s else 0,
+                "has_open_gap": g is not None,
+                "gap_type": g["gap_type"] if g else None,
+                "temporal_confidence": g["temporal_confidence"] if g else None,
+                "pressure_score": float(g["pressure_score"]) if g and g["pressure_score"] else None,
+            }
+        return JSONResponse({
+            "patient_id": patient_id,
+            "domains_screened": len(screened),
+            "domains_with_gaps": len(gaps),
+            "domain_summary": domain_summary,
+        })
+    except Exception as exc:
+        logger.warning("REST get_behavioral_screening_summary error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 # Auto-discover and register all skill tools.
 # Passing runtime lets any skill that exports register_watchers(runtime)
 # declare its own background watchers without editing watchers.py.

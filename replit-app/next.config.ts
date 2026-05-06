@@ -19,11 +19,11 @@ const nextConfig: NextConfig = {
 
       // ── Server 2: ambient-skills-companion (port 8002) ─────────────────────
       { source: "/mcp-skills",         destination: `${MCP_SKILLS}/mcp` },
-      { source: "/mcp-skills/:path*",  destination: `${MCP_SKILLS}/mcp/:path*` },
+      { source: "/mcp-skills/:path*",  destination: `${MCP_SKILLS}/:path*` },
 
       // ── Server 3: ambient-ingestion (port 8003) ────────────────────────────
       { source: "/mcp-ingestion",      destination: `${MCP_INGESTION}/mcp` },
-      { source: "/mcp-ingestion/:path*", destination: `${MCP_INGESTION}/mcp/:path*` },
+      { source: "/mcp-ingestion/:path*", destination: `${MCP_INGESTION}/:path*` },
     ];
   },
 };
