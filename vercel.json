@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "installCommand": "cd replit-app && npm install",
+  "buildCommand": "cd replit-app && npm run build",
+  "outputDirectory": "replit-app/.next",
+  "ignoreCommand": "git diff HEAD^ HEAD --quiet -- replit-app/"
+}

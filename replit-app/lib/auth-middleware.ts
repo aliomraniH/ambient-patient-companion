@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { oauthStore } from "@/lib/oauth-store";
 
 function getResourceMetadataUrl(): string {
-  const domain = process.env.REPLIT_DEV_DOMAIN;
+  // Support both Replit and Vercel deployments
+  const domain = process.env.REPLIT_DEV_DOMAIN ?? process.env.VERCEL_URL;
   const base = domain ? `https://${domain}` : "http://localhost:5000";
   return `${base}/.well-known/oauth-protected-resource`;
 }

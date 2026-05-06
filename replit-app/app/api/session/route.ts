@@ -4,11 +4,12 @@ import { createSessionToken, validateSessionToken, COOKIE_NAME, COOKIE_OPTIONS }
 export async function POST(request: NextRequest) {
   const origin = request.headers.get("origin");
   const host = request.headers.get("host");
-  const devDomain = process.env.REPLIT_DEV_DOMAIN;
+  // Support both Replit and Vercel deployments
+  const publicDomain = process.env.REPLIT_DEV_DOMAIN ?? process.env.VERCEL_URL;
 
   const allowedHosts: string[] = [];
   if (host) allowedHosts.push(host);
-  if (devDomain) allowedHosts.push(devDomain);
+  if (publicDomain) allowedHosts.push(publicDomain);
   allowedHosts.push("localhost:5000", "127.0.0.1:5000");
 
   if (!origin) {

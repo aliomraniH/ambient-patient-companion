@@ -1,10 +1,19 @@
-const devDomain = process.env.REPLIT_DEV_DOMAIN ?? "";
+function getPublicDomain(): string {
+  // Support both Replit and Vercel deployments
+  return process.env.REPLIT_DEV_DOMAIN ?? process.env.VERCEL_URL ?? "";
+}
 
 function buildAllowlist(): Set<string> {
   const origins = new Set<string>();
+  const publicDomain = getPublicDomain();
 
-  if (devDomain) {
-    origins.add(`https://${devDomain}`);
+  if (publicDomain) {
+    origins.add(`https://${publicDomain}`);
+  }
+
+  // Vercel preview URLs
+  if (process.env.VERCEL_URL) {
+    origins.add(`https://${process.env.VERCEL_URL}`);
   }
 
   origins.add("http://localhost:3000");
