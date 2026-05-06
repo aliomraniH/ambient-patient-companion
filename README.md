@@ -164,26 +164,26 @@ Maria Chen: 54F, Taiwanese-American, Type 2 DM + HTN + obesity (BMI 31), food in
 
 ```mermaid
 sequenceDiagram
-    participant You
-    participant Claude
-    participant Ambient as Ambient MCP Servers
+    participant You as You
+    participant Claude as Claude
+    participant MCP as Ambient MCP Servers
     participant DB as PostgreSQL Warehouse
 
-    You->>Claude: "Register and deliberate on [patient]"
-    Claude->>Ambient: register_healthex_patient()
-    Ambient->>DB: upsert patient + source_freshness row
-    Claude->>Ambient: ingest_from_healthex(resource_type="summary")
-    Ambient->>Ambient: 5-format adaptive parser + ETL
-    Ambient->>DB: write labs · conditions · meds · encounters
-    Claude->>Ambient: run_deliberation(mode="full")
-    Ambient->>Ambient: Phase 0 context compile (11K token budget)
-    Ambient->>Ambient: Phase 1 Claude + GPT-4o analyze in parallel
-    Ambient->>Ambient: Phase 2 cross-critique across 1–3 rounds
-    Ambient->>Ambient: Phase 3 synthesis → 5 output categories
-    Ambient->>Ambient: Phase 3.5 guardrail safety wrapper
-    Ambient->>DB: atomic commit of all deliberation outputs
-    Claude->>Ambient: get_deliberation_results()
-    Ambient-->>Claude: scenarios · flags · nudges · knowledge
+    You->>Claude: Register and deliberate on patient
+    Claude->>MCP: register_healthex_patient()
+    MCP->>DB: upsert patient row
+    Claude->>MCP: ingest_from_healthex(resource_type=summary)
+    MCP->>MCP: 5-format adaptive parser + ETL
+    MCP->>DB: write labs, conditions, meds, encounters
+    Claude->>MCP: run_deliberation(mode=full)
+    MCP->>MCP: Phase 0 - context compile
+    MCP->>MCP: Phase 1 - Claude + GPT-4o analyze in parallel
+    MCP->>MCP: Phase 2 - cross-critique (1-3 rounds)
+    MCP->>MCP: Phase 3 - synthesis into 5 output categories
+    MCP->>MCP: Phase 3.5 - guardrail safety wrapper
+    MCP->>DB: atomic commit of all deliberation outputs
+    Claude->>MCP: get_deliberation_results()
+    MCP-->>Claude: scenarios, flags, nudges, knowledge
     Claude-->>You: Structured clinical insights
 ```
 
@@ -200,11 +200,11 @@ Ambient approach:       S = f(R, C, P, T) → UI derives itself → right surfac
 
 ```mermaid
 graph LR
-    R["R — Role<br/>(PCP / Nurse / Patient / Lab)"]
-    C["C — Context<br/>(Pre-visit / Crisis / Routine)"]
-    P["P — Patient State<br/>(Labs / Vitals / Behavior / SDoH)"]
-    T["T — Time<br/>(Day 0 / Week 3 / Month 6)"]
-    S["S — Optimal<br/>Clinical Surface"]
+    R["R - Role<br/>(PCP / Nurse / Patient / Lab)"]
+    C["C - Context<br/>(Pre-visit / Crisis / Routine)"]
+    P["P - Patient State<br/>(Labs / Vitals / Behavior / SDoH)"]
+    T["T - Time<br/>(Day 0 / Week 3 / Month 6)"]
+    S["S - Optimal<br/>Clinical Surface"]
 
     R --> S
     C --> S
@@ -242,38 +242,38 @@ graph TB
         CW["OAuth PKCE handshake<br/>auto-handled by Next.js"]
     end
 
-    subgraph "Next.js 16 — Port 5000"
+    subgraph "Next.js 16 - Port 5000"
         NX["Proxy Rewrites"]
-        OA["OAuth Layer<br/>/.well-known/* · /register<br/>/authorize · /token"]
+        OA["OAuth Layer<br/>/.well-known, /register<br/>/authorize, /token"]
     end
 
-    subgraph "MCP Server 1 — Port 8001"
+    subgraph "MCP Server 1 - Port 8001"
         S1["ambient-clinical-intelligence<br/>FastMCP 3.2"]
         G1["3-Layer Guardrail Pipeline"]
-        DE["Dual-LLM Deliberation Engine<br/>6 phases · Claude + GPT-4o"]
-        T1["23 Tools · AuditMiddleware"]
+        DE["Dual-LLM Deliberation Engine<br/>6 phases, Claude + GPT-4o"]
+        T1["23 Tools + AuditMiddleware"]
     end
 
-    subgraph "MCP Server 2 — Port 8002"
+    subgraph "MCP Server 2 - Port 8002"
         S2["ambient-skills-companion<br/>FastMCP 3.2"]
         SK["26 skill modules<br/>auto-discovered"]
         AR["AgentRuntime<br/>3 autonomous watchers"]
-        T2["22+ Tools · AuditMiddleware"]
+        T2["22+ Tools + AuditMiddleware"]
     end
 
-    subgraph "MCP Server 3 — Port 8003"
+    subgraph "MCP Server 3 - Port 8003"
         S3["ambient-ingestion<br/>FastMCP 3.2"]
-        T3["4 Tools · AuditMiddleware<br/>5 format parsers"]
+        T3["4 Tools + AuditMiddleware<br/>5 format parsers"]
     end
 
-    subgraph "PostgreSQL — 35 Tables"
-        DB["patients · biometrics · conditions<br/>deliberations · flags · nudges<br/>ingestion_plans · transfer_log<br/>clinical_notes · system_config · …"]
+    subgraph "PostgreSQL - 35 Tables"
+        DB["patients, biometrics, conditions<br/>deliberations, flags, nudges<br/>ingestion_plans, transfer_log<br/>clinical_notes, system_config..."]
     end
 
     subgraph "LLMs"
         AN["claude-sonnet-4-20250514<br/>clinical + synthesis"]
         GP["gpt-4o<br/>deliberation critic"]
-        HA["claude-haiku-4-5-20251001<br/>flag review · planner · reviewer"]
+        HA["claude-haiku-4-5-20251001<br/>flag review, planner, reviewer"]
     end
 
     CW -->|"OAuth PKCE"| OA
@@ -297,6 +297,8 @@ graph TB
     style AN fill:#c9655c,color:#fff
     style OA fill:#3E6B5C,color:#fff
 ```
+
+![System Architecture](docs/images/cc_01_architecture.png)
 
 ---
 
@@ -357,19 +359,19 @@ Public URL: https://[your-replit-domain]/mcp-skills
 
 ```mermaid
 graph LR
-    subgraph "ambient-skills-companion — 22+ tools"
+    subgraph "ambient-skills-companion - 22+ tools"
         A["compute_obt_score<br/>Optimal Being Trajectory"]
         B["compute_provider_risk<br/>Chase list score"]
         C["run_crisis_escalation<br/>Behavioral crisis detection"]
         D["run_food_access_nudge<br/>End-of-month SDoH trigger"]
         E["generate_daily_checkins<br/>Idempotent check-in seed"]
-        F["generate_patient<br/>FHIR bundle → PostgreSQL"]
+        F["generate_patient<br/>FHIR bundle to PostgreSQL"]
         G["generate_daily_vitals<br/>Biometric reading seed"]
         H["generate_previsit_brief<br/>Pre-encounter synthesis"]
         I["run_sdoh_assessment<br/>Social determinants"]
-        J["Data track tools (5)<br/>freshness · ingestion · conflicts<br/>source status · orchestrate_refresh"]
-        K["Audit query tools (4)<br/>get_current_session · list_sessions<br/>get_session_transcript · search_tool_calls"]
-        L["Behavioral + vector stack<br/>search_similar_atoms · atom_cohort<br/>behavioral pressure + cards"]
+        J["Data track tools (5)<br/>freshness, ingestion, conflicts<br/>source status, orchestrate_refresh"]
+        K["Audit query tools (4)<br/>get_current_session, list_sessions<br/>get_session_transcript, search_tool_calls"]
+        L["Behavioral + vector stack<br/>search_similar_atoms, atom_cohort<br/>behavioral pressure + cards"]
     end
 
     style A fill:#6B5EA8,color:#fff
