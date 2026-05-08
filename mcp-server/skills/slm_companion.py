@@ -46,6 +46,7 @@ from typing import Optional
 import asyncpg
 import httpx
 from fastmcp import FastMCP
+from huggingface_hub import get_inference_endpoint
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -72,6 +73,8 @@ def _check_env() -> None:
         "HF_TOKEN": HF_TOKEN,
         "MODAL_TRAIN_ENDPOINT_URL": MODAL_TRAIN_URL,
         "MODAL_WEBHOOK_SECRET": MODAL_SECRET,
+        "HF_ENDPOINT_NAME": os.environ.get("HF_ENDPOINT_NAME", ""),
+        "HF_NAMESPACE": os.environ.get("HF_NAMESPACE", ""),
     }
     for name, val in required.items():
         if not val:
@@ -982,37 +985,22 @@ def register(mcp: FastMCP) -> None:
             })
 
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                # Update env vars via HF Inference Endpoints API
-                r = await client.patch(
-                    f"https://api.endpoints.huggingface.cloud/v2/endpoint/{namespace}/{endpoint_name}",
-                    headers={
-                        "Authorization": f"Bearer {HF_ADMIN_TOKEN}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "compute": {},
-                        "model": {
-                            "env": {"LORA_ADAPTERS": lora_adapters_value}
-                        },
-                    },
-                )
-                if r.status_code in (200, 202):
-                    return json.dumps({
-                        "status": "reload_triggered",
-                        "adapter_count": len(active),
-                        "lora_adapters_value": lora_adapters_value,
-                        "estimated_restart_sec": 180,
-                        "note": "Endpoint is restarting with new adapters. Expect ~2–3 min downtime.",
-                    })
-                else:
-                    return json.dumps({
-                        "status": "api_error",
-                        "http_code": r.status_code,
-                        "response": r.text[:500],
-                        "lora_adapters_value": lora_adapters_value,
-                        "note": "Manual update required: paste lora_adapters_value into HF Hub UI.",
-                    })
+            endpoint = get_inference_endpoint(
+                name=endpoint_name,
+                namespace=namespace,
+                token=HF_ADMIN_TOKEN,
+            )
+            endpoint.update(
+                custom_image={"env": {"LORA_ADAPTERS": lora_adapters_value}}
+            )
+            # Do NOT call .wait() — restart happens asynchronously on HF side.
+            return json.dumps({
+                "status": "reload_triggered",
+                "adapter_count": len(active),
+                "lora_adapters_value": lora_adapters_value,
+                "estimated_restart_sec": 180,
+                "note": "Endpoint is restarting with new adapters. Expect ~2–3 min downtime.",
+            })
         except Exception as e:
             return json.dumps({"status": "error", "error": str(e)})
 
