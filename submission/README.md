@@ -9,7 +9,7 @@
 
 ## What This Integration Does
 
-Ambient Patient Companion gives Claude a real-time clinical intelligence layer built for primary care and care management workflows. It connects Claude to a live patient health warehouse (PostgreSQL) and three FastMCP servers (23 + 22+ + 4 tools) that enforce USPSTF clinical guidelines, run drug interaction checks, apply a three-layer safety guardrail pipeline, and execute a full **Dual-LLM Deliberation Engine** — where Claude and GPT-4o independently analyze a patient's context, cross-critique each other across multiple rounds, and synthesize five structured clinical output categories. The Skills server also runs an embedded **AgentRuntime** with three autonomous background watchers (behavioral atom extraction, crisis scanning, care gap flagging) that operate proactively between Claude sessions.
+Ambient Patient Companion gives Claude a real-time clinical intelligence layer built for primary care and care management workflows. It connects Claude to a live patient health warehouse (PostgreSQL) and three FastMCP servers (23 + 35+ + 4 tools) that enforce USPSTF clinical guidelines, run drug interaction checks, apply a three-layer safety guardrail pipeline, and execute a full **Dual-LLM Deliberation Engine** — where Claude and GPT-4o independently analyze a patient's context, cross-critique each other across multiple rounds, and synthesize five structured clinical output categories. The Skills server also runs an embedded **AgentRuntime** with three autonomous background watchers (behavioral atom extraction, crisis scanning, care gap flagging) that operate proactively between Claude sessions.
 
 The system is designed for three roles: **primary care physicians (PCP)**, **care managers**, and **patients**. Every tool response is role-aware, citation-backed, and filtered through clinical safety rules before returning to Claude.
 
@@ -246,7 +246,7 @@ Claude will:
 | Transport | Streamable HTTP (MCP 2024-11-05) |
 | Database | PostgreSQL 14+ (35 tables) |
 | LLMs used server-side | `claude-sonnet-4-20250514` (clinical + synthesis), `gpt-4o` (critic), `claude-haiku-4-5-20251001` (planner + flag reviewer) |
-| MCP servers | 3 (Clinical 23 tools · Skills 22+ tools · Ingestion 4 tools) |
+| MCP servers | 3 (Clinical 23 tools · Skills 35+ tools · Ingestion 4 tools) |
 | Autonomous watchers | 3 (checkin atoms · crisis scan · care gaps) via AgentRuntime |
 | Test coverage | ~1,300 tests (pytest + Jest) |
 | Endpoints | `/mcp` · `/mcp-skills` · `/mcp-ingestion` |

@@ -52,7 +52,7 @@ This regenerates your server URLs, then starts all 5 services in parallel:
 ```
 Port 5000  — Next.js frontend + OAuth layer
 Port 8001  — Clinical MCP server  (44 tools · guardrails · deliberation engine)
-Port 8002  — Skills MCP server    (41 tools · behavioral stack · AgentRuntime)
+Port 8002  — Skills MCP server    (54 tools · behavioral stack · AgentRuntime)
 Port 8003  — Ingestion MCP server (HealthEx + FHIR pipeline)
 Port 8080  — Config Dashboard     (watcher health · environment monitor)
 ```
@@ -258,7 +258,7 @@ graph TB
         S2["ambient-skills-companion<br/>FastMCP 3.2"]
         SK["26 skill modules<br/>auto-discovered"]
         AR["AgentRuntime<br/>3 autonomous watchers"]
-        T2["22+ Tools · AuditMiddleware"]
+        T2["35+ Tools · AuditMiddleware"]
     end
 
     subgraph "MCP Server 3 — Port 8003"
@@ -339,7 +339,7 @@ Guardrail Pipeline:
 
 ### Server 2 — `ambient-skills-companion` · `mcp-server/server.py`
 
-22+ tools auto-discovered from `mcp-server/skills/` via a `register(mcp)` convention. 26 skill modules loaded. Every tool call is logged to `mcp_call_log` via `AuditMiddleware`.
+35+ tools auto-discovered from `mcp-server/skills/` via a `register(mcp)` convention. 27 skill modules loaded. Every tool call is logged to `mcp_call_log` via `AuditMiddleware`.
 
 **AgentRuntime** — in addition to call-driven MCP tools, the Skills server runs an embedded `AgentRuntime` (`mcp-server/runtime/agent_runtime.py`) that starts three autonomous background watchers on server boot. Each skill file that wants proactive execution exports a `register_watchers(runtime)` hook; `load_skills()` calls it automatically. Watcher run state is persisted to `system_config` (key `watcher_state:<name>`) after every execution and restored on restart.
 
@@ -357,7 +357,7 @@ Public URL: https://[your-replit-domain]/mcp-skills
 
 ```mermaid
 graph LR
-    subgraph "ambient-skills-companion — 22+ tools"
+    subgraph "ambient-skills-companion — 35+ tools"
         A["compute_obt_score<br/>Optimal Being Trajectory"]
         B["compute_provider_risk<br/>Chase list score"]
         C["run_crisis_escalation<br/>Behavioral crisis detection"]
@@ -713,7 +713,7 @@ ambient-patient-companion/
 │       └── flag_writer.py       Flag registry writes
 │
 ├── mcp-server/                  Server 2: ambient-skills-companion (port 8002)
-│   ├── server.py                FastMCP: auto-discovers skills (22+ tools) + AgentRuntime lifespan
+│   ├── server.py                FastMCP: auto-discovers skills (35+ tools) + AgentRuntime lifespan
 │   │                            + GET /api/agent-runtime/status + AuditMiddleware("skills", get_pool)
 │   ├── runtime/                 Autonomous background-task engine
 │   │   ├── agent_runtime.py     AgentRuntime singleton: watch/start/lifespan/status
