@@ -43,14 +43,14 @@ Individual component commands (All MCP servers require `MCP_TRANSPORT=streamable
 
 ## Where things live
 
-- **Clinical Intelligence Server (Server 1):** `server/` (main logic, deliberation engine, guardrails, port 8001)
+- **Clinical Intelligence Server (Server 1):** `server/` — FastMCP name: `ambient-clinical-intelligence` (port 8001)
     - **Source of Truth: Deliberation Output Contract:** `server/deliberation/prompts/synthesizer.xml`
     - **DB Schema Migrations:** `server/deliberation/migrations/`
     - **Deliberation Pydantic Models:** `server/deliberation/schemas.py`
     - **LLM Prompt Templates:** `server/deliberation/prompts/` (XML format)
-- **Skills Companion Server (Server 2):** `mcp-server/` (tools, shared DB schema, data transforms, port 8002)
+- **Skills Companion Server (Server 2):** `mcp-server/` — FastMCP name: `ambient-skills-companion` (port 8002)
     - **Source of Truth: Base DB Schema:** `mcp-server/db/schema.sql`
-- **Ingestion Server (Server 3):** `ingestion/` (ETL pipeline, data quality validators, port 8003)
+- **Ingestion Server (Server 3):** `ingestion/` — FastMCP name: `ambient-ingestion` (port 8003)
 - **Shared Utilities:** `shared/` (cross-server Python modules like `coercion.py`, `datetime_utils.py`, `audit_middleware.py`)
 - **Next.js Frontend:** `replit-app/` (UI, OAuth endpoints, API routes, port 5000)
     - **OAuth Endpoints:** `replit-app/app/.well-known/` and `replit-app/app/authorize/route.ts`, `replit-app/app/token/route.ts`, `replit-app/app/register/route.ts`

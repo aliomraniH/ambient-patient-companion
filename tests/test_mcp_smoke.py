@@ -36,8 +36,24 @@ _skip_no_server = pytest.mark.skipif(
 )
 
 
+def _deps_available() -> bool:
+    """Return True only when server-side deps (anthropic etc.) are installed."""
+    try:
+        import anthropic  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+_skip_no_deps = pytest.mark.skipif(
+    not _deps_available(),
+    reason="Server deps (anthropic SDK) not installed — run on Replit",
+)
+
+
 # ── Task 4a: Tool function importability and signatures ───────────────────────
 
+@_skip_no_deps
 class TestToolRegistration:
     """All 15 MCP tools must be importable with correct parameter signatures."""
 

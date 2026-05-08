@@ -531,6 +531,7 @@ code { font-family: 'SF Mono','Fira Code','Consolas', monospace; font-size: 11.5
     <div class="check-item"><span class="status-dot dot-neutral" id="dotAnthropic"></span> Anthropic</div>
     <div class="check-item"><span class="status-dot dot-neutral" id="dotLangSmith"></span> LangSmith</div>
     <div class="check-item"><span class="status-dot dot-neutral" id="dotMCP"></span> MCP servers</div>
+    <div class="check-item"><span class="status-dot dot-neutral" id="dotSLM"></span> SLM Endpoint</div>
     <div style="flex:1"></div>
     <button class="btn btn-ghost btn-sm" onclick="runAllTests()">▶ Test all connections</button>
   </div>
@@ -545,6 +546,24 @@ code { font-family: 'SF Mono','Fira Code','Consolas', monospace; font-size: 11.5
     <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Autonomous background tasks running in the Skills MCP server.</div>
     <div class="watcher-grid" id="watcherGrid">
       <div style="font-size:12px;color:var(--muted);padding:10px 0">Loading watcher status…</div>
+    </div>
+  </div>
+
+  <!-- ── SLM Endpoint status ──────────────────────────────────── -->
+  <div id="slmSection" style="margin-top:16px">
+    <div class="watcher-section-header">
+      <span class="watcher-section-title">SLM Endpoint</span>
+      <button class="btn btn-ghost btn-sm" onclick="testSLMEndpoint()" style="margin-left:auto">↺ Refresh</button>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Qwen 2.5 3B-Instruct on HF Inference Endpoints (TGI Multi-LoRA).</div>
+    <div class="watcher-card" id="slmCard" style="border-left:3px solid #cbd5e1">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span class="status-dot dot-neutral" id="dotSLMCard"></span>
+        <span class="watcher-name">HF_SLM_ENDPOINT_URL</span>
+        <span class="badge-watcher badge-w-pending" id="slmBadge">–</span>
+      </div>
+      <div class="watcher-meta" id="slmEndpointUrl" style="font-family:monospace;font-size:11px;color:var(--muted)">Not configured</div>
+      <div class="watcher-meta" id="slmEndpointStatus">Run ▶ Test all connections to check</div>
     </div>
   </div>
 
@@ -975,7 +994,53 @@ async function testLangSmith() {
 }
 
 async function runAllTests() {
-  await Promise.all([testDB(), testAnthropic(), testLangSmith(), testAllMCP()]);
+  await Promise.all([testDB(), testAnthropic(), testLangSmith(), testAllMCP(), testSLMEndpoint()]);
+}
+
+async function testSLMEndpoint() {
+  const urlEl    = document.getElementById('slmEndpointUrl');
+  const statusEl = document.getElementById('slmEndpointStatus');
+  const card     = document.getElementById('slmCard');
+  const badge    = document.getElementById('slmBadge');
+  const dotCard  = document.getElementById('dotSLMCard');
+
+  function _setSlm(dotState, borderColor, badgeText, badgeClass, statusText) {
+    dot('dotSLM', dotState);
+    if (dotCard)  dotCard.className  = 'status-dot dot-' + dotState;
+    if (card)     card.style.borderLeftColor = borderColor;
+    if (badge)    { badge.textContent = badgeText; badge.className = 'badge-watcher ' + badgeClass; }
+    if (statusEl) statusEl.textContent = statusText;
+  }
+
+  // Read the configured URL from the server-rendered env block (same pattern as other checks)
+  const envRes = await fetch('/api/env-keys').catch(() => null);
+  const envData = envRes ? await envRes.json().catch(() => ({})) : {};
+  const hfUrl = (envData['HF_SLM_ENDPOINT_URL'] || '').trim();
+
+  if (!hfUrl) {
+    _setSlm('neutral', '#cbd5e1', 'Not configured', 'badge-w-pending', 'Set HF_SLM_ENDPOINT_URL in Replit Secrets');
+    if (urlEl) urlEl.textContent = 'Not configured';
+    return;
+  }
+  if (urlEl) urlEl.textContent = hfUrl;
+
+  try {
+    const res = await fetch(hfUrl.replace(/\/$/, '') + '/health', {
+      headers: { 'Authorization': 'Bearer ' + (envData['HF_TOKEN'] || '') },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.status === 200) {
+      _setSlm('ok',      'var(--ok)',     'Running',          'badge-w-healthy', 'Running — ready for inference');
+    } else if (res.status === 503) {
+      _setSlm('warn',    'var(--warn)',   'Initializing',     'badge-w-pending', 'Initializing (503) — scaling up, retry in ~60s');
+    } else if (res.status === 502) {
+      _setSlm('danger',  'var(--danger)', 'Scaled to zero',   'badge-w-error',   'Scaled to zero (502) — run wake to warm up');
+    } else {
+      _setSlm('warn',    'var(--warn)',   `HTTP ${res.status}`,'badge-w-pending', `Unexpected HTTP ${res.status}`);
+    }
+  } catch (e) {
+    _setSlm('danger', 'var(--danger)', 'Unreachable', 'badge-w-error', 'Unreachable — check HF_SLM_ENDPOINT_URL and network');
+  }
 }
 
 async function testAllMCP() {
