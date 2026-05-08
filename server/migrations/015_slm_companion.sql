@@ -19,9 +19,15 @@ BEGIN;
 -- Guard: add columns to deliberation_outputs if they don't exist
 -- ─────────────────────────────────────────────────────────────────────────────
 ALTER TABLE deliberation_outputs
-  ADD COLUMN IF NOT EXISTS vera_gate         TEXT,         -- 'allow' | 'flag' | 'block' | NULL (audit mode)
-  ADD COLUMN IF NOT EXISTS synthesis_summary TEXT,         -- SYNTHESIS-arbitrated companion response
-  ADD COLUMN IF NOT EXISTS clinical_findings TEXT;         -- raw clinical findings from Phase 3
+  ADD COLUMN IF NOT EXISTS vera_gate          TEXT,         -- 'allow' | 'flag' | 'block' | NULL (audit mode)
+  ADD COLUMN IF NOT EXISTS synthesis_summary  TEXT,         -- SYNTHESIS-arbitrated companion response
+  ADD COLUMN IF NOT EXISTS clinical_findings  TEXT,         -- raw clinical findings from Phase 3
+  ADD COLUMN IF NOT EXISTS patient_id         UUID REFERENCES patients(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS convergence_score  FLOAT;        -- per-output score; mirrors deliberations.convergence_score
+
+CREATE INDEX IF NOT EXISTS idx_delibout_patient
+  ON deliberation_outputs (patient_id, created_at DESC)
+  WHERE patient_id IS NOT NULL;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Table 1: slm_adapter_registry
