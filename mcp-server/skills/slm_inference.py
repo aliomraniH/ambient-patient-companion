@@ -320,18 +320,41 @@ async def get_lora_training_status(job_id: str) -> str:
 # ── HF auto-discovery helpers ─────────────────────────────────────────────────
 
 async def _hf_whoami(token: str) -> str:
-    """Return the HF username for *token* via GET /api/whoami."""
+    """Return the HF username for *token*.
+
+    Tries /api/whoami-v2 first (required for fine-grained tokens introduced
+    in 2024), then falls back to the legacy /api/whoami endpoint.
+    """
+    headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.get(
+        for url in (
+            "https://huggingface.co/api/whoami-v2",
             "https://huggingface.co/api/whoami",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    name = data.get("name") or data.get("fullname") or ""
-    if not name:
-        raise RuntimeError("HF /api/whoami returned no username — check HF_TOKEN scopes.")
-    return name
+        ):
+            try:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 401:
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                # Fine-grained token responses nest the user under auth.accessToken.author
+                name = (
+                    data.get("name")
+                    or data.get("login")
+                    or (data.get("auth") or {}).get("accessToken", {}).get("createdBy", {}).get("name")
+                    or ""
+                )
+                if name:
+                    logger.info("_hf_whoami: namespace=%s (via %s)", name, url)
+                    return name
+            except Exception as exc:
+                logger.debug("_hf_whoami: %s failed: %s", url, exc)
+                continue
+
+    raise RuntimeError(
+        "Could not determine HF username from HF_TOKEN. "
+        "Set HF_NAMESPACE explicitly (e.g. your HF username) to bypass auto-discovery."
+    )
 
 
 async def _discover_endpoint(token: str, namespace: str, slm_url: str) -> str:
