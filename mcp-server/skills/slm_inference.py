@@ -6,12 +6,16 @@ Tools registered:
   get_lora_training_status  — query lora_training_runs by job_id
   manage_hf_endpoint        — scale HF dedicated endpoint up / down
 
-Environment variables consumed:
+Required environment variables:
+  HF_TOKEN                 HF access token (Hub + Endpoints access)
   HF_SLM_ENDPOINT_URL      Full URL of the HF dedicated endpoint
-  HF_TOKEN                 HF access token (sent as Bearer for protected endpoints)
-  HF_ENDPOINT_ADMIN_TOKEN  HF token with Endpoint Admin scope (may equal HF_TOKEN)
-  HF_ENDPOINT_NAME         Endpoint name, e.g. companion-qwen25-3b
-  HF_NAMESPACE             HF username or org handle
+
+Optional overrides (auto-discovered from HF API when not set):
+  HF_ENDPOINT_ADMIN_TOKEN  HF admin token — falls back to HF_TOKEN
+  HF_NAMESPACE             HF username/org — auto-discovered via /api/whoami
+  HF_ENDPOINT_NAME         Endpoint name   — auto-discovered by matching URL
+
+Modal secrets (required for LoRA training only):
   MODAL_TRAIN_ENDPOINT_URL Full URL of the Modal training web endpoint
   MODAL_WEBHOOK_SECRET     Shared secret for HMAC-SHA256 request signing
 """
@@ -313,26 +317,71 @@ async def get_lora_training_status(job_id: str) -> str:
     }, default=str)
 
 
+# ── HF auto-discovery helpers ─────────────────────────────────────────────────
+
+async def _hf_whoami(token: str) -> str:
+    """Return the HF username for *token* via GET /api/whoami."""
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get(
+            "https://huggingface.co/api/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    name = data.get("name") or data.get("fullname") or ""
+    if not name:
+        raise RuntimeError("HF /api/whoami returned no username — check HF_TOKEN scopes.")
+    return name
+
+
+async def _discover_endpoint(token: str, namespace: str, slm_url: str) -> str:
+    """Return the endpoint name whose URL matches *slm_url* by listing all endpoints."""
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get(
+            f"https://api.endpoints.huggingface.cloud/v2/endpoint/{namespace}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        endpoints = resp.json().get("items", [])
+
+    slm_host = slm_url.rstrip("/").split("://")[-1].lower()
+    for ep in endpoints:
+        ep_url = (ep.get("status", {}).get("url") or "").rstrip("/").split("://")[-1].lower()
+        if ep_url and ep_url == slm_host:
+            return ep["name"]
+
+    names = [ep.get("name", "?") for ep in endpoints]
+    raise RuntimeError(
+        f"Could not find an endpoint matching {slm_url!r} among "
+        f"{len(endpoints)} endpoint(s): {names}. "
+        "Set HF_ENDPOINT_NAME explicitly to override."
+    )
+
+
 # ── Tool: manage_hf_endpoint ──────────────────────────────────────────────────
 
 async def manage_hf_endpoint(action: str) -> str:
     """Scale a HuggingFace Inference Endpoint up or down.
 
     Uses the HF Inference Endpoints Admin API to change the replica count.
-    scale_up   → sets initialNumberOfReplicas=1  (wakes a paused endpoint)
-    scale_down → sets initialNumberOfReplicas=0  (pauses, stops billing)
+    scale_up   → minReplica=1 / maxReplica=1 (wakes a paused endpoint)
+    scale_down → minReplica=0 / maxReplica=1 (pauses, stops billing)
     status     → returns current endpoint state without making changes
+
+    Namespace and endpoint name are auto-discovered from the HF API when
+    HF_NAMESPACE / HF_ENDPOINT_NAME are not set — only HF_TOKEN is required.
+    Set HF_ENDPOINT_ADMIN_TOKEN to use a different token for admin calls;
+    it falls back to HF_TOKEN when not set.
 
     Args:
         action: One of 'scale_up', 'scale_down', 'status'.
 
     Returns:
-        JSON with endpoint name, action taken, and current state from HF API.
+        JSON with endpoint name, namespace, action taken, and current state.
     """
     try:
-        admin_token = _require_env("HF_ENDPOINT_ADMIN_TOKEN")
-        namespace = _require_env("HF_NAMESPACE")
-        endpoint_name = _require_env("HF_ENDPOINT_NAME")
+        hf_token = _require_env("HF_TOKEN")
+        slm_url = _require_env("HF_SLM_ENDPOINT_URL")
     except RuntimeError as e:
         return json.dumps({"status": "error", "reason": str(e)})
 
@@ -342,6 +391,21 @@ async def manage_hf_endpoint(action: str) -> str:
             "status": "error",
             "reason": f"Unknown action {action!r}. Use scale_up, scale_down, or status.",
         })
+
+    admin_token = _env("HF_ENDPOINT_ADMIN_TOKEN") or hf_token
+
+    try:
+        namespace = _env("HF_NAMESPACE") or await _hf_whoami(admin_token)
+        endpoint_name = _env("HF_ENDPOINT_NAME") or await _discover_endpoint(
+            admin_token, namespace, slm_url
+        )
+    except Exception as exc:
+        logger.error("manage_hf_endpoint: discovery failed: %s", exc)
+        return json.dumps({"status": "error", "action": action, "reason": str(exc)})
+
+    logger.info(
+        "manage_hf_endpoint: %s → namespace=%s endpoint=%s", action, namespace, endpoint_name
+    )
 
     base = f"https://api.endpoints.huggingface.cloud/v2/endpoint/{namespace}/{endpoint_name}"
     headers = {
@@ -358,25 +422,29 @@ async def manage_hf_endpoint(action: str) -> str:
                 return json.dumps({
                     "status": "ok",
                     "action": "status",
+                    "namespace": namespace,
                     "endpoint_name": endpoint_name,
                     "endpoint_state": data.get("status", {}).get("state"),
                     "replicas": data.get("compute", {}).get("scaling", {}).get("currentReplica"),
-                    "raw": data,
+                    "url": data.get("status", {}).get("url"),
                 }, default=str)
 
             replicas = 1 if action == "scale_up" else 0
             resp = await client.patch(
                 base,
                 headers=headers,
-                json={"compute": {"scaling": {"minReplica": replicas, "maxReplica": max(replicas, 1)}}},
+                json={"compute": {"scaling": {"minReplica": replicas, "maxReplica": 1}}},
             )
             resp.raise_for_status()
             data = resp.json()
-            logger.info("manage_hf_endpoint: %s → replicas=%d", action, replicas)
+            logger.info(
+                "manage_hf_endpoint: %s applied (replicas=%d)", action, replicas
+            )
 
             return json.dumps({
                 "status": "ok",
                 "action": action,
+                "namespace": namespace,
                 "endpoint_name": endpoint_name,
                 "requested_replicas": replicas,
                 "endpoint_state": data.get("status", {}).get("state"),
@@ -388,10 +456,14 @@ async def manage_hf_endpoint(action: str) -> str:
             }, default=str)
 
     except httpx.HTTPStatusError as exc:
-        logger.error("manage_hf_endpoint: HF API error %s: %s", exc.response.status_code, exc)
+        logger.error(
+            "manage_hf_endpoint: HF API %s: %s", exc.response.status_code, exc.response.text
+        )
         return json.dumps({
             "status": "error",
             "action": action,
+            "namespace": namespace,
+            "endpoint_name": endpoint_name,
             "http_status": exc.response.status_code,
             "reason": exc.response.text,
         })

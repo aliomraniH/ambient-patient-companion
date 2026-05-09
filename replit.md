@@ -31,12 +31,12 @@ Individual component commands (All MCP servers require `MCP_TRANSPORT=streamable
 - `REPLIT_DEV_DOMAIN`: Auto-set, used for MCP JSON generation
 
 **SLM + LoRA Training Secrets (add via Tools → Secrets):**
-- `HF_SLM_ENDPOINT_URL`: Full URL of the Qwen 2.5 3B dedicated HF endpoint (e.g. `https://ls1nexh71vbrz233.us-east-1.aws.endpoints.huggingface.cloud`)
-- `HF_ENDPOINT_ADMIN_TOKEN`: HF token with Endpoint Admin scope — can be the same as `HF_TOKEN` if it has that scope
-- `HF_ENDPOINT_NAME`: Name given to the HF endpoint, e.g. `companion-qwen25-3b`
-- `HF_NAMESPACE`: Your HuggingFace username or org handle
-- `MODAL_TRAIN_ENDPOINT_URL`: URL of the Modal LoRA training web endpoint (printed by `modal deploy`)
-- `MODAL_WEBHOOK_SECRET`: HMAC secret shared between Replit and Modal — generate with `python3 -c "import secrets; print(secrets.token_hex(16))"`
+- `HF_SLM_ENDPOINT_URL`: Full URL of the Qwen 2.5 3B dedicated HF endpoint (e.g. `https://ls1nexh71vbrz233.us-east-1.aws.endpoints.huggingface.cloud`) — **required**
+- `HF_ENDPOINT_ADMIN_TOKEN`: HF admin token — **optional**, falls back to `HF_TOKEN` (which already has Hub + Endpoints access)
+- `HF_NAMESPACE`: HuggingFace username or org — **optional**, auto-discovered via `GET /api/whoami` using `HF_TOKEN`
+- `HF_ENDPOINT_NAME`: Endpoint name — **optional**, auto-discovered by matching `HF_SLM_ENDPOINT_URL` against the list of your endpoints
+- `MODAL_TRAIN_ENDPOINT_URL`: URL of the Modal LoRA training web endpoint (printed by `modal deploy`) — required for LoRA training
+- `MODAL_WEBHOOK_SECRET`: HMAC secret shared between Replit and Modal — generate with `python3 -c "import secrets; print(secrets.token_hex(16))"` — required for LoRA training
 
 ## Stack
 
