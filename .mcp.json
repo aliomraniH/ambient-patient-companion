@@ -8,7 +8,7 @@
     "ambient-skills-companion": {
       "url": "https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-skills",
       "transport": "streamable-http",
-      "description": "ambient-skills-companion \u2014 skills server (OBT score, SDOH, nudges, pre-visit brief, vitals), 17 tools"
+      "description": "ambient-skills-companion \u2014 skills server (OBT score, SDOH, nudges, pre-visit brief, vitals, SLM inference, LoRA training), 21 tools"
     },
     "ambient-ingestion": {
       "url": "https://a6097077-b5f6-4944-8b1b-fa48750483b9-00-gefgkuhumk6.janeway.replit.dev/mcp-ingestion",

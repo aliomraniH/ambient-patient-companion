@@ -79,20 +79,27 @@ async def call_slm(
     system_message: str = "You are a helpful clinical assistant.",
     max_new_tokens: int = 512,
     temperature: float = 0.3,
+    image_url: str = "",
 ) -> str:
-    """Generate text from the Qwen 2.5 3B dedicated HuggingFace endpoint.
+    """Generate text (or analyse an image) via the Qwen 2.5 VL 3B dedicated endpoint.
 
-    Uses the OpenAI-compatible chat completions API exposed by HF Inference
-    Endpoints (available for all TGI-backed models).
+    The endpoint runs Qwen2.5-VL-3B-Instruct-Q8_0.gguf on llama.cpp:server-cuda
+    and supports both plain text and multimodal (image + text) inputs.
+
+    Uses the OpenAI-compatible /v1/chat/completions API.
 
     Args:
         prompt:          User message / clinical question.
         system_message:  System prompt (defaults to clinical assistant persona).
         max_new_tokens:  Maximum tokens to generate (default 512).
         temperature:     Sampling temperature 0.0-1.0 (default 0.3 for clinical).
+        image_url:       Optional image URL or base64 data-URI
+                         (e.g. "https://..." or "data:image/jpeg;base64,...").
+                         When provided the model receives both image and text,
+                         enabling chart analysis, wound/rash assessment, etc.
 
     Returns:
-        JSON string with keys: generated_text, model, usage, endpoint_url.
+        JSON string with keys: generated_text, model, usage, endpoint_url, multimodal.
         On error: JSON with status="error" and reason.
     """
     try:
@@ -103,11 +110,44 @@ async def call_slm(
 
     chat_url = endpoint_url.rstrip("/") + "/v1/chat/completions"
 
+    # Build user message content — array format for multimodal, string for text-only.
+    # llama.cpp:server-cuda requires base64 data-URIs for vision; it cannot fetch
+    # external URLs.  If a plain URL is supplied we fetch and encode it here.
+    image_url = (image_url or "").strip()
+    if image_url:
+        if not image_url.startswith("data:"):
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as img_client:
+                    img_resp = await img_client.get(
+                        image_url,
+                        headers={"User-Agent": "ambient-patient-companion/1.0"},
+                        follow_redirects=True,
+                    )
+                    img_resp.raise_for_status()
+                    content_type = img_resp.headers.get("content-type", "image/jpeg").split(";")[0]
+                    import base64
+                    b64 = base64.b64encode(img_resp.content).decode()
+                    image_url = f"data:{content_type};base64,{b64}"
+                    logger.info(
+                        "call_slm: fetched image %d bytes → base64 data-URI", len(img_resp.content)
+                    )
+            except Exception as img_exc:
+                return json.dumps({
+                    "status": "error",
+                    "reason": f"Failed to fetch image for vision input: {img_exc}",
+                })
+        user_content: list | str = [
+            {"type": "image_url", "image_url": {"url": image_url}},
+            {"type": "text", "text": prompt},
+        ]
+    else:
+        user_content = prompt
+
     payload = {
-        "model": "tgi",
+        "model": "qwen2.5-vl",
         "messages": [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user_content},
         ],
         "max_tokens": max_new_tokens,
         "temperature": temperature,
@@ -144,14 +184,16 @@ async def call_slm(
         usage = data.get("usage", {})
 
         logger.info(
-            "call_slm: generated %d tokens (prompt=%d, completion=%d)",
+            "call_slm: generated %d tokens (prompt=%d, completion=%d, multimodal=%s)",
             usage.get("total_tokens", 0),
             usage.get("prompt_tokens", 0),
             usage.get("completion_tokens", 0),
+            bool(image_url),
         )
 
         return json.dumps({
             "status": "ok",
+            "multimodal": bool(image_url),
             "generated_text": generated,
             "model": data.get("model", "qwen2.5-3b-instruct"),
             "usage": usage,
@@ -516,12 +558,13 @@ async def _handle_modal_webhook_internal(body: dict) -> dict:
     try:
         from db.connection import get_pool
         pool = await get_pool()
+        is_terminal = new_status in ("completed", "failed")
         async with pool.acquire() as conn:
             result = await conn.execute(
                 """
                 UPDATE lora_training_runs
                 SET status        = $1,
-                    completed_at  = CASE WHEN $1 IN ('completed', 'failed') THEN NOW() ELSE completed_at END,
+                    completed_at  = CASE WHEN $5 THEN NOW() ELSE completed_at END,
                     error_message = COALESCE($2, error_message),
                     metadata      = CASE WHEN $3::text IS NOT NULL
                                          THEN $3::jsonb
@@ -533,6 +576,7 @@ async def _handle_modal_webhook_internal(body: dict) -> dict:
                 error_message,
                 json.dumps(metadata) if metadata else None,
                 job_id,
+                is_terminal,
             )
         updated = result.split()[-1] != "0"
         logger.info(

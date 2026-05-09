@@ -32,7 +32,7 @@ config = {
         "ambient-skills-companion": {
             "url": f"{base}/mcp-skills",
             "transport": "streamable-http",
-            "description": "ambient-skills-companion — skills server (OBT score, SDOH, nudges, pre-visit brief, vitals), 17 tools",
+            "description": "ambient-skills-companion — skills server (OBT score, SDOH, nudges, pre-visit brief, vitals, SLM inference, LoRA training), 21 tools",
         },
         "ambient-ingestion": {
             "url": f"{base}/mcp-ingestion",
