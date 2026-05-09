@@ -377,7 +377,24 @@ CREATE TABLE IF NOT EXISTS raw_fhir_cache (
 );
 
 -- ============================================================
--- 22. system_config (runtime key-value store)
+-- 22. lora_training_runs (Modal LoRA fine-tuning job tracker)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS lora_training_runs (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id          VARCHAR(100) NOT NULL UNIQUE,
+    status          VARCHAR(20)  NOT NULL DEFAULT 'pending',
+    triggered_at    TIMESTAMPTZ  DEFAULT NOW(),
+    completed_at    TIMESTAMPTZ,
+    base_model      VARCHAR(200),
+    dataset_path    TEXT,
+    error_message   TEXT,
+    metadata        JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_lora_runs_job_id  ON lora_training_runs(job_id);
+CREATE INDEX IF NOT EXISTS idx_lora_runs_status  ON lora_training_runs(status);
+
+-- ============================================================
+-- 23. system_config (runtime key-value store)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS system_config (
     key         VARCHAR(100) PRIMARY KEY,

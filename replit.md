@@ -24,11 +24,19 @@ Individual component commands (All MCP servers require `MCP_TRANSPORT=streamable
 - `ANTHROPIC_API_KEY`: Claude API key (Replit Secret)
 - `OPENAI_API_KEY`: GPT-4o API key (Replit Secret)
 - `LANGSMITH_API_KEY`: (Optional) For LangSmith tracing (Replit Secret)
-- `HF_TOKEN`: HuggingFace Pro token (Replit Secret)
+- `HF_TOKEN`: HuggingFace fine-grained token — scopes: Inference API + Inference Endpoints manage + read/write repos (Replit Secret)
 - `GITHUB_DEPLOY_KEY`: **Preferred** — SSH deploy key private key for GitHub push (never expires). Run `bash scripts/setup_deploy_key.sh` once to generate, then add the public key to GitHub and store the private key here.
 - `GITHUB_TOKEN`: Fallback — classic/fine-grained PAT for GitHub push via HTTPS (expires; prefer `GITHUB_DEPLOY_KEY`).
 - `DATABASE_URL`: Auto-set by Replit PostgreSQL
 - `REPLIT_DEV_DOMAIN`: Auto-set, used for MCP JSON generation
+
+**SLM + LoRA Training Secrets (add via Tools → Secrets):**
+- `HF_SLM_ENDPOINT_URL`: Full URL of the Qwen 2.5 3B dedicated HF endpoint (e.g. `https://ls1nexh71vbrz233.us-east-1.aws.endpoints.huggingface.cloud`)
+- `HF_ENDPOINT_ADMIN_TOKEN`: HF token with Endpoint Admin scope — can be the same as `HF_TOKEN` if it has that scope
+- `HF_ENDPOINT_NAME`: Name given to the HF endpoint, e.g. `companion-qwen25-3b`
+- `HF_NAMESPACE`: Your HuggingFace username or org handle
+- `MODAL_TRAIN_ENDPOINT_URL`: URL of the Modal LoRA training web endpoint (printed by `modal deploy`)
+- `MODAL_WEBHOOK_SECRET`: HMAC secret shared between Replit and Modal — generate with `python3 -c "import secrets; print(secrets.token_hex(16))"`
 
 ## Stack
 
