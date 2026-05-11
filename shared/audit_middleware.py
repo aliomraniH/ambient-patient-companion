@@ -29,41 +29,52 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # PHI field sanitisation
 # ---------------------------------------------------------------------------
-# Maps tool_name → { field_name: action } where action is one of:
-#   "hash_sha256_16"  — replace value with first 16 hex chars of SHA-256
-#   "redact"          — replace value with "[redacted]"
+# Maps tool_name → list of (source_field, dest_field, action) triples.
+#
+# action values:
+#   "hash_sha256_16"  — write SHA-256[:16] hex of the value under dest_field
+#   "redact_flag"     — write boolean True under dest_field (source removed)
+#
+# The source_field is always removed from the sanitised dict; dest_field is
+# added in its place so the audit schema reflects what was stored, not a
+# mutated copy of the original key.
 #
 # Add entries here whenever a new tool accepts free-text clinical input.
 
-_SENSITIVE_PARAMS: dict[str, dict[str, str]] = {
-    "call_slm": {
-        "prompt": "hash_sha256_16",
-        "system_message": "redact",
-    },
+_SENSITIVE_PARAMS: dict[str, list[tuple[str, str, str]]] = {
+    "call_slm": [
+        ("prompt",         "prompt_hash",            "hash_sha256_16"),
+        ("system_message", "system_message_redacted", "redact_flag"),
+    ],
 }
 
 
 def _sanitise_input(tool_name: str, input_args: dict) -> dict:
-    """Return a copy of *input_args* with sensitive fields hashed / redacted.
+    """Return a sanitised copy of *input_args* safe to write to the audit log.
 
-    Only fields listed in ``_SENSITIVE_PARAMS[tool_name]`` are touched.
+    For each rule registered in ``_SENSITIVE_PARAMS[tool_name]``:
+    - The source field is removed from the output dict.
+    - A new dest field is added with either a short hash or a boolean flag.
+
     All other tools and all other fields are returned unchanged.
+    The original ``input_args`` dict is never mutated.
     """
     rules = _SENSITIVE_PARAMS.get(tool_name)
     if not rules:
         return input_args
 
     sanitised = dict(input_args)
-    for field, action in rules.items():
-        if field not in sanitised:
+    for src_field, dest_field, action in rules:
+        if src_field not in sanitised:
             continue
-        raw = sanitised[field]
-        if not isinstance(raw, str):
-            continue
+        raw = sanitised.pop(src_field)          # remove original key
         if action == "hash_sha256_16":
-            sanitised[field] = hashlib.sha256(raw.encode()).hexdigest()[:16]
-        elif action == "redact":
-            sanitised[field] = "[redacted]"
+            sanitised[dest_field] = (
+                hashlib.sha256(raw.encode()).hexdigest()[:16]
+                if isinstance(raw, str) else None
+            )
+        elif action == "redact_flag":
+            sanitised[dest_field] = True        # boolean flag, no content
     return sanitised
 
 
