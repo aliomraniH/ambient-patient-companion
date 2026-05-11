@@ -756,6 +756,154 @@ async def _handle_modal_webhook_internal(body: dict) -> dict:
         return {"ok": False, "reason": str(exc)}
 
 
+# ── Tool: get_slm_inference_log ───────────────────────────────────────────────
+
+async def get_slm_inference_log(limit: int = 10) -> str:
+    """Return the N most recent SLM inference log entries for audit purposes.
+
+    Reads from slm_inference_log — the per-call audit trail written by call_slm.
+    Raw prompt text is NEVER returned; only the prompt_hash (first 16 hex chars
+    of SHA-256) is exposed, preserving PHI safety.
+
+    Args:
+        limit: Number of most-recent rows to return (1-200, default 10).
+
+    Returns:
+        JSON with keys: status, total_returned, rows.
+        Each row: called_at, adapter_type, prompt_hash, patient_id, latency_ms,
+        prompt_tokens, completion_tokens, multimodal, status.
+    """
+    limit = max(1, min(limit, 200))
+    try:
+        from db.connection import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT called_at, adapter_type, prompt_hash, patient_id,
+                       latency_ms, prompt_tokens, completion_tokens,
+                       multimodal, status
+                FROM slm_inference_log
+                ORDER BY called_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+    except Exception as exc:
+        logger.error("get_slm_inference_log: DB error: %s", exc)
+        return json.dumps({"status": "error", "reason": str(exc)})
+
+    entries = [
+        {
+            "called_at": r["called_at"].isoformat() if r["called_at"] else None,
+            "adapter_type": r["adapter_type"],
+            "prompt_hash": r["prompt_hash"],
+            "patient_id": str(r["patient_id"]) if r["patient_id"] else None,
+            "latency_ms": r["latency_ms"],
+            "prompt_tokens": r["prompt_tokens"],
+            "completion_tokens": r["completion_tokens"],
+            "multimodal": r["multimodal"],
+            "status": r["status"],
+        }
+        for r in rows
+    ]
+
+    return json.dumps({
+        "status": "ok",
+        "total_returned": len(entries),
+        "rows": entries,
+    }, default=str)
+
+
+# ── Tool: get_slm_status ──────────────────────────────────────────────────────
+
+async def _get_slm_status_impl() -> str:
+    """Return a combined SLM status snapshot in one call.
+
+    Aggregates three data sources:
+      1. HF endpoint state (via manage_hf_endpoint action='status') — best-effort,
+         gracefully omitted when HF_TOKEN / HF_SLM_ENDPOINT_URL are not set.
+      2. Adapter registry count from adapter_registry.
+      3. 24-hour inference statistics from slm_inference_log (call count, avg
+         latency_ms, breakdown by adapter_type).
+
+    Returns:
+        JSON with keys: status, endpoint, adapter_count, inference_24h.
+        inference_24h keys: call_count, avg_latency_ms, by_adapter_type.
+        endpoint keys: endpoint_state, replicas, endpoint_name, namespace, url
+        (or omitted_reason when discovery is unavailable).
+    """
+    import asyncio
+
+    async def _endpoint_state() -> dict:
+        try:
+            raw = await manage_hf_endpoint(action="status")
+            data = json.loads(raw)
+            if data.get("status") == "ok":
+                return {
+                    "endpoint_state": data.get("endpoint_state"),
+                    "replicas": data.get("replicas"),
+                    "endpoint_name": data.get("endpoint_name"),
+                    "namespace": data.get("namespace"),
+                    "url": data.get("url"),
+                }
+            return {"omitted_reason": data.get("reason", "unknown")}
+        except Exception as exc:
+            return {"omitted_reason": str(exc)}
+
+    async def _db_stats() -> tuple[int, int, float | None, dict[str, int]]:
+        try:
+            from db.connection import get_pool
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                adapter_count_row = await conn.fetchrow(
+                    "SELECT COUNT(*) AS cnt FROM adapter_registry WHERE status = 'active'"
+                )
+                stats_row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*)                          AS call_count,
+                           AVG(latency_ms)                  AS avg_latency_ms
+                    FROM slm_inference_log
+                    WHERE called_at >= NOW() - INTERVAL '24 hours'
+                    """
+                )
+                by_type_rows = await conn.fetch(
+                    """
+                    SELECT adapter_type, COUNT(*) AS cnt
+                    FROM slm_inference_log
+                    WHERE called_at >= NOW() - INTERVAL '24 hours'
+                    GROUP BY adapter_type
+                    ORDER BY cnt DESC
+                    """
+                )
+            adapter_count = int(adapter_count_row["cnt"])
+            call_count = int(stats_row["call_count"])
+            avg_latency = float(stats_row["avg_latency_ms"]) if stats_row["avg_latency_ms"] is not None else None
+            by_adapter = {r["adapter_type"]: int(r["cnt"]) for r in by_type_rows}
+            return adapter_count, call_count, avg_latency, by_adapter
+        except Exception as exc:
+            logger.error("get_slm_status: DB error: %s", exc)
+            return 0, 0, None, {}
+
+    endpoint_info, db_results = await asyncio.gather(
+        _endpoint_state(),
+        _db_stats(),
+    )
+
+    adapter_count, call_count, avg_latency, by_adapter = db_results
+
+    return json.dumps({
+        "status": "ok",
+        "endpoint": endpoint_info,
+        "adapter_count": adapter_count,
+        "inference_24h": {
+            "call_count": call_count,
+            "avg_latency_ms": round(avg_latency, 1) if avg_latency is not None else None,
+            "by_adapter_type": by_adapter,
+        },
+    }, default=str)
+
+
 # ── Registration ──────────────────────────────────────────────────────────────
 
 def register(mcp: FastMCP) -> None:
@@ -763,6 +911,7 @@ def register(mcp: FastMCP) -> None:
     mcp.tool(trigger_lora_training)
     mcp.tool(get_lora_training_status)
     mcp.tool(manage_hf_endpoint)
+    mcp.tool(get_slm_inference_log)
 
     # FastMCP 3.2.x silently drops zero-argument functions registered via
     # mcp.tool(fn).  Use the @mcp.tool() decorator-as-closure pattern instead,
@@ -780,6 +929,25 @@ def register(mcp: FastMCP) -> None:
             last_trained_at, created_at, metadata.
         """
         return await _list_adapters_impl()
+
+    @mcp.tool()
+    async def get_slm_status() -> str:
+        """Return a combined SLM status snapshot in one call.
+
+        Aggregates three data sources:
+          1. HF endpoint state (endpoint_state, replicas, url) — best-effort,
+             gracefully omitted when HF_TOKEN / HF_SLM_ENDPOINT_URL are not set.
+          2. Active adapter count from adapter_registry.
+          3. 24-hour inference statistics from slm_inference_log (call count,
+             avg latency_ms, breakdown by adapter_type).
+
+        Returns:
+            JSON with keys: status, endpoint, adapter_count, inference_24h.
+            inference_24h keys: call_count, avg_latency_ms, by_adapter_type.
+            endpoint keys: endpoint_state, replicas, endpoint_name, namespace,
+            url (or omitted_reason when discovery is unavailable).
+        """
+        return await _get_slm_status_impl()
 
     from starlette.requests import Request
     from starlette.responses import JSONResponse
