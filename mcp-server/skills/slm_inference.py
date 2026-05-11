@@ -314,19 +314,13 @@ async def call_slm(
         })
 
 
-# ── Tool: list_adapters ───────────────────────────────────────────────────────
+# ── Tool: list_adapters (impl) ────────────────────────────────────────────────
+# Implementation kept at module level so it can be tested directly.
+# Registration uses the @mcp.tool() closure pattern inside register() because
+# FastMCP 3.2.x silently drops zero-argument tools registered via mcp.tool(fn).
 
-async def list_adapters() -> str:
-    """List all rows in the adapter registry.
-
-    Returns the full adapter registry — cohort name, HF repo, adapter type,
-    status, and when each adapter was last trained.
-
-    Returns:
-        JSON with keys: adapters (list), total_count.
-        Each adapter item: cohort_name, hf_repo, adapter_type, status,
-        last_trained_at, created_at, metadata.
-    """
+async def _list_adapters_impl() -> str:
+    """Query the adapter_registry table and return all rows as JSON."""
     try:
         from db.connection import get_pool
         pool = await get_pool()
@@ -766,10 +760,26 @@ async def _handle_modal_webhook_internal(body: dict) -> dict:
 
 def register(mcp: FastMCP) -> None:
     mcp.tool(call_slm)
-    mcp.tool(list_adapters)
     mcp.tool(trigger_lora_training)
     mcp.tool(get_lora_training_status)
     mcp.tool(manage_hf_endpoint)
+
+    # FastMCP 3.2.x silently drops zero-argument functions registered via
+    # mcp.tool(fn).  Use the @mcp.tool() decorator-as-closure pattern instead,
+    # which is how call_history.py and ingestion_tools.py handle zero-arg tools.
+    @mcp.tool()
+    async def list_adapters() -> str:
+        """List all rows in the adapter registry.
+
+        Returns the full adapter registry — cohort name, HF repo, adapter type,
+        status, and when each adapter was last trained.
+
+        Returns:
+            JSON with keys: adapters (list), total_count.
+            Each adapter item: cohort_name, hf_repo, adapter_type, status,
+            last_trained_at, created_at, metadata.
+        """
+        return await _list_adapters_impl()
 
     from starlette.requests import Request
     from starlette.responses import JSONResponse

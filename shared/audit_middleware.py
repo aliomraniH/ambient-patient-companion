@@ -12,6 +12,7 @@ tool call so it does not require a running event loop at import time.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from typing import Any, Callable
@@ -23,6 +24,47 @@ from fastmcp.tools.base import ToolResult
 from shared.call_recorder import CallRecorder
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# PHI field sanitisation
+# ---------------------------------------------------------------------------
+# Maps tool_name → { field_name: action } where action is one of:
+#   "hash_sha256_16"  — replace value with first 16 hex chars of SHA-256
+#   "redact"          — replace value with "[redacted]"
+#
+# Add entries here whenever a new tool accepts free-text clinical input.
+
+_SENSITIVE_PARAMS: dict[str, dict[str, str]] = {
+    "call_slm": {
+        "prompt": "hash_sha256_16",
+        "system_message": "redact",
+    },
+}
+
+
+def _sanitise_input(tool_name: str, input_args: dict) -> dict:
+    """Return a copy of *input_args* with sensitive fields hashed / redacted.
+
+    Only fields listed in ``_SENSITIVE_PARAMS[tool_name]`` are touched.
+    All other tools and all other fields are returned unchanged.
+    """
+    rules = _SENSITIVE_PARAMS.get(tool_name)
+    if not rules:
+        return input_args
+
+    sanitised = dict(input_args)
+    for field, action in rules.items():
+        if field not in sanitised:
+            continue
+        raw = sanitised[field]
+        if not isinstance(raw, str):
+            continue
+        if action == "hash_sha256_16":
+            sanitised[field] = hashlib.sha256(raw.encode()).hexdigest()[:16]
+        elif action == "redact":
+            sanitised[field] = "[redacted]"
+    return sanitised
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +137,7 @@ class AuditMiddleware(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         tool_name: str = context.message.name
-        input_args: dict = dict(context.message.arguments or {})
+        raw_args: dict = dict(context.message.arguments or {})
         t0 = time.monotonic()
         outcome = "success"
         error_msg: str | None = None
@@ -112,11 +154,15 @@ class AuditMiddleware(Middleware):
             duration_ms = int((time.monotonic() - t0) * 1000)
             try:
                 rec = await self._get_recorder()
+                # Sanitise sensitive fields before writing to the audit log.
+                # Prompt text and system messages are hashed / redacted so that
+                # mcp_call_log never stores raw clinical free-text (PHI).
+                safe_args = _sanitise_input(tool_name, raw_args)
                 # Schedule recording without blocking the response
                 asyncio.create_task(
                     rec.record(
                         tool_name=tool_name,
-                        input_params=input_args,
+                        input_params=safe_args,
                         output_text=_text_from_result(result),
                         output_data=_data_from_result(result),
                         duration_ms=duration_ms,
