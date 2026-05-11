@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from skills.slm_inference import get_lora_training_status
+from skills.slm_inference import _handle_modal_webhook_internal, get_lora_training_status
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -197,3 +197,97 @@ async def test_get_lora_training_status_different_statuses(db_pool):
         finally:
             async with db_pool.acquire() as conn:
                 await _delete_training_run(conn, job_id)
+
+
+# ── Tests: _handle_modal_webhook_internal (UPDATE path) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_update_lora_run_to_completed(db_pool):
+    """Transitioning a pending row to completed must set status and completed_at."""
+    job_id = f"test-job-complete-{uuid.uuid4()}"
+
+    async with db_pool.acquire() as conn:
+        await _seed_training_run(conn, job_id=job_id, status="pending")
+
+    try:
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            webhook_result = await _handle_modal_webhook_internal(
+                {"job_id": job_id, "status": "completed"}
+            )
+
+        assert webhook_result["ok"] is True, f"Expected ok=True, got: {webhook_result}"
+        assert webhook_result["job_id"] == job_id
+        assert webhook_result["status"] == "completed"
+        assert webhook_result["row_updated"] is True
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            raw = await get_lora_training_status(job_id=job_id)
+
+        result = json.loads(raw)
+        assert result["status"] == "completed", (
+            f"Expected status='completed' after update, got {result['status']!r}"
+        )
+        assert result["job_id"] == job_id
+
+        completed_at = result.get("completed_at")
+        assert completed_at is not None, "completed_at must be set after transitioning to completed"
+        assert isinstance(completed_at, str), (
+            f"completed_at must be a string, got {type(completed_at)}: {completed_at!r}"
+        )
+        parsed = datetime.fromisoformat(completed_at)
+        assert parsed.tzinfo is not None, "completed_at must be timezone-aware"
+
+        assert result.get("error_message") is None, (
+            "error_message must remain None when transitioning to completed without error"
+        )
+
+    finally:
+        async with db_pool.acquire() as conn:
+            await _delete_training_run(conn, job_id)
+
+
+@pytest.mark.asyncio
+async def test_update_lora_run_to_failed(db_pool):
+    """Transitioning a pending row to failed must set status, completed_at, and error_message."""
+    job_id = f"test-job-failed-{uuid.uuid4()}"
+    error_msg = "OOM during forward pass at epoch 2"
+
+    async with db_pool.acquire() as conn:
+        await _seed_training_run(conn, job_id=job_id, status="pending")
+
+    try:
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            webhook_result = await _handle_modal_webhook_internal(
+                {"job_id": job_id, "status": "failed", "error_message": error_msg}
+            )
+
+        assert webhook_result["ok"] is True, f"Expected ok=True, got: {webhook_result}"
+        assert webhook_result["job_id"] == job_id
+        assert webhook_result["status"] == "failed"
+        assert webhook_result["row_updated"] is True
+
+        with patch("db.connection.get_pool", AsyncMock(return_value=db_pool)):
+            raw = await get_lora_training_status(job_id=job_id)
+
+        result = json.loads(raw)
+        assert result["status"] == "failed", (
+            f"Expected status='failed' after update, got {result['status']!r}"
+        )
+        assert result["job_id"] == job_id
+
+        completed_at = result.get("completed_at")
+        assert completed_at is not None, "completed_at must be set after transitioning to failed"
+        assert isinstance(completed_at, str), (
+            f"completed_at must be a string, got {type(completed_at)}: {completed_at!r}"
+        )
+        parsed = datetime.fromisoformat(completed_at)
+        assert parsed.tzinfo is not None, "completed_at must be timezone-aware"
+
+        assert result.get("error_message") == error_msg, (
+            f"Expected error_message={error_msg!r}, got {result.get('error_message')!r}"
+        )
+
+    finally:
+        async with db_pool.acquire() as conn:
+            await _delete_training_run(conn, job_id)
