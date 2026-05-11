@@ -1,0 +1,20 @@
+run the following prompts one by one"Endpoint Health & Registry State
+Verify the HF endpoint is reachable, the adapter registry is correctly seeded, cold-start retry works, and the audit log is recording every call. Run these before any other suite.
+Health Check
+S1 · P1
+Baseline
+Check the SLM endpoint status and show me the full adapter registry. I want to know: 1. Whether the HF endpoint is running, initializing, or scaled to zero 2. Every row in the adapter registry — cohort name, HF repo, status, and when it was last trained 3. How many inference calls have been made in the last 24 hours and the average latency 4. How many jobs are currently pending in the training queue Then tell me if anything looks wrong before I start testing.
+What to look for get_slm_status() should return endpoint status + at least 1 adapter row (cohort-diabetes-bh-adapter, status=active). If endpoint is scaled_to_zero, that's fine — the next test warms it up. Red flag: no adapter rows, or status='error'.
+S1 · P2
+Cold Start
+Warm up the SLM endpoint and confirm it's ready to serve requests. Once it responds, run a minimal test inference — send the single message "Ready." to the base model with no adapter and no patient context. Show me the latency and the raw response text.
+What to look for warm_slm_endpoint() should eventually return status=warmed_up with a latency_ms value. If it times out (2 min), the endpoint may still be booting — wait 30 sec and retry. The minimal inference should return a short response from the base Qwen 2.5 3B model with adapter_type='base'.
+Registry Integrity
+S1 · P3
+Registry
+Show me the full adapter registry with list_adapters(). Then show me the last 10 rows of the SLM inference log with get_slm_inference_log(limit=10). For each inference log entry, confirm: - prompt_hash is present and is a short hex string (not the full prompt text — that would be a PHI leak) - patient_id is a UUID or null, never a name or MRN - adapter_type is one of 'cohort', 'patient', or 'base' Flag anything that looks like raw PHI in the log.
+What to look for The inference log must never contain raw prompt text or patient names — only prompt_hash values. If you see full prompt text in the log, that's a PHI safety bug to fix before connecting HealthEx data.
+S1 · P4
+Audit Trail
+Use the MCP audit tools to show me the current session transcript. I want to see every tool call made in this session so far — tool name, which server it came from, and whether it succeeded. Then search the tool call history for any calls to slm-related tools (search_tool_calls with tool_name containing 'slm'). Show me how many SLM tool calls have been logged across all sessions.
+What to look for get_session_transcript() and search_tool_calls() from call_history.py (Server 2). All slm_* tool calls should appear in mcp_call_log. Confirms AuditMiddleware is wiring correctly for the new skill.

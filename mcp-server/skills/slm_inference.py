@@ -2,6 +2,7 @@
 
 Tools registered:
   call_slm                  — text generation via HF dedicated endpoint
+  list_adapters             — list all rows in the adapter registry
   trigger_lora_training     — HMAC-signed POST to Modal training endpoint
   get_lora_training_status  — query lora_training_runs by job_id
   manage_hf_endpoint        — scale HF dedicated endpoint up / down
@@ -28,6 +29,7 @@ import json
 import logging
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -40,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT = 30.0
 _TRAIN_TIMEOUT = 10.0
+
+_VALID_ADAPTER_TYPES = {"cohort", "patient", "base"}
 
 
 # ── Env helpers ───────────────────────────────────────────────────────────────
@@ -72,6 +76,52 @@ def verify_modal_signature(body: bytes, header_value: str, secret: str) -> bool:
     return hmac.compare_digest(expected, header_value)
 
 
+def _prompt_hash(prompt: str) -> str:
+    """Return first 16 hex chars of SHA-256(prompt) — safe for audit logs (no PHI)."""
+    return hashlib.sha256(prompt.encode()).hexdigest()[:16]
+
+
+# ── Inference log writer ───────────────────────────────────────────────────────
+
+async def _log_inference(
+    *,
+    adapter_type: str,
+    prompt: str,
+    patient_id: str | None,
+    latency_ms: int,
+    usage: dict,
+    multimodal: bool,
+    status: str,
+    endpoint_url: str,
+) -> None:
+    """Write one row to slm_inference_log (best-effort — never raises)."""
+    try:
+        from db.connection import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO slm_inference_log
+                    (adapter_type, prompt_hash, patient_id, latency_ms,
+                     prompt_tokens, completion_tokens, total_tokens,
+                     multimodal, status, endpoint_url)
+                VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)
+                """,
+                adapter_type,
+                _prompt_hash(prompt),
+                patient_id or None,
+                latency_ms,
+                usage.get("prompt_tokens"),
+                usage.get("completion_tokens"),
+                usage.get("total_tokens"),
+                multimodal,
+                status,
+                endpoint_url,
+            )
+    except Exception as exc:
+        logger.error("slm_inference_log write failed: %s", exc)
+
+
 # ── Tool: call_slm ────────────────────────────────────────────────────────────
 
 async def call_slm(
@@ -80,6 +130,8 @@ async def call_slm(
     max_new_tokens: int = 512,
     temperature: float = 0.3,
     image_url: str = "",
+    adapter_type: str = "base",
+    patient_id: str = "",
 ) -> str:
     """Generate text (or analyse an image) via the Qwen 2.5 VL 3B dedicated endpoint.
 
@@ -97,11 +149,27 @@ async def call_slm(
                          (e.g. "https://..." or "data:image/jpeg;base64,...").
                          When provided the model receives both image and text,
                          enabling chart analysis, wound/rash assessment, etc.
+        adapter_type:    Which adapter tier is active: 'cohort', 'patient', or 'base'.
+                         'base'    — no LoRA adapter, raw Qwen 2.5 3B weights.
+                         'cohort'  — cohort-level LoRA adapter loaded on the endpoint.
+                         'patient' — patient-specific fine-tuned adapter.
+                         Recorded in the response payload and inference log.
+        patient_id:      Optional patient UUID for audit log linkage (never stored
+                         as name or MRN — only the UUID is written to the log).
 
     Returns:
-        JSON string with keys: generated_text, model, usage, endpoint_url, multimodal.
+        JSON string with keys: generated_text, model, usage, endpoint_url,
+        multimodal, adapter_type.
         On error: JSON with status="error" and reason.
     """
+    adapter_type = (adapter_type or "base").strip().lower()
+    if adapter_type not in _VALID_ADAPTER_TYPES:
+        return json.dumps({
+            "status": "error",
+            "reason": f"Invalid adapter_type {adapter_type!r}. "
+                      f"Must be one of: {sorted(_VALID_ADAPTER_TYPES)}",
+        })
+
     try:
         endpoint_url = _require_env("HF_SLM_ENDPOINT_URL")
         hf_token = _require_env("HF_TOKEN")
@@ -143,6 +211,8 @@ async def call_slm(
     else:
         user_content = prompt
 
+    is_multimodal = bool(image_url)
+
     payload = {
         "model": "qwen2.5-vl",
         "messages": [
@@ -154,6 +224,7 @@ async def call_slm(
         "stream": False,
     }
 
+    t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.post(
@@ -165,12 +236,21 @@ async def call_slm(
                 },
             )
 
+        latency_ms = int((time.monotonic() - t0) * 1000)
+
         if resp.status_code == 503:
+            await _log_inference(
+                adapter_type=adapter_type, prompt=prompt,
+                patient_id=patient_id or None, latency_ms=latency_ms,
+                usage={}, multimodal=is_multimodal, status="error_503",
+                endpoint_url=endpoint_url,
+            )
             return json.dumps({
                 "status": "error",
                 "reason": "HF endpoint is scaled down (503). "
                           "Use manage_hf_endpoint(action='scale_up') to restart it.",
                 "endpoint_url": endpoint_url,
+                "adapter_type": adapter_type,
             })
 
         resp.raise_for_status()
@@ -184,30 +264,103 @@ async def call_slm(
         usage = data.get("usage", {})
 
         logger.info(
-            "call_slm: generated %d tokens (prompt=%d, completion=%d, multimodal=%s)",
+            "call_slm: adapter_type=%s generated %d tokens "
+            "(prompt=%d, completion=%d, multimodal=%s, latency=%dms)",
+            adapter_type,
             usage.get("total_tokens", 0),
             usage.get("prompt_tokens", 0),
             usage.get("completion_tokens", 0),
-            bool(image_url),
+            is_multimodal,
+            latency_ms,
+        )
+
+        await _log_inference(
+            adapter_type=adapter_type, prompt=prompt,
+            patient_id=patient_id or None, latency_ms=latency_ms,
+            usage=usage, multimodal=is_multimodal, status="ok",
+            endpoint_url=endpoint_url,
         )
 
         return json.dumps({
             "status": "ok",
-            "multimodal": bool(image_url),
+            "adapter_type": adapter_type,
+            "multimodal": is_multimodal,
             "generated_text": generated,
             "model": data.get("model", "qwen2.5-3b-instruct"),
             "usage": usage,
+            "latency_ms": latency_ms,
             "endpoint_url": endpoint_url,
         })
 
     except httpx.TimeoutException:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        await _log_inference(
+            adapter_type=adapter_type, prompt=prompt,
+            patient_id=patient_id or None, latency_ms=latency_ms,
+            usage={}, multimodal=is_multimodal, status="timeout",
+            endpoint_url=endpoint_url,
+        )
         return json.dumps({
             "status": "error",
+            "adapter_type": adapter_type,
             "reason": f"Request to HF endpoint timed out after {_TIMEOUT}s.",
         })
     except Exception as exc:
         logger.error("call_slm: %s", exc)
+        return json.dumps({
+            "status": "error",
+            "adapter_type": adapter_type,
+            "reason": str(exc),
+        })
+
+
+# ── Tool: list_adapters ───────────────────────────────────────────────────────
+
+async def list_adapters() -> str:
+    """List all rows in the adapter registry.
+
+    Returns the full adapter registry — cohort name, HF repo, adapter type,
+    status, and when each adapter was last trained.
+
+    Returns:
+        JSON with keys: adapters (list), total_count.
+        Each adapter item: cohort_name, hf_repo, adapter_type, status,
+        last_trained_at, created_at, metadata.
+    """
+    try:
+        from db.connection import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT cohort_name, hf_repo, adapter_type, status,
+                       last_trained_at, created_at, metadata
+                FROM adapter_registry
+                ORDER BY created_at DESC
+                """
+            )
+    except Exception as exc:
+        logger.error("list_adapters: DB error: %s", exc)
         return json.dumps({"status": "error", "reason": str(exc)})
+
+    adapters = [
+        {
+            "cohort_name": r["cohort_name"],
+            "hf_repo": r["hf_repo"],
+            "adapter_type": r["adapter_type"],
+            "status": r["status"],
+            "last_trained_at": r["last_trained_at"].isoformat() if r["last_trained_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
+        }
+        for r in rows
+    ]
+
+    return json.dumps({
+        "status": "ok",
+        "total_count": len(adapters),
+        "adapters": adapters,
+    }, default=str)
 
 
 # ── Tool: trigger_lora_training ───────────────────────────────────────────────
@@ -379,7 +532,6 @@ async def _hf_whoami(token: str) -> str:
                     continue
                 resp.raise_for_status()
                 data = resp.json()
-                # Fine-grained token responses nest the user under auth.accessToken.author
                 name = (
                     data.get("name")
                     or data.get("login")
@@ -500,6 +652,28 @@ async def manage_hf_endpoint(action: str) -> str:
                 headers=headers,
                 json={"compute": {"scaling": {"minReplica": replicas, "maxReplica": 1}}},
             )
+
+            # 405 Method Not Allowed — HF returns this when the endpoint is already
+            # in the requested state (e.g. scale_up on a running endpoint).
+            if resp.status_code == 405:
+                current_state = "running" if action == "scale_up" else "scaled_to_zero"
+                logger.info(
+                    "manage_hf_endpoint: %s returned 405 — endpoint already %s",
+                    action, current_state,
+                )
+                return json.dumps({
+                    "status": "ok",
+                    "action": action,
+                    "namespace": namespace,
+                    "endpoint_name": endpoint_name,
+                    "endpoint_state": current_state,
+                    "message": (
+                        "Endpoint is already running — no action taken."
+                        if action == "scale_up"
+                        else "Endpoint is already scaled to zero — no action taken."
+                    ),
+                })
+
             resp.raise_for_status()
             data = resp.json()
             logger.info(
@@ -530,7 +704,7 @@ async def manage_hf_endpoint(action: str) -> str:
             "namespace": namespace,
             "endpoint_name": endpoint_name,
             "http_status": exc.response.status_code,
-            "reason": exc.response.text,
+            "reason": exc.response.text or f"HTTP {exc.response.status_code} from HF API",
         })
     except Exception as exc:
         logger.error("manage_hf_endpoint: %s", exc)
@@ -592,6 +766,7 @@ async def _handle_modal_webhook_internal(body: dict) -> dict:
 
 def register(mcp: FastMCP) -> None:
     mcp.tool(call_slm)
+    mcp.tool(list_adapters)
     mcp.tool(trigger_lora_training)
     mcp.tool(get_lora_training_status)
     mcp.tool(manage_hf_endpoint)
