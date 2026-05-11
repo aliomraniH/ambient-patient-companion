@@ -29,15 +29,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # PHI field sanitisation
 # ---------------------------------------------------------------------------
-# Maps tool_name → list of (source_field, dest_field, action) triples.
+# _SENSITIVE_PARAMS: maps tool_name → list of (src_field, dest_field, action)
 #
 # action values:
-#   "hash_sha256_16"  — write SHA-256[:16] hex of the value under dest_field
-#   "redact_flag"     — write boolean True under dest_field (source removed)
+#   "hash_sha256_16"  — remove src, write SHA-256[:16] hex under dest
+#   "redact_flag"     — remove src, write True under dest
 #
-# The source_field is always removed from the sanitised dict; dest_field is
-# added in its place so the audit schema reflects what was stored, not a
-# mutated copy of the original key.
+# _GUARANTEE_FLAGS: maps tool_name → dict of {dest_field: value} that must
+# always appear in the sanitised output regardless of which fields the caller
+# supplied.  Use this to ensure required audit keys are never absent.
 #
 # Add entries here whenever a new tool accepts free-text clinical input.
 
@@ -48,33 +48,50 @@ _SENSITIVE_PARAMS: dict[str, list[tuple[str, str, str]]] = {
     ],
 }
 
+# Unconditional flags written after field-level sanitisation.
+# Guarantees the key is present even when the caller omitted the source field.
+_GUARANTEE_FLAGS: dict[str, dict[str, object]] = {
+    "call_slm": {"system_message_redacted": True},
+}
+
 
 def _sanitise_input(tool_name: str, input_args: dict) -> dict:
     """Return a sanitised copy of *input_args* safe to write to the audit log.
 
-    For each rule registered in ``_SENSITIVE_PARAMS[tool_name]``:
+    For each rule in ``_SENSITIVE_PARAMS[tool_name]``:
     - The source field is removed from the output dict.
-    - A new dest field is added with either a short hash or a boolean flag.
+    - A renamed dest field is added with either a short hash or a boolean flag.
+
+    After field-level rules, ``_GUARANTEE_FLAGS[tool_name]`` keys are
+    unconditionally set so required audit fields are never absent even when the
+    caller omits optional source fields (e.g. ``system_message`` is optional in
+    ``call_slm`` but ``system_message_redacted`` must always appear).
 
     All other tools and all other fields are returned unchanged.
     The original ``input_args`` dict is never mutated.
     """
     rules = _SENSITIVE_PARAMS.get(tool_name)
-    if not rules:
+    if not rules and tool_name not in _GUARANTEE_FLAGS:
         return input_args
 
     sanitised = dict(input_args)
-    for src_field, dest_field, action in rules:
+
+    for src_field, dest_field, action in (rules or []):
         if src_field not in sanitised:
             continue
-        raw = sanitised.pop(src_field)          # remove original key
+        raw = sanitised.pop(src_field)
         if action == "hash_sha256_16":
             sanitised[dest_field] = (
                 hashlib.sha256(raw.encode()).hexdigest()[:16]
                 if isinstance(raw, str) else None
             )
         elif action == "redact_flag":
-            sanitised[dest_field] = True        # boolean flag, no content
+            sanitised[dest_field] = True
+
+    # Apply unconditional guarantee flags (setdefault keeps a hash if already set)
+    for dest_field, value in (_GUARANTEE_FLAGS.get(tool_name) or {}).items():
+        sanitised.setdefault(dest_field, value)
+
     return sanitised
 
 
