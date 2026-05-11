@@ -42,16 +42,119 @@ logger = logging.getLogger(__name__)
 # Add entries here whenever a new tool accepts free-text clinical input.
 
 _SENSITIVE_PARAMS: dict[str, list[tuple[str, str, str]]] = {
+    # ── Server 1: Clinical Intelligence (server/mcp_server.py) ───────────────
+    # clinical_query: free-text clinical question + PHI-dense patient context struct
+    "clinical_query": [
+        ("query",           "query_hash",            "hash_sha256_16"),
+        ("patient_context", "patient_context_redacted", "redact_flag"),
+    ],
+    # triage_message: raw patient message content
+    "triage_message": [
+        ("content", "content_hash", "hash_sha256_16"),
+    ],
+    # request_clarification: clarifying question, rationale, and any free-text answer fields
+    "request_clarification": [
+        ("question_text",        "question_text_hash",          "hash_sha256_16"),
+        ("clinical_rationale",   "clinical_rationale_hash",     "hash_sha256_16"),
+        ("default_if_unanswered","default_if_unanswered_hash",  "hash_sha256_16"),
+        ("suggested_options",    "suggested_options_redacted",  "redact_flag"),
+    ],
+    # emit_reasoning_gap_artifact: human-readable clinical gap description fields
+    "emit_reasoning_gap_artifact": [
+        ("description",                    "description_hash",                    "hash_sha256_16"),
+        ("impact_statement",               "impact_statement_hash",               "hash_sha256_16"),
+        ("recommended_action_for_synthesis","recommended_action_for_synthesis_hash","hash_sha256_16"),
+        ("caveat_text",                    "caveat_text_hash",                    "hash_sha256_16"),
+    ],
+    # search_guidelines: free-text query against clinical guidelines
+    "search_guidelines": [
+        ("query", "query_hash", "hash_sha256_16"),
+    ],
+    # assess_reasoning_confidence: draft agent reasoning text
+    "assess_reasoning_confidence": [
+        ("reasoning_draft", "reasoning_draft_hash", "hash_sha256_16"),
+    ],
+    # check_sycophancy_risk: draft clinical output text
+    "check_sycophancy_risk": [
+        ("draft_output", "draft_output_hash", "hash_sha256_16"),
+    ],
+    # run_constitutional_critic: draft clinical output text
+    "run_constitutional_critic": [
+        ("draft_output", "draft_output_hash", "hash_sha256_16"),
+    ],
+
+    # ── Server 2: Skills Companion (mcp-server/) ─────────────────────────────
+    # call_slm: prompt and system message for the local SLM
     "call_slm": [
         ("prompt",         "prompt_hash",            "hash_sha256_16"),
         ("system_message", "system_message_redacted", "redact_flag"),
+    ],
+    # extract_and_store_behavioral_atoms: conversation/clinical-note free text
+    "extract_and_store_behavioral_atoms": [
+        ("text", "text_hash", "hash_sha256_16"),
+    ],
+    # search_behavioral_atoms_cohort: semantic-search query text
+    "search_behavioral_atoms_cohort": [
+        ("query_text", "query_text_hash", "hash_sha256_16"),
+    ],
+    # search_similar_atoms: semantic-search query text (atom_vector_search)
+    "search_similar_atoms": [
+        ("query_text", "query_text_hash", "hash_sha256_16"),
+    ],
+    # detect_conversation_teachable_moment: conversation snippet
+    "detect_conversation_teachable_moment": [
+        ("conversation_text", "conversation_text_hash", "hash_sha256_16"),
+    ],
+    # score_llm_interaction_health: conversation excerpt for over-reliance detection
+    "score_llm_interaction_health": [
+        ("conversation_excerpt", "conversation_excerpt_hash", "hash_sha256_16"),
+    ],
+    # search_clinical_knowledge: free-text clinical query + patient context JSON
+    "search_clinical_knowledge": [
+        ("query",           "query_hash",            "hash_sha256_16"),
+        ("patient_context", "patient_context_redacted", "redact_flag"),
+    ],
+    # ingest_behavioral_screening_fhir: raw FHIR JSON blob (PHI-dense)
+    "ingest_behavioral_screening_fhir": [
+        ("fhir_resource_json", "fhir_resource_json_redacted", "redact_flag"),
+    ],
+
+    # register_healthex_patient: raw JSON from HealthEx get_health_summary (PHI-dense)
+    "register_healthex_patient": [
+        ("health_summary_json", "health_summary_json_redacted", "redact_flag"),
+    ],
+    # ingest_from_healthex: raw HealthEx tool response (labs, meds, conditions, etc.)
+    "ingest_from_healthex": [
+        ("fhir_json", "fhir_json_redacted", "redact_flag"),
+    ],
+    # run_healthex_pipeline: all raw JSON payload args from HealthEx tools
+    "run_healthex_pipeline": [
+        ("health_summary_json",        "health_summary_json_redacted",        "redact_flag"),
+        ("labs_json",                  "labs_json_redacted",                  "redact_flag"),
+        ("medications_json",           "medications_json_redacted",           "redact_flag"),
+        ("conditions_json",            "conditions_json_redacted",            "redact_flag"),
+        ("encounters_json",            "encounters_json_redacted",            "redact_flag"),
+        ("notes_json",                 "notes_json_redacted",                 "redact_flag"),
+        ("behavioral_screenings_json", "behavioral_screenings_json_redacted", "redact_flag"),
+    ],
+
+    # ── Server 3: Ingestion (ingestion/server.py) ────────────────────────────
+    # detect_healthex_format: raw HealthEx API response (may contain PHI)
+    "detect_healthex_format": [
+        ("raw_response", "raw_response_redacted", "redact_flag"),
     ],
 }
 
 # Unconditional flags written after field-level sanitisation.
 # Guarantees the key is present even when the caller omitted the source field.
 _GUARANTEE_FLAGS: dict[str, dict[str, object]] = {
-    "call_slm": {"system_message_redacted": True},
+    "call_slm":                         {"system_message_redacted": True},
+    "clinical_query":                   {"patient_context_redacted": True},
+    "search_clinical_knowledge":        {"patient_context_redacted": True},
+    "ingest_behavioral_screening_fhir": {"fhir_resource_json_redacted": True},
+    "register_healthex_patient":        {"health_summary_json_redacted": True},
+    "ingest_from_healthex":             {"fhir_json_redacted": True},
+    "detect_healthex_format":           {"raw_response_redacted": True},
 }
 
 
