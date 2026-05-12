@@ -138,6 +138,17 @@ _SENSITIVE_PARAMS: dict[str, list[tuple[str, str, str]]] = {
         ("behavioral_screenings_json", "behavioral_screenings_json_redacted", "redact_flag"),
     ],
 
+    # propose_cohort_adapter: population_description is free-text clinical cohort
+    # description that may contain diagnostic or demographic details
+    "propose_cohort_adapter": [
+        ("population_description", "population_description_hash", "hash_sha256_16"),
+    ],
+    # confirm_cohort_creation: proposal_json contains the full proposal blob including
+    # population_description and research rationale text
+    "confirm_cohort_creation": [
+        ("proposal_json", "proposal_json_redacted", "redact_flag"),
+    ],
+
     # ── Server 3: Ingestion (ingestion/server.py) ────────────────────────────
     # detect_healthex_format: raw HealthEx API response (may contain PHI)
     "detect_healthex_format": [
@@ -155,6 +166,7 @@ _GUARANTEE_FLAGS: dict[str, dict[str, object]] = {
     "register_healthex_patient":        {"health_summary_json_redacted": True},
     "ingest_from_healthex":             {"fhir_json_redacted": True},
     "detect_healthex_format":           {"raw_response_redacted": True},
+    "confirm_cohort_creation":          {"proposal_json_redacted": True},
 }
 
 

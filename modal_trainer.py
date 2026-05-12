@@ -206,7 +206,8 @@ async def run_lora_training(payload: dict) -> dict:
         print("[lora_trainer] Training complete.")
 
         # Push LoRA adapter to HF Hub
-        adapter_repo = f"Aliomrani6/companion-lora-{job_id[:8]}"
+        hf_namespace = os.environ.get("HF_NAMESPACE", "Aliomrani6")
+        adapter_repo = f"{hf_namespace}/companion-lora-{job_id[:8]}"
         print(f"[lora_trainer] Pushing adapter to {adapter_repo} …")
         model.push_to_hub(adapter_repo, token=hf_token)
         tokenizer.push_to_hub(adapter_repo, token=hf_token)

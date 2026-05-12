@@ -3,7 +3,9 @@
 Tools registered:
   call_slm                  — text generation via HF dedicated endpoint
   list_adapters             — list all rows in the adapter registry
-  trigger_lora_training     — HMAC-signed POST to Modal training endpoint
+  propose_cohort_adapter    — check existing adapters + propose a new one with research rationale
+  confirm_cohort_creation   — execute a confirmed cohort adapter creation (triggers Modal training)
+  trigger_lora_training     — HMAC-signed POST to Modal training endpoint (low-level)
   get_lora_training_status  — query lora_training_runs by job_id
   manage_hf_endpoint        — scale HF dedicated endpoint up / down
 
@@ -23,11 +25,13 @@ Modal secrets (required for LoRA training only):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -79,6 +83,101 @@ def verify_modal_signature(body: bytes, header_value: str, secret: str) -> bool:
 def _prompt_hash(prompt: str) -> str:
     """Return first 16 hex chars of SHA-256(prompt) — safe for audit logs (no PHI)."""
     return hashlib.sha256(prompt.encode()).hexdigest()[:16]
+
+
+# ── Cohort slug helper ─────────────────────────────────────────────────────────
+
+_STOPWORDS = frozenset(
+    "the a an with for and or of in on at to by is are has have patients patient".split()
+)
+
+
+def _cohort_slug(description: str) -> str:
+    """Normalise a free-text population description to a stable cohort slug.
+
+    e.g. "Diabetes patients with behavioral health comorbidities"
+         → "cohort-diabetes-behavioral-health-comorbidities"
+    """
+    words = re.sub(r"[^a-z0-9\s]", "", description.lower()).split()
+    significant = [w for w in words if w not in _STOPWORDS and len(w) > 2][:5]
+    slug = "-".join(significant) or "custom"
+    return f"cohort-{slug}"
+
+
+# ── Cohort adapter helpers ─────────────────────────────────────────────────────
+
+async def _find_existing_adapters(cohort_name: str) -> list[dict]:
+    """Return adapter_registry rows whose cohort_name matches or resembles *cohort_name*.
+
+    Tries an exact match first, then a fuzzy ILIKE on the slug body (without
+    the 'cohort-' prefix) to catch partial overlaps across naming variations.
+    """
+    try:
+        from db.connection import get_pool
+        pool = await get_pool()
+        slug_body = cohort_name[7:] if cohort_name.startswith("cohort-") else cohort_name
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT cohort_name, hf_repo, adapter_type, status,
+                       last_trained_at, created_at, metadata
+                FROM adapter_registry
+                WHERE cohort_name = $1
+                   OR cohort_name ILIKE $2
+                ORDER BY
+                    CASE WHEN cohort_name = $1 THEN 0 ELSE 1 END,
+                    created_at DESC
+                """,
+                cohort_name,
+                f"%{slug_body}%",
+            )
+    except Exception as exc:
+        logger.error("_find_existing_adapters: DB error: %s", exc)
+        return []
+    return [
+        {
+            "cohort_name": r["cohort_name"],
+            "hf_repo": r["hf_repo"],
+            "adapter_type": r["adapter_type"],
+            "status": r["status"],
+            "last_trained_at": r["last_trained_at"].isoformat() if r["last_trained_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
+        }
+        for r in rows
+    ]
+
+
+async def _search_cohort_guidelines(population_description: str) -> list[dict]:
+    """Query PubMed for guideline_recommendation hits relevant to the population.
+
+    Returns a list of condensed finding dicts (source, finding, evidence_level, url).
+    Fails silently — never raises, returns [] on any error so callers are unaffected.
+    """
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+        from gap_aware.knowledge_searcher import run_knowledge_search
+        result = await run_knowledge_search(
+            query=f"clinical model fine-tuning guidelines {population_description}",
+            query_type="guideline_recommendation",
+            sources=["pubmed"],
+            patient_context={},
+            max_per_source=5,
+        )
+        findings = result.get("results", [])
+        return [
+            {
+                "source": f.get("source", "pubmed"),
+                "finding": f.get("finding") or f.get("title") or f.get("text", ""),
+                "evidence_level": f.get("evidence_level", "unknown"),
+                "url": f.get("url", ""),
+            }
+            for f in findings[:5]
+            if f.get("finding") or f.get("title") or f.get("text")
+        ]
+    except Exception as exc:
+        logger.warning("_search_cohort_guidelines: knowledge search unavailable: %s", exc)
+        return []
 
 
 # ── Inference log writer ───────────────────────────────────────────────────────
@@ -354,6 +453,283 @@ async def _list_adapters_impl() -> str:
         "status": "ok",
         "total_count": len(adapters),
         "adapters": adapters,
+    }, default=str)
+
+
+# ── Tool: propose_cohort_adapter ──────────────────────────────────────────────
+
+async def propose_cohort_adapter(
+    population_description: str,
+    dataset_path: str = "",
+    base_model: str = "Qwen/Qwen2.5-3B-Instruct",
+    epochs: int = 3,
+    learning_rate: float = 2e-4,
+) -> str:
+    """Check existing adapters and propose creating a new cohort adapter.
+
+    Searches adapter_registry for any existing adapter matching the population,
+    then queries PubMed for clinical guideline evidence to justify the training.
+    Returns a structured proposal for review — **no side effects**.
+
+    The calling agent should present the proposal (including research_findings and
+    rationale) to the end user and ask for confirmation before calling
+    confirm_cohort_creation.
+
+    Args:
+        population_description: Plain-English description of the patient cohort,
+                                 e.g. "diabetes patients with depression".
+        dataset_path:            HuggingFace dataset repo ID for training.
+                                 Leave blank to include a placeholder in the
+                                 proposal for the user to fill in.
+        base_model:              Base model to fine-tune (default Qwen 2.5 3B).
+        epochs:                  Proposed training epochs (default 3).
+        learning_rate:           Proposed AdamW learning rate (default 2e-4).
+
+    Returns:
+        JSON with keys:
+          existing_adapters  — list of registry rows that may already cover this
+                               population (empty list if none found)
+          research_findings  — PubMed guideline hits supporting the training
+          proposal           — {cohort_name, population_description, dataset_path,
+                                base_model, epochs, learning_rate, rationale}
+                               null if an active adapter already exists
+          action_required    — "confirm_cohort_creation" | "adapter_already_active"
+                               | "adapter_training_in_progress"
+          message            — human-readable summary for the agent to relay to user
+    """
+    cohort_name = _cohort_slug(population_description)
+
+    # Run DB lookup and PubMed search concurrently — neither blocks the other
+    existing, research = await asyncio.gather(
+        _find_existing_adapters(cohort_name),
+        _search_cohort_guidelines(population_description),
+    )
+
+    active = [a for a in existing if a["status"] == "active"]
+    if active:
+        return json.dumps({
+            "existing_adapters": existing,
+            "research_findings": research,
+            "proposal": None,
+            "action_required": "adapter_already_active",
+            "message": (
+                f"An active adapter already exists for this population: "
+                f"'{active[0]['cohort_name']}' (repo: {active[0]['hf_repo']}). "
+                f"No new adapter is needed. Pass adapter_type='cohort' to call_slm "
+                f"to use it."
+            ),
+        }, default=str)
+
+    training_in_progress = [a for a in existing if a["status"] == "training"]
+    if training_in_progress:
+        return json.dumps({
+            "existing_adapters": existing,
+            "research_findings": research,
+            "proposal": None,
+            "action_required": "adapter_training_in_progress",
+            "message": (
+                f"A training job is already in progress for "
+                f"'{training_in_progress[0]['cohort_name']}'. "
+                f"Poll get_lora_training_status to check progress before starting "
+                f"a new run."
+            ),
+        }, default=str)
+
+    # Build rationale from PubMed findings
+    if research:
+        snippets = [f["finding"] for f in research[:3] if f.get("finding")]
+        rationale = " | ".join(snippets) if snippets else (
+            f"Clinical guidelines support specialised model adaptation for "
+            f"'{population_description}'."
+        )
+    else:
+        rationale = (
+            f"No external guideline hits found for this query, but cohort-level "
+            f"fine-tuning is broadly recommended for specialised clinical populations."
+        )
+
+    dataset_note = (
+        f"using dataset '{dataset_path}'" if dataset_path
+        else "NOTE: dataset_path is blank — ask the user to provide a "
+             "HuggingFace dataset repo ID before confirming"
+    )
+    proposal = {
+        "cohort_name": cohort_name,
+        "population_description": population_description,
+        "dataset_path": dataset_path,
+        "base_model": base_model,
+        "epochs": epochs,
+        "learning_rate": learning_rate,
+        "rationale": rationale,
+    }
+    return json.dumps({
+        "existing_adapters": existing,
+        "research_findings": research,
+        "proposal": proposal,
+        "action_required": "confirm_cohort_creation",
+        "message": (
+            f"No active adapter found for '{population_description}'. "
+            f"Based on {len(research)} clinical guideline finding(s), I propose "
+            f"creating '{cohort_name}' ({dataset_note}). "
+            f"Share the research_findings and proposal with the user and ask "
+            f"for confirmation before calling confirm_cohort_creation."
+        ),
+    }, default=str)
+
+
+# ── Tool: confirm_cohort_creation ─────────────────────────────────────────────
+
+async def confirm_cohort_creation(proposal_json: str) -> str:
+    """Execute a cohort adapter creation after the user has confirmed the proposal.
+
+    Accepts the full JSON string returned by propose_cohort_adapter (or just the
+    inner proposal sub-dict).  Performs three steps atomically from the caller's
+    perspective:
+      1. Upserts adapter_registry with status='training'.
+      2. Triggers the LoRA fine-tuning job on Modal via trigger_lora_training.
+      3. Embeds cohort_name in lora_training_runs.metadata so the Modal webhook
+         can flip adapter_registry to status='active' when training completes.
+
+    The Modal webhook calls _handle_modal_webhook_internal on completion, which
+    automatically updates adapter_registry — no manual follow-up needed.
+
+    Args:
+        proposal_json: The JSON string from propose_cohort_adapter (pass the
+                       entire response, or just the "proposal" sub-object).
+
+    Returns:
+        JSON with job_id, cohort_name, hf_repo, status, and polling instructions.
+        On error: JSON with status="error" and reason.
+    """
+    try:
+        raw = json.loads(proposal_json) if isinstance(proposal_json, str) else proposal_json
+        proposal = raw.get("proposal") or raw
+    except (json.JSONDecodeError, TypeError) as exc:
+        return json.dumps({"status": "error", "reason": f"Invalid proposal_json: {exc}"})
+
+    cohort_name    = (proposal.get("cohort_name") or "").strip()
+    dataset_path   = (proposal.get("dataset_path") or "").strip()
+    base_model     = (proposal.get("base_model") or "Qwen/Qwen2.5-3B-Instruct").strip()
+    epochs         = int(proposal.get("epochs") or 3)
+    learning_rate  = float(proposal.get("learning_rate") or 2e-4)
+    rationale      = proposal.get("rationale") or ""
+
+    if not cohort_name:
+        return json.dumps({"status": "error", "reason": "proposal.cohort_name is required."})
+    if not dataset_path:
+        return json.dumps({
+            "status": "error",
+            "reason": (
+                "proposal.dataset_path is required. "
+                "Ask the user for a HuggingFace dataset repo ID (e.g. 'myorg/clinical-qa')."
+            ),
+        })
+
+    job_id = f"{cohort_name}-{int(datetime.now(timezone.utc).timestamp())}"
+
+    # Resolve HF namespace dynamically — never hardcoded
+    hf_namespace = _env("HF_NAMESPACE")
+    if not hf_namespace:
+        try:
+            hf_token = _require_env("HF_TOKEN")
+            hf_namespace = await _hf_whoami(hf_token)
+        except Exception as exc:
+            logger.warning("confirm_cohort_creation: namespace discovery failed: %s", exc)
+            hf_namespace = "unknown-namespace"
+    hf_repo = f"{hf_namespace}/companion-lora-{cohort_name}"
+
+    # Step 1 — upsert adapter_registry (status = 'training')
+    try:
+        from db.connection import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO adapter_registry
+                    (cohort_name, hf_repo, adapter_type, status, metadata)
+                VALUES ($1, $2, 'cohort', 'training', $3)
+                ON CONFLICT (cohort_name) DO UPDATE
+                    SET status   = 'training',
+                        hf_repo  = EXCLUDED.hf_repo,
+                        metadata = EXCLUDED.metadata
+                """,
+                cohort_name,
+                hf_repo,
+                json.dumps({"rationale": rationale, "job_id": job_id}),
+            )
+        logger.info("confirm_cohort_creation: adapter_registry upserted for %s", cohort_name)
+    except Exception as exc:
+        logger.error("confirm_cohort_creation: adapter_registry write failed: %s", exc)
+        return json.dumps({"status": "error", "reason": f"DB write failed: {exc}"})
+
+    # Step 2 — trigger Modal LoRA training
+    train_result_json = await trigger_lora_training(
+        dataset_path=dataset_path,
+        job_id=job_id,
+        base_model=base_model,
+        epochs=epochs,
+        learning_rate=learning_rate,
+    )
+    train_result = json.loads(train_result_json)
+
+    if train_result.get("status") == "error":
+        # Roll back adapter_registry to 'failed' so it doesn't block future attempts
+        try:
+            from db.connection import get_pool
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE adapter_registry SET status='failed' WHERE cohort_name=$1",
+                    cohort_name,
+                )
+        except Exception:
+            pass
+        return json.dumps({
+            "status": "error",
+            "cohort_name": cohort_name,
+            "reason": train_result.get("reason", "Modal training trigger failed"),
+        })
+
+    # Step 3 — embed cohort_name in lora_training_runs.metadata for webhook write-back
+    try:
+        from db.connection import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE lora_training_runs
+                SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
+                WHERE job_id = $2
+                """,
+                json.dumps({"cohort_name": cohort_name, "hf_repo": hf_repo}),
+                job_id,
+            )
+        logger.info(
+            "confirm_cohort_creation: cohort_name embedded in lora_training_runs for job %s",
+            job_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "confirm_cohort_creation: lora_training_runs metadata update failed "
+            "(non-fatal, webhook write-back may be skipped): %s",
+            exc,
+        )
+
+    return json.dumps({
+        "status": "training_queued",
+        "cohort_name": cohort_name,
+        "hf_repo": hf_repo,
+        "job_id": job_id,
+        "dataset_path": dataset_path,
+        "base_model": base_model,
+        "epochs": epochs,
+        "message": (
+            f"Cohort adapter '{cohort_name}' is now training on Modal (job: {job_id}). "
+            f"Weights will be pushed to '{hf_repo}' when complete. "
+            f"Poll get_lora_training_status(job_id='{job_id}') to track progress. "
+            f"adapter_registry will flip to status='active' automatically when the "
+            f"Modal webhook fires."
+        ),
     }, default=str)
 
 
@@ -750,6 +1126,54 @@ async def _handle_modal_webhook_internal(body: dict) -> dict:
         logger.info(
             "modal_webhook: job %s → %s (row_updated=%s)", job_id, new_status, updated
         )
+
+        # ── Write-back to adapter_registry on terminal states ──────────────
+        # When a training job completes or fails, flip the corresponding
+        # adapter_registry row so list_adapters and get_slm_status reflect
+        # the real state without any manual intervention.
+        if updated and is_terminal:
+            try:
+                async with pool.acquire() as conn:
+                    run_row = await conn.fetchrow(
+                        "SELECT metadata FROM lora_training_runs WHERE job_id = $1",
+                        job_id,
+                    )
+                    meta = (
+                        json.loads(run_row["metadata"])
+                        if run_row and run_row["metadata"]
+                        else {}
+                    )
+                    cohort_name_meta = meta.get("cohort_name")
+                    hf_repo_meta = meta.get("hf_repo") or meta.get("adapter_repo")
+                    if cohort_name_meta:
+                        if new_status == "completed":
+                            await conn.execute(
+                                """
+                                UPDATE adapter_registry
+                                SET status          = 'active',
+                                    last_trained_at = NOW(),
+                                    hf_repo         = COALESCE($2, hf_repo)
+                                WHERE cohort_name = $1
+                                """,
+                                cohort_name_meta,
+                                hf_repo_meta,
+                            )
+                        else:
+                            await conn.execute(
+                                """
+                                UPDATE adapter_registry
+                                SET status = 'failed'
+                                WHERE cohort_name = $1
+                                """,
+                                cohort_name_meta,
+                            )
+                        logger.info(
+                            "modal_webhook: adapter_registry[%s] → %s",
+                            cohort_name_meta, new_status,
+                        )
+            except Exception as exc:
+                logger.warning("modal_webhook: adapter_registry write-back failed: %s", exc)
+
         return {"ok": True, "job_id": job_id, "status": new_status, "row_updated": updated}
     except Exception as exc:
         logger.error("modal_webhook DB update failed: %s", exc)
@@ -908,6 +1332,8 @@ async def _get_slm_status_impl() -> str:
 
 def register(mcp: FastMCP) -> None:
     mcp.tool(call_slm)
+    mcp.tool(propose_cohort_adapter)
+    mcp.tool(confirm_cohort_creation)
     mcp.tool(trigger_lora_training)
     mcp.tool(get_lora_training_status)
     mcp.tool(manage_hf_endpoint)
