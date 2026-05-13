@@ -9,6 +9,7 @@ deliberation_flags instead of (or in addition to) deliberation_outputs.
 import hashlib
 import json
 import logging
+import re
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -53,8 +54,14 @@ def infer_flag_basis(flag_text: str) -> str:
 
 
 def compute_flag_fingerprint(patient_id: str, title: str, basis: str) -> str:
-    """SHA-256 fingerprint for deduplication across deliberation runs."""
-    raw = f"{patient_id}::{title.strip().lower()}::{basis}"
+    """SHA-256 fingerprint for deduplication across deliberation runs.
+
+    Normalises title by stripping punctuation and collapsing whitespace so
+    'HbA1c elevated' and 'HbA1c: Elevated' produce the same fingerprint.
+    """
+    normalised = re.sub(r"[^a-z0-9 ]+", " ", title.strip().lower())
+    normalised = " ".join(normalised.split())
+    raw = f"{patient_id}::{normalised}::{basis}"
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 

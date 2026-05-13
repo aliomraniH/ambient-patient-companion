@@ -390,3 +390,69 @@ async def test_post_ingest_row_is_fresh(db_pool, test_patient):
     assert _is_stale(row["last_ingested_at"], 24) is False, (
         "Just-ingested row must be fresh"
     )
+
+
+@pytest.mark.asyncio
+async def test_stale_deliberation_warning_when_skip_deliberation():
+    """When skip_deliberation=True and delib_last is older than half-TTL,
+    phases['artifacts']['stale_deliberation_warning'] must be True."""
+    import json
+    from unittest.mock import AsyncMock, patch, MagicMock
+    from datetime import datetime, timezone, timedelta
+
+    stale_delib_time = datetime.now(timezone.utc) - timedelta(hours=8)
+    patient_id = str(uuid.uuid4())
+
+    async def fake_get_delib_freshness(conn, pid):
+        return stale_delib_time  # 8h old; half of default 12h TTL = 6h
+
+    async def fake_get_skill_freshness(conn, pid, skill):
+        return None  # always stale so skills/artifacts run
+
+    async def fake_generate_previsit_brief(patient_id):
+        return json.dumps({"status": "ok"})
+
+    async def fake_compute_obt(patient_id, score_date):
+        return json.dumps({"status": "ok"})
+
+    async def fake_compute_risk(patient_id, score_date):
+        return json.dumps({"status": "ok"})
+
+    # Mock the DB pool and connection so the function can run in isolation.
+    # fetchrow returns None (no data track config, no freshness row) so
+    # ingestion and skills phases take the stale/skipped path.
+    mock_conn = AsyncMock()
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=None)
+    mock_conn.fetchrow = AsyncMock(return_value=None)
+    mock_pool = MagicMock()
+    mock_pool.acquire = MagicMock(return_value=mock_conn)
+
+    # get_pool is imported via "from db.connection import get_pool", so patch
+    # the name in the ingestion_tools module namespace.
+    with patch("skills.ingestion_tools.get_pool", AsyncMock(return_value=mock_pool)), \
+         patch("skills.ingestion_tools._get_deliberation_freshness", fake_get_delib_freshness), \
+         patch("skills.ingestion_tools._get_skill_freshness", fake_get_skill_freshness), \
+         patch("skills.ingestion_tools._is_stale", return_value=True), \
+         patch("skills.compute_obt_score.compute_obt_score", fake_compute_obt), \
+         patch("skills.compute_provider_risk.compute_provider_risk", fake_compute_risk), \
+         patch("skills.previsit_brief.generate_previsit_brief", fake_generate_previsit_brief):
+
+        orchestrate_refresh = _get_tool_fn("orchestrate_refresh")
+        result_str = await orchestrate_refresh(
+            patient_id=patient_id,
+            skip_deliberation=True,
+        )
+        result = json.loads(result_str)
+
+    phases = result.get("phases", {})
+    artifacts = phases.get("artifacts", {})
+    assert artifacts.get("stale_deliberation_warning") is True, (
+        f"Expected stale_deliberation_warning=True in artifacts, got: {artifacts}"
+    )
+    assert "deliberation_age_hours" in artifacts, (
+        f"Expected deliberation_age_hours in artifacts, got: {artifacts}"
+    )
+    assert artifacts["deliberation_age_hours"] > 6, (
+        "Expected deliberation_age_hours > 6 (half-TTL)"
+    )

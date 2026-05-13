@@ -260,6 +260,18 @@ async def call_slm(
         JSON string with keys: generated_text, model, usage, endpoint_url,
         multimodal, adapter_type.
         On error: JSON with status="error" and reason.
+
+    Integration note:
+        To route this output into the deliberation context, parse the result
+        and call store_slm_insight() from skills.slm_bridge:
+
+            result = json.loads(await call_slm(...))
+            if result.get("generated_text"):
+                await store_slm_insight(patient_id, result, source_context="my_task")
+
+        context_compiler.py reads all clinical_notes rows for a patient, so
+        the stored insight is automatically included in the next deliberation
+        without any further configuration.
     """
     adapter_type = (adapter_type or "base").strip().lower()
     if adapter_type not in _VALID_ADAPTER_TYPES:

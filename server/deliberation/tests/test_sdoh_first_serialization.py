@@ -20,7 +20,10 @@ _SAMPLE = dict(
     recent_labs=[{"name": "HbA1c", "value": 8.2, "unit": "%", "date": "2025-01-01", "in_range": False}],
     vital_trends=[{"name": "BP", "readings": [{"value": 135, "date": "2025-01-01"}]}],
     care_gaps=[{"gap_type": "eye_exam", "last_done": None, "due_date": "2025-03-01"}],
-    sdoh_flags=["food_insecurity", "transportation_barrier"],
+    sdoh_flags=[
+        {"domain": "food", "flag_code": "food_insecurity", "severity": "high"},
+        {"domain": "transportation", "flag_code": "transportation_barrier", "severity": "moderate"},
+    ],
     prior_patient_knowledge=[],
     applicable_guidelines=[],
     upcoming_appointments=[],

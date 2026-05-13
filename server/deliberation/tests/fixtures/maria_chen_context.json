@@ -50,7 +50,7 @@
     {"gap_type": "diabetes_education_referral",
      "last_completed": null, "due_date": null}
   ],
-  "sdoh_flags": ["recent_job_change"],
+  "sdoh_flags": [{"domain": "economic", "flag_code": "recent_job_change", "severity": "moderate"}],
   "prior_patient_knowledge": [],
   "applicable_guidelines": [
     {"source": "ADA", "version": "2026",

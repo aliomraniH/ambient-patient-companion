@@ -37,3 +37,15 @@ def test_fixture_has_applicable_guidelines():
     assert len(ctx.applicable_guidelines) >= 2
     sources = [g["source"] for g in ctx.applicable_guidelines]
     assert "ADA" in sources
+
+
+def test_sdoh_flags_include_severity():
+    """sdoh_flags must be list[dict] with domain, flag_code, and severity fields."""
+    data = json.loads((FIXTURES / "maria_chen_context.json").read_text())
+    ctx = PatientContextPackage(**data)
+    assert isinstance(ctx.sdoh_flags, list)
+    for flag in ctx.sdoh_flags:
+        assert isinstance(flag, dict), f"Expected dict, got {type(flag)}: {flag}"
+        assert "domain" in flag, f"Missing 'domain' in sdoh flag: {flag}"
+        assert "flag_code" in flag, f"Missing 'flag_code' in sdoh flag: {flag}"
+        assert "severity" in flag, f"Missing 'severity' in sdoh flag: {flag}"

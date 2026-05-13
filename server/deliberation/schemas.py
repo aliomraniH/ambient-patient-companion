@@ -48,7 +48,7 @@ class PatientContextPackage(BaseModel):
     recent_labs: list[dict]             # [{name, value, unit, date, in_range}]
     vital_trends: list[dict]            # [{name, readings: [{value, date}]}]
     care_gaps: list[dict]               # [{gap_type, last_done, due_date}]
-    sdoh_flags: list[str]               # ["food_insecurity", "transportation_barrier"]
+    sdoh_flags: list[dict]               # [{"domain": "food", "flag_code": "food_insecurity", "severity": "high"}]
     # Prior deliberation knowledge
     prior_patient_knowledge: list[dict] # from patient_knowledge table (is_current=true)
     # Relevant guidelines (pre-fetched from vector store)
@@ -235,3 +235,7 @@ class DeliberationResult(BaseModel):
     context_validation: dict = Field(default_factory=dict)
     # Behavioral V2 section — list of domain cards from the gap detector
     behavioral_section: list[dict] = Field(default_factory=list)
+    # Objections raised by synthesis reviewer on the re-deliberation pass that
+    # were not acted on (re-deliberation guard prevents a third pass). Exposed so
+    # callers can surface them for clinician review.
+    re_deliberation_suppressed_objections: list[str] = Field(default_factory=list)

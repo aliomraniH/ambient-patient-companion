@@ -98,17 +98,19 @@ class TestConvergence:
         assert _compute_convergence(a, b) == 1.0
 
     def test_no_overlap_zero_convergence(self):
+        # Use strings whose character trigrams are truly disjoint so
+        # trigram-Jaccard returns 0.0.
         a = RevisedAnalysis(
             model_id="claude", round_number=1,
             revised_findings=[
-                ClaimWithConfidence(claim="Finding A", confidence=0.9),
+                ClaimWithConfidence(claim="aaabbbccc", confidence=0.9),
             ],
             revisions_made=[], maintained_positions=[], raw_revision=""
         )
         b = RevisedAnalysis(
             model_id="gpt4", round_number=1,
             revised_findings=[
-                ClaimWithConfidence(claim="Finding B", confidence=0.8),
+                ClaimWithConfidence(claim="zzzyyywww", confidence=0.8),
             ],
             revisions_made=[], maintained_positions=[], raw_revision=""
         )
@@ -253,3 +255,34 @@ class TestLiveDeliberation:
         assert len(result.predicted_patient_questions) >= 1
         assert len(result.nudge_content) >= 1
         assert result.convergence_score > 0.0
+
+
+def test_suppressed_objections_field_default():
+    """re_deliberation_suppressed_objections defaults to [] and survives model_dump()."""
+    from server.deliberation.schemas import DeliberationResult
+    from datetime import datetime, timezone
+    result = DeliberationResult(
+        deliberation_id="test-id",
+        patient_id="p1",
+        timestamp=datetime.now(tz=timezone.utc),
+        trigger="manual",
+    )
+    assert result.re_deliberation_suppressed_objections == []
+    dumped = result.model_dump()
+    assert "re_deliberation_suppressed_objections" in dumped
+    assert dumped["re_deliberation_suppressed_objections"] == []
+
+
+def test_suppressed_objections_field_populated():
+    """re_deliberation_suppressed_objections stores string entries."""
+    from server.deliberation.schemas import DeliberationResult
+    from datetime import datetime, timezone
+    result = DeliberationResult(
+        deliberation_id="test-id",
+        patient_id="p1",
+        timestamp=datetime.now(tz=timezone.utc),
+        trigger="manual",
+        re_deliberation_suppressed_objections=["HbA1c threshold missing from synthesis"],
+    )
+    assert len(result.re_deliberation_suppressed_objections) == 1
+    assert "HbA1c" in result.re_deliberation_suppressed_objections[0]

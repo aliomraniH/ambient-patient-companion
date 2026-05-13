@@ -255,6 +255,32 @@ class DeliberationEngine:
                         load_prompt_fn=_load_prompt,
                         call_claude_fn=_call_claude,
                     )
+                    # Run a second review pass on the re-deliberation result.
+                    # A third re-deliberation pass is guarded by _re_deliberation_done,
+                    # so any objections raised here are captured but not acted on.
+                    try:
+                        re_synthesis_summary = json.dumps(
+                            result.model_dump(), default=str
+                        )[:3000]
+                        re_review = await review_synthesis(
+                            synthesis_text=re_synthesis_summary,
+                            patient_context_text=context_summary,
+                            agenda=agenda,
+                            deliberation_id=deliberation_id,
+                        )
+                        if re_review.re_deliberation_needed and re_review.re_deliberation_focus:
+                            result.re_deliberation_suppressed_objections = [
+                                re_review.re_deliberation_focus
+                            ]
+                            log.warning(
+                                "Re-deliberation review raised suppressed objections "
+                                "deliberation_id=%s focus=%s",
+                                deliberation_id, re_review.re_deliberation_focus,
+                            )
+                    except Exception as re_exc:
+                        log.warning(
+                            "Re-deliberation review pass failed (non-fatal): %s", re_exc
+                        )
             except Exception as e:
                 log.warning(
                     "Synthesis review failed — continuing with unreviewed result: %s", e

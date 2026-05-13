@@ -1400,13 +1400,19 @@ def register(mcp: FastMCP):
                     }
 
                 # ── Phase 2: Deliberation ───────────────────────────────
+                # Fetch delib_last unconditionally so Phase 4 can compute
+                # deliberation_age_hours and emit stale_deliberation_warning
+                # even when skip_deliberation=True.
+                try:
+                    delib_last: datetime | None = await _get_deliberation_freshness(
+                        conn, patient_id,
+                    )
+                except Exception:
+                    delib_last = None
                 if skip_deliberation:
                     phases["deliberation"]["detail"] = "skipped by caller"
                 else:
                     try:
-                        delib_last = await _get_deliberation_freshness(
-                            conn, patient_id,
-                        )
                         delib_ttl = FRESHNESS_TTL.get("deliberation", 12)
                         if force or _is_stale(delib_last, delib_ttl):
                             payload = json.dumps({
@@ -1513,10 +1519,24 @@ def register(mcp: FastMCP):
                     )
                     if force or _is_stale(brief_last, brief_ttl):
                         await generate_previsit_brief(patient_id=patient_id)
-                        phases["artifacts"] = {
+                        artifact_detail: dict = {
                             "status": "completed",
                             "detail": "pre-visit brief regenerated",
                         }
+                        if delib_last is not None:
+                            delib_age_hours = (
+                                datetime.now(timezone.utc) - ensure_aware(delib_last)
+                            ).total_seconds() / 3600
+                            artifact_detail["deliberation_age_hours"] = round(delib_age_hours, 2)
+                            delib_half_ttl = FRESHNESS_TTL.get("deliberation", 12) / 2
+                            if skip_deliberation and delib_age_hours > delib_half_ttl:
+                                artifact_detail["stale_deliberation_warning"] = True
+                                logger.warning(
+                                    "orchestrate_refresh: pre-visit brief generated from "
+                                    "deliberation %.1fh old (half-TTL %.1fh) for patient %s",
+                                    delib_age_hours, delib_half_ttl, patient_id,
+                                )
+                        phases["artifacts"] = artifact_detail
                     else:
                         phases["artifacts"]["detail"] = (
                             "artifacts still fresh"

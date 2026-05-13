@@ -391,7 +391,10 @@ async def compile_patient_context(
             }
             for g in care_gaps
         ],
-        sdoh_flags=[r.get("domain", r.get("flag_code", "")) for r in sdoh_flags],
+        sdoh_flags=[
+            {"domain": r.get("domain", ""), "flag_code": r.get("flag_code", ""), "severity": r.get("severity", "unknown")}
+            for r in sdoh_flags
+        ],
         prior_patient_knowledge=[
             {
                 "knowledge_type": k["knowledge_type"],

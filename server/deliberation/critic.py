@@ -5,28 +5,51 @@ Models then revise based on critique. Repeat up to max_rounds.
 """
 import asyncio
 import json
+import logging
 from .schemas import (
     IndependentAnalysis, CrossCritique, RevisedAnalysis,
     PatientContextPackage, ClaimWithConfidence
 )
 from .json_utils import strip_markdown_fences
 
+log = logging.getLogger(__name__)
 
-CONVERGENCE_THRESHOLD = 0.90  # semantic similarity score to stop early
+CONVERGENCE_THRESHOLD = 0.90  # similarity score threshold for early exit
+
+
+def _trigrams(text: str) -> set[str]:
+    """Character-level trigrams of a string for fuzzy similarity scoring."""
+    t = text.lower()
+    return {t[i:i + 3] for i in range(len(t) - 2)} if len(t) >= 3 else {t}
+
+
+def _claim_trigram_set(claims) -> set[str]:
+    """Union of all trigrams across a list of ClaimWithConfidence objects."""
+    result: set[str] = set()
+    for f in claims:
+        result |= _trigrams(f.claim)
+    return result
 
 
 def _compute_convergence(a: RevisedAnalysis, b: RevisedAnalysis) -> float:
     """
-    Estimate convergence between two revised analyses.
-    Simple overlap metric on finding texts — replace with
-    sentence-transformer cosine similarity in production.
+    Trigram-Jaccard convergence between two revised analyses.
+
+    Character trigrams are significantly more robust to paraphrasing than
+    exact token overlap. Two models writing 'HbA1c is elevated above ADA
+    target' and 'glycated haemoglobin exceeds guideline threshold' will still
+    share trigrams on shared clinical substrings ('a1c', 'abo', 'arget', etc.).
+
+    convergence_method: 'trigram_jaccard'
+    Upgrade path: replace with cosine similarity on sentence-transformer
+    embeddings when the embedding service is available.
     """
-    a_claims = set(f.claim.lower() for f in a.revised_findings)
-    b_claims = set(f.claim.lower() for f in b.revised_findings)
-    if not a_claims or not b_claims:
+    a_trigrams = _claim_trigram_set(a.revised_findings)
+    b_trigrams = _claim_trigram_set(b.revised_findings)
+    if not a_trigrams or not b_trigrams:
         return 0.0
-    intersection = len(a_claims & b_claims)
-    union = len(a_claims | b_claims)
+    intersection = len(a_trigrams & b_trigrams)
+    union = len(a_trigrams | b_trigrams)
     return intersection / union if union > 0 else 0.0
 
 
@@ -152,9 +175,12 @@ async def run_critique_rounds(
     final_convergence = 0.0
     round_num = 0
 
+    degraded_rounds: list[int] = []
+
     for round_num in range(1, max_rounds + 1):
-        # Both models critique each other in parallel
-        claude_critiques_gpt4, gpt4_critiques_claude = await asyncio.gather(
+        # Both models critique each other in parallel; failures are returned as
+        # exceptions rather than propagated so one model failure doesn't abort.
+        critique_results = await asyncio.gather(
             _critique_with_model(
                 "claude-sonnet-4-20250514", current_gpt4, context,
                 round_num, load_prompt_fn, call_claude_fn
@@ -162,39 +188,100 @@ async def run_critique_rounds(
             _critique_with_model(
                 "gpt-4o", current_claude, context,
                 round_num, load_prompt_fn, call_gpt4_fn
+            ),
+            return_exceptions=True,
+        )
+        claude_critiques_gpt4, gpt4_critiques_claude = critique_results
+
+        claude_critique_failed = isinstance(claude_critiques_gpt4, Exception)
+        gpt4_critique_failed = isinstance(gpt4_critiques_claude, Exception)
+
+        if claude_critique_failed and gpt4_critique_failed:
+            log.warning(
+                "Both critique models failed round %d — skipping revision: %s | %s",
+                round_num, claude_critiques_gpt4, gpt4_critiques_claude,
             )
-        )
+            degraded_rounds.append(round_num)
+            continue
 
-        # Each model revises based on critique received
-        claude_revised, gpt4_revised = await asyncio.gather(
-            _revise_with_model("claude-sonnet-4-20250514", current_claude,
-                               gpt4_critiques_claude, context, round_num,
-                               load_prompt_fn, call_claude_fn),
-            _revise_with_model("gpt-4o", current_gpt4,
-                               claude_critiques_gpt4, context, round_num,
-                               load_prompt_fn, call_gpt4_fn)
-        )
+        if claude_critique_failed:
+            log.warning("Claude critique failed round %d — using GPT-4o critique only: %s",
+                        round_num, claude_critiques_gpt4)
+            degraded_rounds.append(round_num)
+            # GPT-4o critiques Claude; Claude has no critique to give GPT-4o
+            revision_results = await asyncio.gather(
+                _revise_with_model("claude-sonnet-4-20250514", current_claude,
+                                   gpt4_critiques_claude, context, round_num,
+                                   load_prompt_fn, call_claude_fn),
+                return_exceptions=True,
+            )
+            claude_revised_r = revision_results[0]
+            gpt4_revised = current_gpt4  # type: ignore[assignment]
+            claude_revised = claude_revised_r if not isinstance(claude_revised_r, Exception) else current_claude  # type: ignore[assignment]
+        elif gpt4_critique_failed:
+            log.warning("GPT-4o critique failed round %d — using Claude critique only: %s",
+                        round_num, gpt4_critiques_claude)
+            degraded_rounds.append(round_num)
+            revision_results = await asyncio.gather(
+                _revise_with_model("gpt-4o", current_gpt4,
+                                   claude_critiques_gpt4, context, round_num,
+                                   load_prompt_fn, call_gpt4_fn),
+                return_exceptions=True,
+            )
+            gpt4_revised_r = revision_results[0]
+            claude_revised = current_claude  # type: ignore[assignment]
+            gpt4_revised = gpt4_revised_r if not isinstance(gpt4_revised_r, Exception) else current_gpt4  # type: ignore[assignment]
+        else:
+            # Both critiques succeeded — run revisions in parallel
+            revision_results = await asyncio.gather(
+                _revise_with_model("claude-sonnet-4-20250514", current_claude,
+                                   gpt4_critiques_claude, context, round_num,
+                                   load_prompt_fn, call_claude_fn),
+                _revise_with_model("gpt-4o", current_gpt4,
+                                   claude_critiques_gpt4, context, round_num,
+                                   load_prompt_fn, call_gpt4_fn),
+                return_exceptions=True,
+            )
+            claude_revised, gpt4_revised = revision_results
+            if isinstance(claude_revised, Exception):
+                log.warning("Claude revision failed round %d: %s", round_num, claude_revised)
+                claude_revised = current_claude
+                if round_num not in degraded_rounds:
+                    degraded_rounds.append(round_num)
+            if isinstance(gpt4_revised, Exception):
+                log.warning("GPT-4o revision failed round %d: %s", round_num, gpt4_revised)
+                gpt4_revised = current_gpt4
+                if round_num not in degraded_rounds:
+                    degraded_rounds.append(round_num)
 
-        transcript["phase2_rounds"].append({
-            "round": round_num,
-            "claude_critique_of_gpt4": claude_critiques_gpt4.model_dump(),
-            "gpt4_critique_of_claude": gpt4_critiques_claude.model_dump(),
-            "claude_revised": claude_revised.model_dump(),
-            "gpt4_revised": gpt4_revised.model_dump()
-        })
+        round_entry: dict = {"round": round_num}
+        if not isinstance(claude_critiques_gpt4, Exception):
+            round_entry["claude_critique_of_gpt4"] = claude_critiques_gpt4.model_dump()
+        if not isinstance(gpt4_critiques_claude, Exception):
+            round_entry["gpt4_critique_of_claude"] = gpt4_critiques_claude.model_dump()
+        if hasattr(claude_revised, "model_dump"):
+            round_entry["claude_revised"] = claude_revised.model_dump()
+        if hasattr(gpt4_revised, "model_dump"):
+            round_entry["gpt4_revised"] = gpt4_revised.model_dump()
+        transcript["phase2_rounds"].append(round_entry)
 
-        final_convergence = _compute_convergence(claude_revised, gpt4_revised)
+        # Only compute convergence when both revised analyses are real objects
+        if hasattr(claude_revised, "key_findings") and hasattr(gpt4_revised, "key_findings"):
+            final_convergence = _compute_convergence(claude_revised, gpt4_revised)
+            if final_convergence >= CONVERGENCE_THRESHOLD:
+                break
 
-        if final_convergence >= CONVERGENCE_THRESHOLD:
-            break
-
-        current_claude = _analysis_from_revision(claude_revised)
-        current_gpt4 = _analysis_from_revision(gpt4_revised)
+        if hasattr(claude_revised, "key_findings"):
+            current_claude = _analysis_from_revision(claude_revised)
+        if hasattr(gpt4_revised, "key_findings"):
+            current_gpt4 = _analysis_from_revision(gpt4_revised)
 
     return {
         "transcript": transcript,
         "final_claude_revision": current_claude,
         "final_gpt4_revision": current_gpt4,
         "convergence_score": final_convergence,
-        "rounds_completed": round_num
+        "rounds_completed": round_num,
+        "convergence_method": "trigram_jaccard",
+        "degraded_rounds": degraded_rounds,
     }
